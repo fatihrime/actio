@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Checks that the tools Actio needs are installed. Installs nothing.
+# Exit code: 0 when every required tool is present, 1 otherwise.
+# Works with the bash 3.2 that ships with macOS, so: no associative arrays.
+set -u
+
+if [ -t 1 ]; then G=$'\033[32m' Y=$'\033[33m' R=$'\033[31m' N=$'\033[0m'; else G='' Y='' R='' N=''; fi
+
+missing=0
+ok()   { printf '  %s✓%s %-14s %s\n' "$G" "$N" "$1" "$2"; }
+warn() { printf '  %s!%s %-14s %s\n' "$Y" "$N" "$1" "$2"; }
+fail() { printf '  %s✗%s %-14s %s\n' "$R" "$N" "$1" "$2"; missing=1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# First "X.Y" or "X.Y.Z" found in a command's output.
+version_of() { "$@" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1; }
+
+# True when dotted version $1 >= $2.
+version_ge() {
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -n 1)" = "$2" ]
+}
+
+echo "Required"
+
+if have git; then ok git "$(version_of git --version)"; else fail git "install Git: https://git-scm.com/downloads"; fi
+
+if have docker; then
+  if docker compose version >/dev/null 2>&1; then
+    ok docker "$(version_of docker --version), compose $(version_of docker compose version)"
+  else
+    fail docker "the Docker Compose v2 plugin ('docker compose') is missing"
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    warn docker-daemon "not running: start Docker Desktop (macOS) or the docker service (Linux)"
+  fi
+else
+  fail docker "install Docker: https://docs.docker.com/get-docker/"
+fi
+
+if have uv; then
+  ok uv "$(version_of uv --version)"
+else
+  fail uv "brew install uv   (or: curl -LsSf https://astral.sh/uv/install.sh | sh)"
+fi
+
+if have node; then
+  node_version="$(version_of node --version)"
+  if version_ge "$node_version" 24.0.0; then
+    ok node "$node_version"
+  else
+    fail node "found $node_version, need >= 24 (brew install node@24)"
+  fi
+else
+  fail node "install Node.js 24: brew install node@24"
+fi
+
+if have pnpm; then
+  ok pnpm "$(version_of pnpm --version)"
+else
+  fail pnpm "corepack enable pnpm   (corepack ships with Node 24)"
+fi
+
+echo
+echo "Optional"
+
+if have ollama; then
+  if curl -fsS --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+    ok ollama "$(version_of ollama --version), server running"
+  else
+    warn ollama "installed but not serving: run 'ollama serve' or open the Ollama app"
+  fi
+else
+  warn ollama "not installed; needed only for real local models (tests use a fake LLM): https://ollama.com/download"
+fi
+
+echo
+if [ "$missing" -eq 0 ]; then
+  echo "All required tools are present."
+else
+  echo "Some required tools are missing; see the hints above. Nothing was installed."
+fi
+exit "$missing"
