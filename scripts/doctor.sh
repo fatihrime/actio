@@ -58,7 +58,7 @@ fi
 if have pnpm; then
   ok pnpm "$(version_of pnpm --version)"
 else
-  fail pnpm "corepack enable pnpm   (corepack ships with Node 24)"
+  fail pnpm "npm install -g pnpm   (or another method: https://pnpm.io/installation)"
 fi
 
 echo

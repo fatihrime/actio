@@ -1,0 +1,86 @@
+# Python workspace root. The root is not a package: `apps/api` and, later, `packages/*`
+# are the members. This file holds the shared dev tools and their configuration.
+
+[tool.uv]
+required-version = ">=0.13"
+# Always use uv's own CPython build, so conda, pyenv or Homebrew Pythons can't leak in.
+# Override with UV_PYTHON_PREFERENCE=system if you need to.
+python-preference = "only-managed"
+
+[tool.uv.workspace]
+members = ["apps/api"]
+
+[tool.uv.sources]
+actio = { workspace = true }
+
+[dependency-groups]
+# `uv sync` installs this group by default, so one command sets up every member and tool.
+dev = [
+    "actio",
+    "httpx>=0.28.1",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+[tool.pytest]
+minversion = "9.0"
+testpaths = ["apps/api/tests"]
+# importlib mode lets test files in different packages share names.
+addopts = ["--import-mode=importlib", "-ra"]
+strict = true
+filterwarnings = ["error"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["apps/api/src"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # Pyflakes
+    "I",       # import sorting
+    "N",       # naming
+    "UP",      # modern syntax for the target version
+    "B",       # likely bugs
+    "A",       # shadowed builtins
+    "C4",      # comprehensions
+    "DTZ",     # naive datetimes: usage windows depend on correct time zones
+    "T20",     # stray print()
+    "PT",      # pytest style
+    "RET",     # return statements
+    "SIM",     # simplifications
+    "TID",     # import rules (no relative imports)
+    "ARG",     # unused arguments
+    "PTH",     # pathlib over os.path
+    "ASYNC",   # blocking calls in async code
+    "S",       # security (bandit)
+    "BLE",     # blind `except Exception`
+    "FAST",    # FastAPI conventions
+    "PERF",    # performance pitfalls
+    "RUF",     # Ruff's own rules
+]
+ignore = ["E501"]  # the formatter owns line length
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101"]  # pytest is built on assert
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+plugins = ["pydantic.mypy"]
+files = ["apps/api/src", "apps/api/tests"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true

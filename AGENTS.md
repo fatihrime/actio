@@ -39,13 +39,17 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 |---|---|
 | `make help` | List available targets |
 | `make doctor` | Check that required tools are installed. Prints install hints; installs nothing |
+| `make install` | Install the Python workspace and dev tools into `.venv` (`uv sync`) |
+| `make check` | Run all checks: lint, formatting, types and tests. Run it before every commit |
+| `make fmt` | Format code and apply safe lint fixes |
 
-More targets (`bootstrap`, `dev`, `test`, `e2e`) arrive during Phase 0.
+`make lint` and `make test` run the two halves of `make check` on their own. More targets (`bootstrap`, `dev`, `e2e`) arrive during Phase 0.
 
 ## Conventions
 
 - **Python:**
   - 3.13, managed with `uv`;
+  - add dependencies with `uv add`, never `pip`; run tools through `uv run` or `make`;
   - formatted and linted with `ruff`;
   - `mypy --strict` on core packages;
   - tests with `pytest`.
