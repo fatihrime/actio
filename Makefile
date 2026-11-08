@@ -11,15 +11,14 @@ help: ## List available targets
 doctor: ## Check that required tools are installed (installs nothing)
 	@./scripts/doctor.sh
 
-install: ## Install the Python workspace and dev tools into .venv
+install: ## Install the Python workspace, dev tools and git hooks
 	uv sync
+	uv run pre-commit install
 
-check: lint test ## Run all checks: lint, formatting, types and tests
+check: lint test ## Run everything CI runs: static checks, then tests
 
-lint: ## Lint, check formatting and type-check (changes nothing)
-	uv run ruff check .
-	uv run ruff format --check .
-	uv run mypy
+lint: ## Run every static check on all files; fixes what it safely can
+	uv run pre-commit run --all-files --show-diff-on-failure
 
 fmt: ## Format code and apply safe lint fixes
 	uv run ruff format .

@@ -1,0 +1,76 @@
+# Every static check for this repo, defined once. They run:
+#   - on staged files at each `git commit` (hooks installed by `make install`);
+#   - on all files with `make lint` and `make check`;
+#   - in CI, through `make check`.
+# Update the pinned versions with `uv run pre-commit autoupdate --freeze`.
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
+
+repos:
+  # Generic hygiene: whitespace, line endings, merge markers, oversized files.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: check-added-large-files # keeps models, videos and datasets out of git
+        args: [--maxkb=500]
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+  # Python, with the tool versions locked in uv.lock.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: unsupported
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: unsupported
+        types_or: [python, pyi]
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run mypy
+        language: unsupported
+        types_or: [python, pyi]
+        pass_filenames: false
+
+  # Shell scripts.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: a6564f5d57444e123433a5c9af733e3975c77229  # frozen: v0.11.0.1-1
+    hooks:
+      - id: shellcheck
+
+  # GitHub Actions workflows: correctness (actionlint), then security (zizmor).
+  - repo: https://github.com/rhysd/actionlint
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca  # frozen: v1.7.12
+    hooks:
+      - id: actionlint
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: 06a39750ec31860bb44f2acf67182c40016cd1e7  # frozen: v1.32.0
+    hooks:
+      - id: zizmor
+
+  # Secrets and private names. gitleaks scans what you're committing; the denylist
+  # blocks terms from ~/.config/actio/denylist.txt in files and commit messages.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1 (same version as CI)
+    hooks:
+      - id: gitleaks
+  - repo: local
+    hooks:
+      - id: denylist
+        name: private-names denylist
+        entry: scripts/check-denylist.sh
+        language: unsupported_script
+        stages: [pre-commit, commit-msg]

@@ -15,6 +15,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 - **No secrets in the repo.**
   - Never commit `.env` files, keys or tokens.
   - Tests must never read `.env`; they use fakes and generated test config.
+  - Commit hooks scan for secrets (gitleaks) and for private names listed in `~/.config/actio/denylist.txt`, which stays outside the repo.
+- **Never bypass the checks.** Don't use `git commit --no-verify`; fix what the hook reports.
 - **Written from scratch.**
   - Don't paste code from other projects.
   - Third-party code enters only as declared dependencies with compatible licenses (MIT, BSD, Apache-2.0).
@@ -39,11 +41,11 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 |---|---|
 | `make help` | List available targets |
 | `make doctor` | Check that required tools are installed. Prints install hints; installs nothing |
-| `make install` | Install the Python workspace and dev tools into `.venv` (`uv sync`) |
-| `make check` | Run all checks: lint, formatting, types and tests. Run it before every commit |
+| `make install` | Install the Python workspace and dev tools into `.venv`, plus the git hooks |
+| `make check` | Run everything CI runs: every static check on all files, then the tests |
 | `make fmt` | Format code and apply safe lint fixes |
 
-`make lint` and `make test` run the two halves of `make check` on their own. More targets (`bootstrap`, `dev`, `e2e`) arrive during Phase 0.
+`make lint` and `make test` run the two halves of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. More targets (`bootstrap`, `dev`, `e2e`) arrive during Phase 0.
 
 ## Conventions
 

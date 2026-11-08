@@ -1,5 +1,7 @@
 # Actio
 
+[![CI](https://github.com/fatihrime/actio/actions/workflows/ci.yml/badge.svg)](https://github.com/fatihrime/actio/actions/workflows/ci.yml)
+
 > A self-hostable, local-first AI platform: a ChatGPT/Claude-style assistant and an OpenAI- and Anthropic-compatible developer gateway, both governed by Claude-inspired usage limits whose correctness is tested.
 
 **Status:** early development, Phase 0 (foundation). This README grows with each phase, and nothing below counts as done until it ships with tests.
