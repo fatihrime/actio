@@ -7,6 +7,7 @@ queue in Phase 1.
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 
 import uvicorn
 
@@ -20,7 +21,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--role", choices=ROLES, default="api", help="process to run (default: %(default)s)"
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--reload", action="store_true", help="restart when the code changes (development only)"
+    )
+    args = parser.parse_args(argv)
 
     settings = Settings()
     uvicorn.run(
@@ -30,4 +34,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         port=settings.port,
         log_level=settings.log_level,
         server_header=False,  # don't advertise the server software
+        reload=args.reload,
+        # Watch only this package, not the whole repository.
+        reload_dirs=[str(Path(__file__).parent)] if args.reload else None,
     )

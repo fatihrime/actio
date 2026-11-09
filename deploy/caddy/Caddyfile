@@ -1,0 +1,26 @@
+# Caddy is the stack's single entry point: http://localhost:8080 in development.
+# /api/* and /v1/* go to the API; every other path goes to the web app.
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	@api path /api/* /v1/*
+	handle @api {
+		reverse_proxy {$ACTIO_API_UPSTREAM} {
+			flush_interval -1 # pass streamed tokens (server-sent events) through at once
+		}
+	}
+	handle {
+		reverse_proxy {$ACTIO_WEB_UPSTREAM} {
+			flush_interval -1
+		}
+	}
+}
+
+# Docker's health check calls this; it is reachable only inside the container.
+http://127.0.0.1:2020 {
+	bind 127.0.0.1
+	respond "ok"
+}

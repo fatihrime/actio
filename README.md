@@ -38,9 +38,15 @@ _Filled in as each piece ships, with links to the design records (ADRs), tests a
 
 ## Quickstart
 
-_Coming in Phase 0: three commands on macOS or Linux._
+On macOS with [Docker Desktop](https://docs.docker.com/desktop/) running:
 
-For now, run `make doctor` to check that your machine has the required tools.
+```sh
+git clone https://github.com/fatihrime/actio.git && cd actio
+make bootstrap   # checks your tools, installs everything, creates .env with random passwords
+make dev         # starts the stack; open http://localhost:8080
+```
+
+`make doctor` lists any missing tools with install hints, and `make down` stops the containers. A fully containerised mode, for Linux and CI, arrives later in Phase 0.
 
 ## Roadmap
 

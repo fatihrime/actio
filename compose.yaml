@@ -1,0 +1,75 @@
+# The local stack behind `make dev`. Postgres and Valkey run here. The API and the web
+# app run natively with hot reload, and Caddy puts them behind one address:
+# http://localhost:8080. See docs/adr/0004-local-development-stack.md.
+#
+# Every published port listens on 127.0.0.1 only, and every image is pinned by digest.
+name: actio
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  caddy:
+    image: caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee
+    <<: *hardening
+    user: "1000:1000"
+    tmpfs: [/config, /data] # Caddy's runtime state; nothing worth keeping
+    environment:
+      # The API and web app run natively; Docker Desktop routes this name to the host.
+      ACTIO_API_UPSTREAM: host.docker.internal:8000
+      ACTIO_WEB_UPSTREAM: host.docker.internal:3000
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "127.0.0.1:${ACTIO_HTTP_PORT:-8080}:8080"
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2020"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17@sha256:7d0a41464797aeb9862dfdc0bbf1526b82cfd324cdd8036df19e3545f4a9ccb8
+    <<: *hardening
+    user: postgres
+    tmpfs: [/tmp, /var/run/postgresql]
+    environment:
+      POSTGRES_USER: actio
+      POSTGRES_DB: actio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make bootstrap to create .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${ACTIO_POSTGRES_PORT:-5432}:5432"
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "pg_isready", "--username=actio", "--dbname=actio"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    <<: *hardening
+    user: valkey
+    command: [valkey-server, --requirepass, "${VALKEY_PASSWORD:?run make bootstrap to create .env}"]
+    environment:
+      VALKEYCLI_AUTH: ${VALKEY_PASSWORD:?run make bootstrap to create .env} # for the health check
+    volumes:
+      - valkey-data:/data
+    ports:
+      - "127.0.0.1:${ACTIO_VALKEY_PORT:-6379}:6379"
+    mem_limit: 256m
+    healthcheck:
+      # valkey-cli exits 0 even when it can't log in, so check for the actual reply.
+      test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:
+  valkey-data:

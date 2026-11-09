@@ -44,6 +44,12 @@ else
   fail uv "brew install uv   (or: curl -LsSf https://astral.sh/uv/install.sh | sh)"
 fi
 
+if have openssl; then
+  ok openssl "$(version_of openssl version)"
+else
+  fail openssl "install OpenSSL; make uses it to generate the passwords in .env"
+fi
+
 # No separate Node.js check: pnpm installs the Node.js version pinned in package.json.
 if have pnpm; then
   pnpm_version="$(version_of pnpm --version)"

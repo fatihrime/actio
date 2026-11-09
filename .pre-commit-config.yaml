@@ -82,6 +82,17 @@ repos:
         exclude_types: [zsh]
         require_serial: true # one call sees every script, so it can follow `source`
 
+  # Docker Compose: the file must parse and its variables must resolve. Placeholder
+  # passwords stand in for .env, which CI doesn't have. No running Docker daemon needed.
+  - repo: local
+    hooks:
+      - id: compose-config
+        name: docker compose config
+        entry: env POSTGRES_PASSWORD=placeholder VALKEY_PASSWORD=placeholder docker compose config --quiet
+        language: unsupported
+        files: ^(compose\.yaml|\.env\.example)$
+        pass_filenames: false
+
   # GitHub Actions workflows: correctness (actionlint), then security (zizmor).
   - repo: https://github.com/rhysd/actionlint
     rev: 914e7df21a07ef503a81201c76d2b11c789d3fca  # frozen: v1.7.12

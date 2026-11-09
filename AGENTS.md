@@ -32,6 +32,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `packages/llm` | Model router and provider adapters |
 | `packages/fakellm` | Deterministic fake LLM server for tests |
 | `config/` | `models.yaml`, `plans.yaml`, assistant profiles, demo knowledge base |
+| `compose.yaml` | The local stack's Docker services: Postgres, Valkey, Caddy |
+| `deploy/caddy/` | Caddy config: one entry point routing `/api/*` and `/v1/*` to the API, the rest to the web app |
 | `docs/adr/` | Architecture decision records |
 | `scripts/` | Developer scripts |
 
@@ -41,11 +43,16 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 |---|---|
 | `make help` | List available targets |
 | `make doctor` | Check that required tools are installed. Prints install hints; installs nothing |
+| `make bootstrap` | Set up a fresh clone: `doctor`, `install`, a `.env` with random passwords, then pull the images |
 | `make install` | Install the Python and JavaScript workspaces with their dev tools, plus the git hooks |
+| `make dev` | Run the stack at http://localhost:8080: Docker services, plus the API and web app natively with hot reload |
+| `make down` | Stop the Docker services. Their data stays in Docker volumes |
 | `make check` | Run everything CI runs: every static check on all files, the tests, then the web build |
 | `make fmt` | Format code and apply safe lint fixes |
 
-`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Start the web app alone with `pnpm --dir apps/web dev`, and the fake LLM server with `uv run fakellm`. More targets (`bootstrap`, `dev`, `e2e`) arrive during Phase 0.
+`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. More targets (`up`, `e2e`) arrive during Phase 0.
+
+`make dev` needs Docker Desktop: its containers reach the natively running API and web app through `host.docker.internal`. `.env` holds the local passwords. It is created once from `.env.example`, git-ignored, and never read by tests. Postgres keeps the password it first started with, so if you recreate `.env`, also wipe the local data with `docker compose down --volumes`.
 
 ## Conventions
 
