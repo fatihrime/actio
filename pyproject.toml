@@ -1,5 +1,5 @@
-# Python workspace root. The root is not a package: `apps/api` and, later, `packages/*`
-# are the members. This file holds the shared dev tools and their configuration.
+# Python workspace root. The root is not a package: `apps/*` and `packages/*` hold the
+# members. This file holds the shared dev tools and their configuration.
 
 [tool.uv]
 required-version = ">=0.13"
@@ -8,17 +8,21 @@ required-version = ">=0.13"
 python-preference = "only-managed"
 
 [tool.uv.workspace]
-members = ["apps/api"]
+members = ["apps/api", "packages/fakellm"]
 
 [tool.uv.sources]
 actio = { workspace = true }
+actio-fakellm = { workspace = true }
 
 [dependency-groups]
 # `uv sync` installs this group by default, so one command sets up every member and tool.
 dev = [
     "actio",
+    "actio-fakellm",
     "httpx>=0.28.1",
+    "httpx2>=2.16.0",
     "mypy>=2.4.1",
+    "openai>=3.46.0",
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",
     "ruff>=0.17.4",
@@ -27,7 +31,7 @@ dev = [
 
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["apps/api/tests"]
+testpaths = ["apps/api/tests", "packages/fakellm/tests"]
 # importlib mode lets test files in different packages share names.
 addopts = ["--import-mode=importlib", "-ra"]
 strict = true
@@ -36,7 +40,7 @@ filterwarnings = ["error"]
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-src = ["apps/api/src"]
+src = ["apps/api/src", "packages/fakellm/src"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -80,7 +84,11 @@ strict = true
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 plugins = ["pydantic.mypy"]
-files = ["apps/api/src", "apps/api/tests"]
+files = ["apps/api/src", "apps/api/tests", "packages/fakellm/src", "packages/fakellm/tests"]
+# Name modules by their path, so each test folder's conftest.py is a distinct module.
+# The src folders are roots, so `actio` and `actio_fakellm` keep their import names.
+explicit_package_bases = true
+mypy_path = ["apps/api/src", "packages/fakellm/src"]
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

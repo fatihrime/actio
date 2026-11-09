@@ -45,13 +45,14 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `make check` | Run everything CI runs: every static check on all files, the tests, then the web build |
 | `make fmt` | Format code and apply safe lint fixes |
 
-`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Start the web app alone with `pnpm --dir apps/web dev`. More targets (`bootstrap`, `dev`, `e2e`) arrive during Phase 0.
+`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Start the web app alone with `pnpm --dir apps/web dev`, and the fake LLM server with `uv run fakellm`. More targets (`bootstrap`, `dev`, `e2e`) arrive during Phase 0.
 
 ## Conventions
 
 - **Python:**
   - 3.13, managed with `uv`;
   - add dependencies with `uv add`, never `pip`; run tools through `uv run` or `make`;
+  - workspace packages are named `actio-<name>` and imported as `actio_<name>`, such as `actio-fakellm`;
   - formatted and linted with `ruff`;
   - `mypy --strict` on core packages;
   - tests with `pytest`.
