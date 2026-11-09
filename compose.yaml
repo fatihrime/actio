@@ -1,8 +1,14 @@
-# The local stack behind `make dev`. Postgres and Valkey run here. The API and the web
-# app run natively with hot reload, and Caddy puts them behind one address:
-# http://localhost:8080. See docs/adr/0004-local-development-stack.md.
+# The whole stack in containers, shaped like production: `make up` serves it at
+# http://localhost:8080. `make dev` adds compose.dev.yaml and runs only Postgres,
+# Valkey and Caddy here, with the API and the web app native.
+# See docs/adr/0004-local-development-stack.md and 0005-container-images.md.
 #
-# Every published port listens on 127.0.0.1 only, and every image is pinned by digest.
+# Rules, checked by deploy/tests/test_compose_policy.py:
+#   - only Caddy publishes a port, on 127.0.0.1;
+#   - every image is pinned by digest, or built from Dockerfiles whose base images are;
+#   - the data services sit only on the internal network;
+#   - every container runs as a non-root user, read-only, without Linux capabilities,
+#     with a memory limit and a health check.
 name: actio
 
 x-hardening: &hardening
@@ -17,16 +23,59 @@ services:
     user: "1000:1000"
     tmpfs: [/config, /data] # Caddy's runtime state; nothing worth keeping
     environment:
-      # The API and web app run natively; Docker Desktop routes this name to the host.
-      ACTIO_API_UPSTREAM: host.docker.internal:8000
-      ACTIO_WEB_UPSTREAM: host.docker.internal:3000
+      ACTIO_API_UPSTREAM: api:8000
+      ACTIO_WEB_UPSTREAM: web:3000
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
       - "127.0.0.1:${ACTIO_HTTP_PORT:-8080}:8080"
+    networks: [edge]
     mem_limit: 128m
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2020"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    <<: *hardening
+    user: node
+    init: true # forwards stop signals to Node.js and reaps child processes
+    tmpfs: [/tmp, /app/apps/web/.next/cache]
+    networks: [edge]
+    mem_limit: 512m
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - --eval
+        - "fetch('http://127.0.0.1:3000/').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    <<: *hardening
+    user: actio
+    tmpfs: [/tmp]
+    environment:
+      # Only Caddy and the web app can reach the API here, so trust the client address
+      # and scheme that Caddy forwards.
+      ACTIO_FORWARDED_ALLOW_IPS: "*"
+    networks: [edge, backend]
+    mem_limit: 512m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/healthz', timeout=2)"
       interval: 5s
       timeout: 3s
       retries: 10
@@ -42,8 +91,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make bootstrap to create .env}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:${ACTIO_POSTGRES_PORT:-5432}:5432"
+    networks: [backend]
     mem_limit: 512m
     healthcheck:
       test: ["CMD", "pg_isready", "--username=actio", "--dbname=actio"]
@@ -60,8 +108,7 @@ services:
       VALKEYCLI_AUTH: ${VALKEY_PASSWORD:?run make bootstrap to create .env} # for the health check
     volumes:
       - valkey-data:/data
-    ports:
-      - "127.0.0.1:${ACTIO_VALKEY_PORT:-6379}:6379"
+    networks: [backend]
     mem_limit: 256m
     healthcheck:
       # valkey-cli exits 0 even when it can't log in, so check for the actual reply.
@@ -69,6 +116,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+networks:
+  edge: {} # Caddy, the web app and the API
+  backend:
+    internal: true # no route out: only the API reaches the data services
 
 volumes:
   postgres-data:

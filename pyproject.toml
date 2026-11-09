@@ -31,7 +31,7 @@ dev = [
 
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["apps/api/tests", "packages/fakellm/tests"]
+testpaths = ["apps/api/tests", "packages/fakellm/tests", "deploy/tests"]
 # importlib mode lets test files in different packages share names.
 addopts = ["--import-mode=importlib", "-ra"]
 strict = true
@@ -84,7 +84,13 @@ strict = true
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 plugins = ["pydantic.mypy"]
-files = ["apps/api/src", "apps/api/tests", "packages/fakellm/src", "packages/fakellm/tests"]
+files = [
+    "apps/api/src",
+    "apps/api/tests",
+    "packages/fakellm/src",
+    "packages/fakellm/tests",
+    "deploy/tests",
+]
 # Name modules by their path, so each test folder's conftest.py is a distinct module.
 # The src folders are roots, so `actio` and `actio_fakellm` keep their import names.
 explicit_package_bases = true

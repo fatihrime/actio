@@ -38,15 +38,21 @@ _Filled in as each piece ships, with links to the design records (ADRs), tests a
 
 ## Quickstart
 
-On macOS with [Docker Desktop](https://docs.docker.com/desktop/) running:
+**Just run it,** on macOS or Linux. You need only Docker, `make` and `openssl`:
 
 ```sh
 git clone https://github.com/fatihrime/actio.git && cd actio
+make up   # builds and starts every service in containers; open http://localhost:8080
+```
+
+**Develop it,** on macOS with [Docker Desktop](https://docs.docker.com/desktop/). The API and the web app run natively, with hot reload:
+
+```sh
 make bootstrap   # checks your tools, installs everything, creates .env with random passwords
 make dev         # starts the stack; open http://localhost:8080
 ```
 
-`make doctor` lists any missing tools with install hints, and `make down` stops the containers. A fully containerised mode, for Linux and CI, arrives later in Phase 0.
+`make smoke` checks a running stack, and `make down` stops it. CI runs the `make up` quickstart on Linux for every change.
 
 ## Roadmap
 

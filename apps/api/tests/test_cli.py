@@ -11,6 +11,7 @@ def test_api_role_serves_the_app_factory_with_settings(monkeypatch: pytest.Monke
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
     monkeypatch.setenv("ACTIO_PORT", "9000")
+    monkeypatch.setenv("ACTIO_FORWARDED_ALLOW_IPS", "*")
 
     cli.main(["--role", "api"])
 
@@ -20,6 +21,7 @@ def test_api_role_serves_the_app_factory_with_settings(monkeypatch: pytest.Monke
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 9000
     assert kwargs["server_header"] is False
+    assert kwargs["forwarded_allow_ips"] == "*"
     assert kwargs["reload"] is False
 
 

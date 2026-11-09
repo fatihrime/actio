@@ -88,9 +88,10 @@ repos:
     hooks:
       - id: compose-config
         name: docker compose config
-        entry: env POSTGRES_PASSWORD=placeholder VALKEY_PASSWORD=placeholder docker compose config --quiet
+        # The overlay is checked together with the base file it extends.
+        entry: env POSTGRES_PASSWORD=placeholder VALKEY_PASSWORD=placeholder docker compose --file compose.yaml --file compose.dev.yaml config --quiet
         language: unsupported
-        files: ^(compose\.yaml|\.env\.example)$
+        files: ^(compose(\.dev)?\.yaml|\.env\.example)$
         pass_filenames: false
 
   # GitHub Actions workflows: correctness (actionlint), then security (zizmor).

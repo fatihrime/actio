@@ -3,8 +3,10 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 # Opt out of Next.js's anonymous usage telemetry in everything make runs.
 export NEXT_TELEMETRY_DISABLED := 1
+# `make dev` layers the development overlay on top of compose.yaml.
+DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install dev down check lint fmt test build
+.PHONY: help doctor bootstrap install up dev down smoke check lint fmt test build
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -14,22 +16,30 @@ doctor: ## Check that required tools are installed (installs nothing)
 	@./scripts/doctor.sh
 
 bootstrap: doctor install .env ## Set up a fresh clone: check tools, install everything, create .env, pull images
-	docker compose pull
+	docker compose pull --ignore-buildable
 
 install: ## Install the Python and JavaScript workspaces, dev tools and git hooks
 	uv sync
 	pnpm install
 	uv run pre-commit install
 
-dev: .env ## Run the stack at http://localhost:8080; Ctrl-C stops the API and web app
-	docker compose up --detach --wait
+up: .env ## Run the whole stack in containers, shaped like production, at http://localhost:8080
+	docker compose up --detach --wait --build
+	@echo "Open http://localhost:8080 (API docs: /api/docs). 'make down' stops everything."
+
+dev: .env ## Run the stack at http://localhost:8080 with the API and web app native; Ctrl-C stops them
+	docker compose stop api web # in case `make up` left them running
+	$(DEV_COMPOSE) up --detach --wait postgres valkey caddy
 	@echo "Open http://localhost:8080 (API docs: /api/docs). 'make down' stops the containers."
 	pnpm exec concurrently --kill-others --names api,web --prefix-colors cyan,magenta \
 	    "uv run actio --role api --reload" \
 	    "pnpm --dir apps/web dev"
 
-down: ## Stop the Docker services; their data is kept
-	docker compose down
+down: ## Stop all containers; their data is kept
+	$(DEV_COMPOSE) down
+
+smoke: ## Check the running stack through Caddy: the web page, the API's health and docs
+	@./scripts/smoke-test.sh
 
 check: lint test build ## Run everything CI runs: static checks, tests, then the web build
 

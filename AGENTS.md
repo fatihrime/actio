@@ -9,7 +9,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 ## Ground rules
 
 - **Small steps.**
-  - Make one focused, tested change at a time, ideally under ~400 changed lines.
+  - Make one focused, tested change at a time. There is no size limit: a step is done when it works end to end, with its tests.
   - Explain what changed, why, and how to verify it.
 - **Humans commit.** Agents never commit, push, or create remote resources. The maintainer reviews and commits every change.
 - **No secrets in the repo.**
@@ -32,8 +32,10 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `packages/llm` | Model router and provider adapters |
 | `packages/fakellm` | Deterministic fake LLM server for tests |
 | `config/` | `models.yaml`, `plans.yaml`, assistant profiles, demo knowledge base |
-| `compose.yaml` | The local stack's Docker services: Postgres, Valkey, Caddy |
+| `compose.yaml` | The production-shaped stack behind `make up`: Caddy, web, API, Postgres, Valkey |
+| `compose.dev.yaml` | The overlay behind `make dev`: Caddy routes to the native processes; data ports open on 127.0.0.1 |
 | `deploy/caddy/` | Caddy config: one entry point routing `/api/*` and `/v1/*` to the API, the rest to the web app |
+| `deploy/tests/` | Policy tests for the containers: published ports, pinned images, networks, hardening |
 | `docs/adr/` | Architecture decision records |
 | `scripts/` | Developer scripts |
 
@@ -45,14 +47,16 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `make doctor` | Check that required tools are installed. Prints install hints; installs nothing |
 | `make bootstrap` | Set up a fresh clone: `doctor`, `install`, a `.env` with random passwords, then pull the images |
 | `make install` | Install the Python and JavaScript workspaces with their dev tools, plus the git hooks |
-| `make dev` | Run the stack at http://localhost:8080: Docker services, plus the API and web app natively with hot reload |
-| `make down` | Stop the Docker services. Their data stays in Docker volumes |
+| `make up` | Build and run the whole stack in containers, shaped like production, at http://localhost:8080 |
+| `make dev` | Run the stack at http://localhost:8080 with the API and web app native, with hot reload |
+| `make smoke` | Check a running stack through Caddy: the web page, the API's health and docs |
+| `make down` | Stop all containers. Their data stays in Docker volumes |
 | `make check` | Run everything CI runs: every static check on all files, the tests, then the web build |
 | `make fmt` | Format code and apply safe lint fixes |
 
-`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. More targets (`up`, `e2e`) arrive during Phase 0.
+`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. End-to-end tests (`make e2e`) arrive with the chat interface.
 
-`make dev` needs Docker Desktop: its containers reach the natively running API and web app through `host.docker.internal`. `.env` holds the local passwords. It is created once from `.env.example`, git-ignored, and never read by tests. Postgres keeps the password it first started with, so if you recreate `.env`, also wipe the local data with `docker compose down --volumes`.
+`make up` needs only Docker; it builds the images from `apps/api/Dockerfile` and `apps/web/Dockerfile`. `make dev` needs Docker Desktop: its containers reach the natively running API and web app through `host.docker.internal`. Changes to the containers must keep `deploy/tests/` passing; if a rule must change, change the test on purpose and record why in an ADR. `.env` holds the local passwords. It is created once from `.env.example`, git-ignored, and never read by tests. Postgres keeps the password it first started with, so if you recreate `.env`, also wipe the local data with `docker compose down --volumes`.
 
 ## Conventions
 

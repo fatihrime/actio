@@ -20,3 +20,10 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65535)
 
     log_level: Literal["critical", "error", "warning", "info", "debug"] = "info"
+
+    forwarded_allow_ips: str = "127.0.0.1"
+    """Proxies trusted to report the client's address and scheme (``X-Forwarded-*``).
+
+    Comma-separated addresses, or ``*`` for any. ``compose.yaml`` sets ``*``, because in
+    that stack only the reverse proxy and the web app can reach the API.
+    """

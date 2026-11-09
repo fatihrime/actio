@@ -1,0 +1,24 @@
+# Overlay for `make dev`, on top of compose.yaml. Only Postgres, Valkey and Caddy run in
+# Docker; the API and the web app run natively, so:
+#   - Caddy routes to the host. Docker Desktop resolves host.docker.internal to it,
+#     including services bound to the host's 127.0.0.1;
+#   - Postgres and Valkey publish their ports on 127.0.0.1 for the native processes,
+#     through a network that isn't internal (an internal one can't publish ports).
+services:
+  caddy:
+    environment:
+      ACTIO_API_UPSTREAM: host.docker.internal:8000
+      ACTIO_WEB_UPSTREAM: host.docker.internal:3000
+
+  postgres:
+    networks: [host-access]
+    ports:
+      - "127.0.0.1:${ACTIO_POSTGRES_PORT:-5432}:5432"
+
+  valkey:
+    networks: [host-access]
+    ports:
+      - "127.0.0.1:${ACTIO_VALKEY_PORT:-6379}:6379"
+
+networks:
+  host-access: {}

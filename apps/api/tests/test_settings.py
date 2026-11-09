@@ -11,6 +11,7 @@ def test_defaults_listen_on_localhost_only() -> None:
 
     assert settings.host == "127.0.0.1"
     assert settings.port == 8000
+    assert settings.forwarded_allow_ips == "127.0.0.1"
 
 
 def test_reads_actio_prefixed_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:

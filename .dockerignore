@@ -1,0 +1,18 @@
+# Keep the build context small, and keep local state and secrets out of every image.
+.git
+.github
+.idea
+.vscode
+**/.DS_Store
+.env
+.env.*
+**/node_modules
+**/.next
+**/.venv
+**/__pycache__
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/*.tsbuildinfo
+**/next-env.d.ts
+coverage

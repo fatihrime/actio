@@ -42,6 +42,24 @@ jobs:
         env:
           SKIP: gitleaks # the secrets job below scans the full history instead
 
+  quickstart:
+    name: Quickstart on Linux (make up)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Nothing installed beyond the runner's Docker, make and openssl: the README's
+      # quickstart, as a visitor would run it.
+      - name: Build and start the whole stack in containers
+        run: make up
+      - name: Smoke-test it through Caddy
+        run: make smoke
+      - name: Show the containers' logs
+        if: failure()
+        run: docker compose logs --no-color
+
   secrets:
     name: Secret scan (full history)
     runs-on: ubuntu-24.04
