@@ -45,11 +45,18 @@ repos:
         types_or: [python, pyi]
         pass_filenames: false
 
-  # Shell scripts.
-  - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: a6564f5d57444e123433a5c9af733e3975c77229  # frozen: v0.11.0.1-1
+  # Shell scripts. shellcheck comes from its PyPI wheel, locked in uv.lock. The upstream
+  # hook downloads the binary from GitHub releases at install time, and that download
+  # failed in CI with HTTP 504.
+  - repo: local
     hooks:
       - id: shellcheck
+        name: shellcheck
+        entry: uv run shellcheck
+        language: unsupported
+        types: [shell]
+        exclude_types: [zsh]
+        require_serial: true # one call sees every script, so it can follow `source`
 
   # GitHub Actions workflows: correctness (actionlint), then security (zizmor).
   - repo: https://github.com/rhysd/actionlint

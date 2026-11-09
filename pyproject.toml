@@ -22,6 +22,7 @@ dev = [
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",
     "ruff>=0.17.4",
+    "shellcheck-py>=0.11.0.1",
 ]
 
 [tool.pytest]
