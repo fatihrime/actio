@@ -1,0 +1,17 @@
+[project]
+name = "actio-quota"
+version = "0.0.0"
+description = "Actio's usage-limits engine: credit math, reset windows and a reference model of the Valkey scripts."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+classifiers = ["Private :: Do Not Upload"]
+dependencies = [
+    # Time zone data for the weekly resets, so they don't depend on the system's copy
+    # (slim container images ship without one).
+    "tzdata>=2025.2",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"

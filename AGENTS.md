@@ -67,7 +67,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - workspace packages are named `actio-<name>` and imported as `actio_<name>`, such as `actio-fakellm`;
   - formatted and linted with `ruff`;
   - `mypy --strict` on core packages;
-  - tests with `pytest`.
+  - tests with `pytest`; property and state-machine tests with Hypothesis (`HYPOTHESIS_PROFILE=dev|ci|nightly`);
+  - `make test` fails below 90% coverage of `packages/quota`.
 - **TypeScript:**
   - `pnpm` 12; pnpm also installs the Node.js version pinned in the root `package.json` (26 LTS);
   - add dependencies with `pnpm --dir apps/web add`, never `npm`;

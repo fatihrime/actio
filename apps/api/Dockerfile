@@ -22,6 +22,7 @@ WORKDIR /repo
 COPY pyproject.toml uv.lock .python-version ./
 COPY apps/api/pyproject.toml apps/api/
 COPY packages/fakellm/pyproject.toml packages/fakellm/
+COPY packages/quota/pyproject.toml packages/quota/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --package actio --no-install-workspace
 

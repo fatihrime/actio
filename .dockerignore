@@ -16,3 +16,6 @@
 **/*.tsbuildinfo
 **/next-env.d.ts
 coverage
+**/.hypothesis
+.coverage
+.coverage.*

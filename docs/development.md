@@ -33,10 +33,14 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 |---|---|---|
 | `apps/api/tests` | pytest | Settings, the CLI, the health check |
 | `packages/fakellm/tests` | pytest | The wire format, checked with OpenAI's official Python SDK too |
+| `packages/quota/tests` | pytest, Hypothesis | Credit math, reset windows across DST, and the usage-limits rules under random event sequences |
 | `deploy/tests` | pytest | The containers' security rules |
 | `apps/web` | Vitest | The page renders |
 
 `make test` runs them all. Tests never read `.env`: they build their own settings.
+
+- **Coverage gate:** `make test` fails if the quota engine's test coverage drops below 90%.
+- **Random tests:** Hypothesis tries 100 random examples per property on a laptop and 200 in CI. Set `HYPOTHESIS_PROFILE=nightly` for 5,000. When a test fails, Hypothesis shrinks it to a minimal sequence of steps and prints it.
 
 ## CI
 

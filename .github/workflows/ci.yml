@@ -41,6 +41,7 @@ jobs:
       - run: make check
         env:
           SKIP: gitleaks # the secrets job below scans the full history instead
+          HYPOTHESIS_PROFILE: ci # more random examples than on a laptop
 
   quickstart:
     name: Quickstart on Linux (make up)

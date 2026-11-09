@@ -8,23 +8,27 @@ required-version = ">=0.13"
 python-preference = "only-managed"
 
 [tool.uv.workspace]
-members = ["apps/api", "packages/fakellm"]
+members = ["apps/api", "packages/fakellm", "packages/quota"]
 
 [tool.uv.sources]
 actio = { workspace = true }
 actio-fakellm = { workspace = true }
+actio-quota = { workspace = true }
 
 [dependency-groups]
 # `uv sync` installs this group by default, so one command sets up every member and tool.
 dev = [
     "actio",
     "actio-fakellm",
+    "actio-quota",
     "httpx>=0.28.1",
     "httpx2>=2.16.0",
+    "hypothesis>=6.170.15",
     "mypy>=2.4.1",
     "openai>=3.46.0",
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.4",
     "shellcheck-py>=0.11.0.1",
     { include-group = "docs" },
@@ -36,16 +40,27 @@ docs = [
 
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["apps/api/tests", "packages/fakellm/tests", "deploy/tests"]
+testpaths = ["apps/api/tests", "packages/fakellm/tests", "packages/quota/tests", "deploy/tests"]
 # importlib mode lets test files in different packages share names.
 addopts = ["--import-mode=importlib", "-ra"]
 strict = true
 filterwarnings = ["error"]
 
+# `make test` measures coverage of the quota engine only, and fails below 90%: its
+# correctness is the project's headline claim.
+[tool.coverage.run]
+branch = true
+source_pkgs = ["actio_quota"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-src = ["apps/api/src", "packages/fakellm/src"]
+src = ["apps/api/src", "packages/fakellm/src", "packages/quota/src"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -80,6 +95,10 @@ ignore = ["E501"]  # the formatter owns line length
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["S101"]  # pytest is built on assert
 
+[tool.ruff.lint.flake8-builtins]
+# `credits` is only a builtin in the interactive shell, and it's the quota engine's unit.
+ignorelist = ["credits"]
+
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
@@ -94,12 +113,14 @@ files = [
     "apps/api/tests",
     "packages/fakellm/src",
     "packages/fakellm/tests",
+    "packages/quota/src",
+    "packages/quota/tests",
     "deploy/tests",
 ]
 # Name modules by their path, so each test folder's conftest.py is a distinct module.
 # The src folders are roots, so `actio` and `actio_fakellm` keep their import names.
 explicit_package_bases = true
-mypy_path = ["apps/api/src", "packages/fakellm/src"]
+mypy_path = ["apps/api/src", "packages/fakellm/src", "packages/quota/src"]
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

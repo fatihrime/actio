@@ -55,8 +55,8 @@ fmt: ## Format code and apply safe lint fixes
 	pnpm --dir apps/web run format
 	pnpm --dir apps/web run lint --fix
 
-test: ## Run the Python and web tests
-	uv run pytest
+test: ## Run the Python and web tests; fails if the quota engine's coverage drops below 90%
+	uv run pytest --cov
 	pnpm --dir apps/web run test
 
 build: ## Build the web app for production, and the documentation site (strict: warnings fail)
