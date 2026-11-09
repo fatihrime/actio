@@ -41,11 +41,11 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 |---|---|
 | `make help` | List available targets |
 | `make doctor` | Check that required tools are installed. Prints install hints; installs nothing |
-| `make install` | Install the Python workspace and dev tools into `.venv`, plus the git hooks |
-| `make check` | Run everything CI runs: every static check on all files, then the tests |
+| `make install` | Install the Python and JavaScript workspaces with their dev tools, plus the git hooks |
+| `make check` | Run everything CI runs: every static check on all files, the tests, then the web build |
 | `make fmt` | Format code and apply safe lint fixes |
 
-`make lint` and `make test` run the two halves of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. More targets (`bootstrap`, `dev`, `e2e`) arrive during Phase 0.
+`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Start the web app alone with `pnpm --dir apps/web dev`. More targets (`bootstrap`, `dev`, `e2e`) arrive during Phase 0.
 
 ## Conventions
 
@@ -56,9 +56,13 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - `mypy --strict` on core packages;
   - tests with `pytest`.
 - **TypeScript:**
-  - strict mode, `pnpm`;
-  - ESLint + Prettier;
-  - tests with Vitest and Playwright.
+  - `pnpm` 12; pnpm also installs the Node.js version pinned in the root `package.json` (26 LTS);
+  - add dependencies with `pnpm --dir apps/web add`, never `npm`;
+  - strict mode, plus `noUncheckedIndexedAccess`;
+  - formatted with Prettier; linted with ESLint and typescript-eslint's strict type-checked rules;
+  - stay on TypeScript 6.0 and ESLint 9 until typescript-eslint and eslint-config-next support the next majors ([ADR 0003](docs/adr/0003-web-app-on-nextjs.md));
+  - Next.js 16 changed many APIs: read the version-matched docs in `apps/web/node_modules/next/dist/docs/` before writing Next.js code;
+  - tests with Vitest, and Playwright for end-to-end tests.
 - **Commits:** [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `test:`, `chore:` and so on.
 - **Architecture boundaries,** to be enforced with import-linter:
   - `core` imports nothing internal;

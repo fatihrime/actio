@@ -30,6 +30,7 @@ mutants/
 # --- Node / Next.js ---
 node_modules/
 .next/
+next-env.d.ts
 out/
 *.tsbuildinfo
 coverage/

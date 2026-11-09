@@ -1,0 +1,5 @@
+# JavaScript workspace; the Python side is the uv workspace in pyproject.toml.
+# pnpm's defaults already guard the supply chain: no version younger than a day,
+# and no dependency build scripts unless allowBuilds lists them.
+packages:
+  - apps/web

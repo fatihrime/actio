@@ -44,21 +44,16 @@ else
   fail uv "brew install uv   (or: curl -LsSf https://astral.sh/uv/install.sh | sh)"
 fi
 
-if have node; then
-  node_version="$(version_of node --version)"
-  if version_ge "$node_version" 24.0.0; then
-    ok node "$node_version"
+# No separate Node.js check: pnpm installs the Node.js version pinned in package.json.
+if have pnpm; then
+  pnpm_version="$(version_of pnpm --version)"
+  if version_ge "$pnpm_version" 12.0.0; then
+    ok pnpm "$pnpm_version (installs the pinned Node.js itself)"
   else
-    fail node "found $node_version, need >= 24 (brew install node@24)"
+    fail pnpm "found $pnpm_version, need >= 12: https://pnpm.io/installation"
   fi
 else
-  fail node "install Node.js 24: brew install node@24"
-fi
-
-if have pnpm; then
-  ok pnpm "$(version_of pnpm --version)"
-else
-  fail pnpm "npm install -g pnpm   (or another method: https://pnpm.io/installation)"
+  fail pnpm "install pnpm 12 or newer: https://pnpm.io/installation"
 fi
 
 echo

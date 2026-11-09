@@ -17,7 +17,7 @@ env:
 
 jobs:
   check:
-    name: Lint, types and tests
+    name: Lint, types, tests and build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -28,6 +28,11 @@ jobs:
         with:
           enable-cache: true
           cache-python: true
+      # Installs pnpm and the Node.js pinned in package.json, then runs `pnpm install`.
+      - uses: pnpm/setup@fa36a5ef7dcdefc3a7cb25655c122e00cf6e636e # v3.1.2
+        with:
+          cache: true
+          require-lockfile: true # fail if pnpm-lock.yaml is missing or out of date
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pre-commit

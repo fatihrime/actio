@@ -19,6 +19,7 @@ repos:
       - id: check-shebang-scripts-are-executable
       - id: check-toml
       - id: check-yaml
+        args: [--allow-multiple-documents] # pnpm-lock.yaml starts with a pnpm-pin document
       - id: end-of-file-fixer
       - id: mixed-line-ending
         args: [--fix=lf]
@@ -43,6 +44,29 @@ repos:
         entry: uv run mypy
         language: unsupported
         types_or: [python, pyi]
+        pass_filenames: false
+
+  # Web app, with the tool versions locked in pnpm-lock.yaml. Each hook runs a script from
+  # apps/web/package.json over the whole app, and only when a commit touches apps/web.
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier (web)
+        entry: pnpm --dir apps/web run format
+        language: unsupported
+        files: ^apps/web/
+        pass_filenames: false
+      - id: eslint
+        name: eslint (web)
+        entry: pnpm --dir apps/web run lint --fix
+        language: unsupported
+        files: ^apps/web/
+        pass_filenames: false
+      - id: tsc
+        name: tsc (web)
+        entry: pnpm --dir apps/web run typecheck
+        language: unsupported
+        files: ^apps/web/
         pass_filenames: false
 
   # Shell scripts. shellcheck comes from its PyPI wheel, locked in uv.lock. The upstream
