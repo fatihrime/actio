@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke check lint fmt test build
+.PHONY: help doctor bootstrap install up dev down smoke docs check lint fmt test build
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -41,7 +41,10 @@ down: ## Stop all containers; their data is kept
 smoke: ## Check the running stack through Caddy: the web page, the API's health and docs
 	@./scripts/smoke-test.sh
 
-check: lint test build ## Run everything CI runs: static checks, tests, then the web build
+docs: ## Preview the documentation site at http://localhost:8001, reloading on edits
+	uv run zensical serve --dev-addr 127.0.0.1:8001
+
+check: lint test build ## Run everything CI runs: static checks, tests, then the builds
 
 lint: ## Run every static check on all files; fixes what it safely can
 	uv run pre-commit run --all-files --show-diff-on-failure
@@ -56,8 +59,9 @@ test: ## Run the Python and web tests
 	uv run pytest
 	pnpm --dir apps/web run test
 
-build: ## Build the web app for production
+build: ## Build the web app for production, and the documentation site (strict: warnings fail)
 	pnpm --dir apps/web run build
+	uv run zensical build --strict
 
 # Created once and never overwritten: Postgres keeps the password it started with.
 .env:

@@ -6,6 +6,8 @@
 
 **Status:** early development, Phase 0 (foundation). This README grows with each phase, and nothing below counts as done until it ships with tests.
 
+**Documentation:** <https://fatihrime.github.io/actio/>: getting started, architecture, development and the decision records.
+
 ## Why Actio?
 
 Running an LLM on your own machine is easy. Running it well for several people is harder:
@@ -80,6 +82,7 @@ make dev         # starts the stack; open http://localhost:8080
 Actio is built from scratch with AI assistance (Claude Code).
 - Every change is small and tested, and I review and commit each one myself.
 - Design decisions are recorded in [`docs/adr/`](docs/adr/).
+- [How AI is used](https://fatihrime.github.io/actio/ai-workflow/) explains the workflow, and how the assistant's work is checked.
 
 ## License
 

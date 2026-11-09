@@ -1,6 +1,6 @@
 # NNNN. Title of the decision
 
-- **Status:** proposed | accepted | superseded by [NNNN](NNNN-title.md)
+- **Status:** proposed | accepted | superseded by NNNN (link to the newer ADR)
 - **Date:** YYYY-MM-DD
 
 ## Context

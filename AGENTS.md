@@ -36,7 +36,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `compose.dev.yaml` | The overlay behind `make dev`: Caddy routes to the native processes; data ports open on 127.0.0.1 |
 | `deploy/caddy/` | Caddy config: one entry point routing `/api/*` and `/v1/*` to the API, the rest to the web app |
 | `deploy/tests/` | Policy tests for the containers: published ports, pinned images, networks, hardening |
-| `docs/adr/` | Architecture decision records |
+| `docs/` | The documentation site's pages (built by Zensical from `zensical.toml`), including the ADRs in `docs/adr/` |
 | `scripts/` | Developer scripts |
 
 ## Commands
@@ -50,8 +50,9 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `make up` | Build and run the whole stack in containers, shaped like production, at http://localhost:8080 |
 | `make dev` | Run the stack at http://localhost:8080 with the API and web app native, with hot reload |
 | `make smoke` | Check a running stack through Caddy: the web page, the API's health and docs |
+| `make docs` | Preview the documentation site at http://localhost:8001, reloading on edits |
 | `make down` | Stop all containers. Their data stays in Docker volumes |
-| `make check` | Run everything CI runs: every static check on all files, the tests, then the web build |
+| `make check` | Run everything CI runs: every static check on all files, the tests, then the builds (web app and docs site) |
 | `make fmt` | Format code and apply safe lint fixes |
 
 `make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. End-to-end tests (`make e2e`) arrive with the chat interface.

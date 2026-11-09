@@ -38,6 +38,10 @@ playwright-report/
 test-results/
 blob-report/
 
+# --- Documentation site (Zensical) ---
+site/
+.cache/
+
 # --- Local runtime data (blobs, logs) ---
 var/
 *.log

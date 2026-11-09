@@ -1,0 +1,89 @@
+# The documentation site, built with Zensical from the Markdown files in docs/.
+# Preview it with `make docs`; `make build` and CI build it in strict mode, so a
+# broken link fails the check. The docs workflow publishes it to GitHub Pages.
+
+[project]
+site_name = "Actio"
+site_description = "A self-hostable, local-first AI platform: a chat assistant and an OpenAI-compatible gateway, governed by tested usage limits."
+site_url = "https://fatihrime.github.io/actio/"
+repo_url = "https://github.com/fatihrime/actio"
+repo_name = "fatihrime/actio"
+edit_uri = "edit/main/docs/"
+copyright = "Actio is MIT-licensed."
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = "getting-started.md" },
+  { "Architecture" = "architecture.md" },
+  { "Development" = "development.md" },
+  { "How AI is used" = "ai-workflow.md" },
+  { "Reference" = [
+    { "fakellm" = "reference/fakellm.md" },
+  ] },
+  { "Decisions" = [
+    { "Overview" = "adr/index.md" },
+    { "0001. One app, several process roles" = "adr/0001-one-app-several-process-roles.md" },
+    { "0002. Python workspace with uv" = "adr/0002-python-workspace-with-uv.md" },
+    { "0003. Web app on Next.js" = "adr/0003-web-app-on-nextjs.md" },
+    { "0004. Local development stack" = "adr/0004-local-development-stack.md" },
+    { "0005. Container images" = "adr/0005-container-images.md" },
+    { "Template" = "adr/0000-template.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+# System fonts: the default web fonts come from Google Fonts, which would send every
+# visitor's IP address to Google.
+font = false
+features = [
+  "content.action.edit",
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+]
+
+# Follow the operating system's light or dark setting, with a toggle to override it.
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.inlinehilite = {}
+# Lets a page include a file from the repository, so package READMEs aren't copied.
+pymdownx.snippets.base_path = ["."]
+pymdownx.snippets.check_paths = true
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+
+# Serve Mermaid, which draws the diagrams, from this site instead of loading it from
+# unpkg.com in visitors' browsers. Only Mermaid: the theme's code also mentions video
+# players and ad SDKs this site never uses, and the plugin would copy all of them.
+[project.plugins.privacy]
+assets_include = ["unpkg.com/mermaid@*"]
