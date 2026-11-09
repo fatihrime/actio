@@ -68,7 +68,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - formatted and linted with `ruff`;
   - `mypy --strict` on core packages;
   - tests with `pytest`; property and state-machine tests with Hypothesis (`HYPOTHESIS_PROFILE=dev|ci|nightly`);
-  - `make test` fails below 90% coverage of `packages/quota`.
+  - `make test` fails below 90% coverage of `packages/quota`, and needs Docker running: the quota tests start a Valkey container;
+  - change the Lua in `packages/quota` only together with the Python reference model (`oracle.py`): the differential test requires both to behave identically.
 - **TypeScript:**
   - `pnpm` 12; pnpm also installs the Node.js version pinned in the root `package.json` (26 LTS);
   - add dependencies with `pnpm --dir apps/web add`, never `npm`;

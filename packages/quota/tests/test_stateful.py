@@ -1,8 +1,12 @@
-"""Random event sequences against the reference model, checking its invariants each step.
+"""Random event sequences against the engines, checking invariants after every step.
 
-The differential test that comes with the Lua scripts reuses this idea, running the
-same events against Valkey and requiring identical results.
+- `TestQuotaOracle` runs them against the Python reference model.
+- `test_valkey_matches_the_oracle` runs the same machine with every call sent to both
+  engines: the results, and the complete stored state, must be identical at every step.
+  That is the differential test: the Lua scripts must behave exactly like the oracle.
 """
+
+from typing import Any
 
 from hypothesis import strategies as st
 from hypothesis.stateful import (
@@ -14,6 +18,7 @@ from hypothesis.stateful import (
     multiple,
     precondition,
     rule,
+    run_state_machine_as_test,
 )
 
 from actio_quota import (
@@ -32,8 +37,8 @@ from actio_quota import (
     Rates,
     Rolling,
 )
-from actio_quota.model import WARN_THRESHOLDS
-from actio_quota.oracle import ledger_total
+from actio_quota.model import WARN_THRESHOLDS, Finished, ReserveResult
+from actio_quota.state import ledger_total
 
 MINUTE = 60_000
 HOUR = 60 * MINUTE
@@ -60,9 +65,9 @@ class QuotaMachine(RuleBasedStateMachine):
     granted = Bundle("granted")
     finished = Bundle("finished")
 
-    def __init__(self) -> None:
+    def __init__(self, engine: QuotaOracle | None = None) -> None:
         super().__init__()
-        self.oracle = QuotaOracle()
+        self.oracle = engine or QuotaOracle()
         self.clock = ManualClock(1_800_000_000_000)
         self.ledger: list[LedgerEntry] = []
         self.counter = 0
@@ -215,3 +220,62 @@ class QuotaMachine(RuleBasedStateMachine):
 
 
 TestQuotaOracle = QuotaMachine.TestCase
+
+
+class CheckedOracle(QuotaOracle):
+    """The oracle, sending every call to a second engine too and requiring the same answer."""
+
+    def __init__(self, other: Any) -> None:
+        super().__init__()
+        self.other = other
+
+    def _check[T](self, name: str, ours: T, *args: Any, **kwargs: Any) -> T:
+        theirs = getattr(self.other, name)(*args, **kwargs)
+        assert theirs == ours, f"{name}{args}: Valkey gave {theirs!r}, the oracle {ours!r}"
+        return ours
+
+    def reserve(self, *args: Any, **kwargs: Any) -> ReserveResult:
+        return self._check("reserve", super().reserve(*args, **kwargs), *args, **kwargs)
+
+    def settle(self, *args: Any, **kwargs: Any) -> Finished:
+        return self._check("settle", super().settle(*args, **kwargs), *args, **kwargs)
+
+    def release(self, *args: Any, **kwargs: Any) -> Finished:
+        return self._check("release", super().release(*args, **kwargs), *args, **kwargs)
+
+    def extend(self, *args: Any, **kwargs: Any) -> bool:
+        return self._check("extend", super().extend(*args, **kwargs), *args, **kwargs)
+
+    def collect_expired(self, *args: Any, **kwargs: Any) -> int:
+        return self._check(
+            "collect_expired", super().collect_expired(*args, **kwargs), *args, **kwargs
+        )
+
+    def snapshot(self, *args: Any, **kwargs: Any) -> tuple[BucketView, ...] | None:
+        return self._check("snapshot", super().snapshot(*args, **kwargs), *args, **kwargs)
+
+    def rebuild(self, *args: Any, **kwargs: Any) -> bool:
+        return self._check("rebuild", super().rebuild(*args, **kwargs), *args, **kwargs)
+
+    def epoch(self, *args: Any, **kwargs: Any) -> int | None:
+        return self._check("epoch", super().epoch(*args, **kwargs), *args, **kwargs)
+
+    def dump(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        return self._check("dump", super().dump(*args, **kwargs), *args, **kwargs)
+
+    def flush(self) -> None:
+        super().flush()
+        self.other.flush()
+
+
+def test_valkey_matches_the_oracle(valkey_quota: Any) -> None:
+    class Differential(QuotaMachine):
+        def __init__(self) -> None:
+            valkey_quota.flush()
+            super().__init__(CheckedOracle(valkey_quota))
+
+        @invariant()
+        def same_stored_state(self) -> None:
+            self.oracle.dump(USER, now_ms=self.clock.now_ms())
+
+    run_state_machine_as_test(Differential)

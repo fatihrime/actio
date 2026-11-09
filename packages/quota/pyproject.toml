@@ -10,6 +10,7 @@ dependencies = [
     # Time zone data for the weekly resets, so they don't depend on the system's copy
     # (slim container images ship without one).
     "tzdata>=2025.2",
+    "valkey>=6.2.0",
 ]
 
 [build-system]

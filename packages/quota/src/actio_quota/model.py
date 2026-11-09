@@ -24,7 +24,7 @@ GC_BATCH = 32
 _NAME = re.compile(r"[a-z0-9][a-z0-9_:.-]{0,63}")
 
 
-def _check_name(kind: str, value: str) -> None:
+def check_name(kind: str, value: str) -> None:
     if not _NAME.fullmatch(value):
         raise ValueError(f"{kind} {value!r} must match {_NAME.pattern}")
 
@@ -65,7 +65,7 @@ class Bucket:
     window: Rolling | Fixed
 
     def __post_init__(self) -> None:
-        _check_name("bucket name", self.name)
+        check_name("bucket name", self.name)
         check_count("limit", self.limit, MAX_CREDITS)
 
 
@@ -210,4 +210,4 @@ class BucketView:
 
 def check_rid(rid: str) -> None:
     """Reservation ids are short opaque tokens, such as a UUID."""
-    _check_name("reservation id", rid)
+    check_name("reservation id", rid)

@@ -24,11 +24,10 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from actio_quota.cost import check_count
+from actio_quota.cost import MAX_CREDITS, check_count
 from actio_quota.model import (
     DONE_TTL_MS,
     GC_BATCH,
-    WARN_THRESHOLDS,
     Bucket,
     BucketView,
     Denied,
@@ -44,16 +43,14 @@ from actio_quota.model import (
     UsageWarning,
     check_rid,
 )
-
-
-@dataclass
-class _BucketState:
-    start_ms: int
-    reset_ms: int
-    limit: int
-    used: int = 0
-    reserved: int = 0
-    warned: set[int] = field(default_factory=set)
+from actio_quota.state import (
+    BucketState,
+    check_buckets,
+    current,
+    dump_state,
+    rebuilt_buckets,
+    warn,
+)
 
 
 @dataclass
@@ -72,60 +69,9 @@ class _Done:
 @dataclass
 class _User:
     epoch: int
-    buckets: dict[str, _BucketState] = field(default_factory=dict)
+    buckets: dict[str, BucketState] = field(default_factory=dict)
     reservations: dict[str, _Reservation] = field(default_factory=dict)
     done: dict[str, _Done] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class _Current:
-    """A bucket's window as of `now_ms`. `state` is None when the window is closed."""
-
-    spec: Bucket
-    state: _BucketState | None
-    start_ms: int | None
-    reset_ms: int | None
-
-    @property
-    def used(self) -> int:
-        return self.state.used if self.state else 0
-
-    @property
-    def reserved(self) -> int:
-        return self.state.reserved if self.state else 0
-
-
-def _current(user: _User, spec: Bucket, now_ms: int) -> _Current:
-    """Find the bucket's live window, treating a past window as closed (rollover)."""
-    stored = user.buckets.get(spec.name)
-    match spec.window:
-        case Rolling():
-            if stored is not None and now_ms < stored.reset_ms:
-                return _Current(spec, stored, stored.start_ms, stored.reset_ms)
-            # Closed: it opens when a request is admitted, so it has no times yet.
-            return _Current(spec, None, None, None)
-        case Fixed(start_ms=start, end_ms=end):
-            if stored is not None and stored.start_ms == start:
-                return _Current(spec, stored, stored.start_ms, stored.reset_ms)
-            return _Current(spec, None, start, end)
-
-
-def _check_buckets(buckets: Sequence[Bucket]) -> None:
-    names = [b.name for b in buckets]
-    if len(set(names)) != len(names):
-        raise ValueError(f"bucket names must be unique, got {names}")
-
-
-def _warn(name: str, state: _BucketState) -> list[UsageWarning]:
-    """Announce each threshold the bucket has newly crossed, once per window."""
-    if state.limit == 0:
-        return []
-    crossed = []
-    for percent in WARN_THRESHOLDS:
-        if percent not in state.warned and state.used * 100 >= state.limit * percent:
-            state.warned.add(percent)
-            crossed.append(UsageWarning(name, percent))
-    return crossed
 
 
 class QuotaOracle:
@@ -160,7 +106,7 @@ class QuotaOracle:
         """
         check_rid(rid)
         check_count("ttl_ms", ttl_ms)
-        _check_buckets(buckets)
+        check_buckets(buckets)
         user = self._users.get(user_id)
         if user is None:
             return NeedsRebuild()
@@ -173,12 +119,12 @@ class QuotaOracle:
 
         self._collect(user, now_ms)
 
-        current = [_current(user, spec, now_ms) for spec in buckets]
+        currents = [current(user.buckets.get(spec.name), spec, now_ms) for spec in buckets]
         smallest = estimate.credits(estimate.min_units)
         # A free request always fits, even when usage ran over the limit: that keeps
         # "Use Local (free)" working once the paid models are blocked.
         short = [
-            c for c in current if smallest > 0 and c.used + c.reserved + smallest > c.spec.limit
+            c for c in currents if smallest > 0 and c.used + c.reserved + smallest > c.spec.limit
         ]
         if short:
             # A closed window has room for anything up to its limit, so a short bucket is
@@ -188,21 +134,21 @@ class QuotaOracle:
             return Denied(rid, tuple(c.spec.name for c in short), retry_at)
 
         units = estimate.max_units
-        if current and estimate.unit_micro > 0:
-            headroom = min(c.spec.limit - c.used - c.reserved for c in current)
+        if currents and estimate.unit_micro > 0:
+            headroom = min(c.spec.limit - c.used - c.reserved for c in currents)
             room_micro = headroom * 1_000_000 - estimate.base_micro
             units = min(units, max(estimate.min_units, room_micro // estimate.unit_micro))
         credits = estimate.credits(units)
 
         windows: dict[str, int] = {}
-        for c in current:
+        for c in currents:
             state = c.state
             if state is None:
                 match c.spec.window:
                     case Rolling(duration_ms=duration):
-                        state = _BucketState(now_ms, now_ms + duration, c.spec.limit)
+                        state = BucketState(now_ms, now_ms + duration, c.spec.limit)
                     case Fixed(start_ms=start, end_ms=end):
-                        state = _BucketState(start, end, c.spec.limit)
+                        state = BucketState(start, end, c.spec.limit)
                 user.buckets[c.spec.name] = state
             state.limit = c.spec.limit
             state.reserved += credits
@@ -221,7 +167,7 @@ class QuotaOracle:
         drops by the held credits and their `used` grows by `credits`. `credits` may be
         more than was held (the prompt estimate was low): it is recorded as it is.
         """
-        check_count("credits", credits)
+        check_count("credits", credits, MAX_CREDITS)
         return self._finish(user_id, rid, Outcome.SETTLED, credits, now_ms)
 
     def release(self, user_id: str, rid: str, *, now_ms: int) -> Finished:
@@ -275,7 +221,7 @@ class QuotaOracle:
             state.reserved -= grant.credits
             if outcome is Outcome.SETTLED:
                 state.used += credits
-                warnings += _warn(name, state)
+                warnings += warn(name, state)
         user.done[rid] = _Done(outcome, grant, now_ms + DONE_TTL_MS)
         return tuple(warnings)
 
@@ -285,17 +231,11 @@ class QuotaOracle:
         self, user_id: str, buckets: Sequence[Bucket], *, now_ms: int
     ) -> tuple[BucketView, ...] | None:
         """The buckets as of `now_ms`, for the usage meter. `None` means: rebuild first."""
-        _check_buckets(buckets)
+        check_buckets(buckets)
         user = self._users.get(user_id)
         if user is None:
             return None
-        views = []
-        for spec in buckets:
-            c = _current(user, spec, now_ms)
-            views.append(
-                BucketView(spec.name, spec.limit, c.used, c.reserved, c.start_ms, c.reset_ms)
-            )
-        return tuple(views)
+        return tuple(current(user.buckets.get(b.name), b, now_ms).view() for b in buckets)
 
     def rebuild(
         self,
@@ -313,35 +253,10 @@ class QuotaOracle:
         dropped, so their usage goes uncounted here: in the user's favour, and still in
         the ledger. Thresholds already crossed are marked as announced.
         """
-        _check_buckets(buckets)
-        user = self._users.get(user_id)
-        if (user.epoch if user else None) != if_epoch:
+        states = rebuilt_buckets(buckets, ledger, now_ms)
+        if self.epoch(user_id) != if_epoch:
             return False
-        rebuilt = _User(epoch=(if_epoch or 0) + 1)
-        entries = list(ledger)
-        for spec in buckets:
-            in_window: list[int] = []
-            match spec.window:
-                case Fixed(start_ms=start, end_ms=end):
-                    in_window = [e.credits for e in entries if e.windows.get(spec.name) == start]
-                    window = (start, end)
-                case Rolling(duration_ms=duration):
-                    starts = [
-                        s
-                        for e in entries
-                        if (s := e.windows.get(spec.name)) is not None and now_ms < s + duration
-                    ]
-                    if not starts:
-                        continue
-                    latest = max(starts)
-                    in_window = [e.credits for e in entries if e.windows.get(spec.name) == latest]
-                    window = (latest, latest + duration)
-            if not in_window:
-                continue
-            state = _BucketState(*window, limit=spec.limit, used=sum(in_window))
-            _warn(spec.name, state)
-            rebuilt.buckets[spec.name] = state
-        self._users[user_id] = rebuilt
+        self._users[user_id] = _User(epoch=(if_epoch or 0) + 1, buckets=states)
         return True
 
     def flush(self) -> None:
@@ -353,49 +268,20 @@ class QuotaOracle:
         return None if user is None else user.epoch
 
     def dump(self, user_id: str, *, now_ms: int) -> dict[str, Any] | None:
-        """The user's stored state as plain data, for comparing engines.
-
-        Done markers past their expiry are left out: the engines may differ in when
-        they physically delete them, but never in whether they still count.
-        """
+        """The user's stored state as plain data (see `state.dump_state`)."""
         user = self._users.get(user_id)
         if user is None:
             return None
-        return {
-            "epoch": user.epoch,
-            "buckets": {
-                name: {
-                    "start_ms": s.start_ms,
-                    "reset_ms": s.reset_ms,
-                    "limit": s.limit,
-                    "used": s.used,
-                    "reserved": s.reserved,
-                    "warned": sorted(s.warned),
-                }
-                for name, s in sorted(user.buckets.items())
-            },
-            "reservations": {
-                rid: {"expires_ms": r.expires_ms, **_grant_data(r.grant)}
-                for rid, r in sorted(user.reservations.items())
-            },
-            "done": {
-                rid: {"outcome": str(d.outcome), "expires_ms": d.expires_ms}
-                for rid, d in sorted(user.done.items())
-                if now_ms < d.expires_ms
-            },
-        }
+        return dump_state(
+            epoch=user.epoch,
+            buckets=user.buckets,
+            reservations={rid: (r.grant, r.expires_ms) for rid, r in user.reservations.items()},
+            done={rid: (d.outcome, d.expires_ms) for rid, d in user.done.items()},
+            now_ms=now_ms,
+        )
 
     def copy(self) -> "QuotaOracle":
         """An independent copy, so a test can compare 'before' and 'after'."""
         twin = QuotaOracle()
         twin._users = copy.deepcopy(self._users)
         return twin
-
-
-def _grant_data(grant: Granted) -> dict[str, Any]:
-    return {"credits": grant.credits, "units": grant.units, "windows": dict(grant.windows)}
-
-
-def ledger_total(entries: Iterable[LedgerEntry], bucket: str, start_ms: int) -> int:
-    """Credits the ledger attributes to one window of one bucket."""
-    return sum(e.credits for e in entries if e.windows.get(bucket) == start_ms)

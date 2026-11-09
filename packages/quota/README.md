@@ -1,13 +1,12 @@
 # actio-quota
 
-Actio's usage-limits engine, inspired by the session and weekly limits of Claude's plans. This package holds the parts that need no server:
+Actio's usage-limits engine, inspired by the session and weekly limits of Claude's plans.
 
-- **credit math** (`cost`);
-- **calendar reset windows** (`windows`), such as "every Monday at 00:00 in Europe/Istanbul";
-- **the engine's inputs and results** (`model`);
-- **a reference model of the engine** (`oracle`): a plain-Python version that is the specification.
+- **The engine** (`engine.ValkeyQuota`) runs each operation as one Lua script inside Valkey (`lua/`), so it is atomic across every API and worker process.
+- **A reference model** (`oracle.QuotaOracle`) implements the same operations in plain Python. It is the specification: differential tests run identical random event sequences against both engines and require identical results and identical stored state at every step.
+- **Credit math** (`cost`), **calendar reset windows** (`windows`), such as "every Monday at 00:00 in Europe/Istanbul", and **the engines' inputs and results** (`model`).
 
-The production engine runs the same operations as Lua scripts inside Valkey, so each one is atomic across all API and worker processes. Those scripts arrive in the next step; differential tests will then run identical random event sequences against both and require identical results. The design and its trade-offs are in [ADR 0006](https://fatihrime.github.io/actio/adr/0006-usage-limits-engine/).
+The design and its trade-offs are in [ADR 0006](https://fatihrime.github.io/actio/adr/0006-usage-limits-engine/).
 
 ## The rules
 
@@ -44,6 +43,8 @@ cost_credits(Usage(input_tokens=12_000, output_tokens=800), standard)  # 15.2, r
 
 ## Example
 
+The reference model is synchronous, which keeps examples short. `ValkeyQuota` has the same methods as coroutines: `await engine.reserve(...)`.
+
 ```python
 from actio_quota import Bucket, CalendarReset, Estimate, Fixed, QuotaOracle, Rates, Rolling
 
@@ -61,14 +62,33 @@ grant = engine.reserve("user-1", "turn-1", buckets, estimate, ttl_ms=600_000, no
 engine.settle("user-1", "turn-1", 64, now_ms=now + 30_000)
 ```
 
+## Storage
+
+Each user has six keys, all under the hash tag `{u:<id>}`, so a cluster keeps them on one node:
+
+| Key | Type | Holds |
+|---|---|---|
+| `q:{u:<id>}:meta` | hash | `epoch`. Missing means the counters must be rebuilt from the ledger |
+| `q:{u:<id>}:b` | hash | Per bucket: `<name>/start`, `/reset`, `/limit`, `/used`, `/reserved`, `/warned` |
+| `q:{u:<id>}:rsv` | hash | Running reservations: id → grant |
+| `q:{u:<id>}:rsv_exp` | sorted set | Running reservations by expiry time |
+| `q:{u:<id>}:done` | hash | Finished reservations: id → outcome and grant |
+| `q:{u:<id>}:done_exp` | sorted set | Finished reservations by when they're forgotten |
+
+Times come from the `now_ms` arguments, never from Valkey's clock, so tests can replay any sequence of events. Every write also sets all six keys to expire after 8 idle days; a returning user is rebuilt from the ledger.
+
 ## Tests
 
 ```sh
 uv run pytest packages/quota                              # 100 random sequences per property
-HYPOTHESIS_PROFILE=nightly uv run pytest packages/quota   # 5,000
+HYPOTHESIS_PROFILE=nightly uv run pytest packages/quota   # 5,000, as the nightly workflow runs
 ```
 
-- Example tests pin down each rule.
-- Property tests check the credit math and that reset windows tile time exactly, across DST changes in six time zones.
-- A state machine fires random reserves, settles, releases, retries, crashes, clock jumps and data loss at the engine. After every step it checks that admission is exact, `reserved` matches the live reservations, a denial writes nothing, retries change nothing, and counters never exceed the ledger.
-- `make test` fails if this package's test coverage drops below 90%.
+The Valkey tests start a throwaway container from the image pinned in `compose.yaml`, so Docker must be running. To use a server you already run, set `ACTIO_TEST_VALKEY_URL`. Without Docker those tests are skipped; CI sets `ACTIO_REQUIRE_DOCKER=1`, which turns the skip into a failure.
+
+- **Rule tests** pin down each rule with one example, and run against both engines.
+- **Property tests** check the credit math, and that reset windows tile time exactly across DST changes in six time zones.
+- **A state machine** fires random reserves, settles, releases, retries, crashes, clock jumps and data loss. After every step it checks that admission is exact, `reserved` matches the running reservations, a denial writes nothing, retries change nothing, and counters never exceed the ledger.
+- **The differential test** runs that state machine with every call sent to both engines, and compares results and complete stored state after every step. Planted bugs in the Lua (an off-by-one in admission, a missed rollover check, a smaller cleanup batch) each fail it or the rule tests.
+- **Concurrency:** 256 simultaneous requests over 8 connections admit exactly ⌊limit / cost⌋. With 30% of them crashing, every held credit still comes back.
+- `make test` fails if this package's coverage drops below 90%.

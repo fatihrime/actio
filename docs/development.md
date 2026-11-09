@@ -33,13 +33,15 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 |---|---|---|
 | `apps/api/tests` | pytest | Settings, the CLI, the health check |
 | `packages/fakellm/tests` | pytest | The wire format, checked with OpenAI's official Python SDK too |
-| `packages/quota/tests` | pytest, Hypothesis | Credit math, reset windows across DST, and the usage-limits rules under random event sequences |
+| `packages/quota/tests` | pytest, Hypothesis, Valkey | Credit math, reset windows across DST, the usage-limits rules under random event sequences, the Lua scripts against the Python reference model, and concurrency |
 | `deploy/tests` | pytest | The containers' security rules |
 | `apps/web` | Vitest | The page renders |
 
 `make test` runs them all. Tests never read `.env`: they build their own settings.
 
 - **Coverage gate:** `make test` fails if the quota engine's test coverage drops below 90%.
+- **Docker:** the quota engine's Valkey tests start a throwaway Valkey container, from the image pinned in `compose.yaml`. Without Docker they're skipped; CI sets `ACTIO_REQUIRE_DOCKER=1` so they can't be. Set `ACTIO_TEST_VALKEY_URL` to use a server you already run.
+- **Nightly:** a scheduled workflow runs the quota tests with 5,000 random examples each.
 - **Random tests:** Hypothesis tries 100 random examples per property on a laptop and 200 in CI. Set `HYPOTHESIS_PROFILE=nightly` for 5,000. When a test fails, Hypothesis shrinks it to a minimal sequence of steps and prints it.
 
 ## CI

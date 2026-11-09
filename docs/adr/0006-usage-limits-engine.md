@@ -39,11 +39,12 @@ We chose option 3, with a plain-Python reference model as its specification.
 - **Integers only.** Credits and prices are integers; costs round up once per request. Lua numbers are 64-bit floats, so every value is kept below 2^53, where they are exact.
 - **Time is an argument.** The engine never reads a clock. Python passes `now_ms`, and works out calendar windows such as "Monday 00:00 Europe/Istanbul" with `zoneinfo`, because Lua has no time zone data. Tests can then replay any sequence of events exactly, including jumps of hours or weeks.
 - **The ledger is the truth.** A request's final message and its ledger row commit in one Postgres transaction before Valkey is settled. If Valkey loses a user's counters, the next request finds no epoch and rebuilds them from the ledger. Requests in flight at that moment go uncounted: in the user's favour, and still recorded in the ledger.
-- **A reference model is the specification.** `actio_quota.oracle` implements every operation in plain Python. Random-sequence tests check its invariants; differential tests will run the same sequences against the Lua scripts and require identical results and identical stored state.
+- **A reference model is the specification.** `actio_quota.oracle` implements every operation in plain Python. Random-sequence tests check its invariants, and a differential test runs the same sequences against the Lua scripts, requiring identical results and identical stored state after every step.
 
 ## Consequences
 
 - Limits hold exactly under concurrency, except for one measured error: the prompt-length estimate. A request can use more than it reserved if its prompt was longer than estimated; the excess is recorded, not hidden, and its size will be measured and published.
 - The Lua must mirror the Python step for step, including details such as which expired reservations are collected first. The differential tests make any divergence fail loudly.
+- Tests of the Lua need a real Valkey server. They start a throwaway container from the image pinned in `compose.yaml`, so they test what production runs.
 - Two stores can drift. A nightly job will compare them and export the drift as a metric.
 - **How to reverse it:** the engine sits behind a small interface (reserve, settle, release, extend, rebuild, snapshot). A Postgres-only implementation could replace the Lua scripts and run against the same differential tests.
