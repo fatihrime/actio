@@ -15,5 +15,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0003](0003-web-app-on-nextjs.md) | A Next.js web app in a pnpm workspace, on a pinned Node.js | Accepted |
 | [0004](0004-local-development-stack.md) | A hybrid local stack: services in Docker, the apps native, Caddy in front | Accepted |
 | [0005](0005-container-images.md) | Container images and the production-shaped stack | Accepted |
+| [0006](0006-usage-limits-engine.md) | Usage limits: reservations in Valkey, a ledger in Postgres, a Python reference model | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.
