@@ -5,15 +5,21 @@ The Postgres and Valkey servers come from the conftest.py at the repository's ro
 
 import os
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AsyncExitStack
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import psycopg
 import pytest
 from psycopg import sql
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from actio.api.dependencies import get_now
 from actio.app import create_app
+from actio.core import schema
+from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
 
 # For tests that never reach a database: nothing listens on port 1.
@@ -37,6 +43,24 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+class Clock:
+    """The time the app under test believes it is. Tests move it by hand."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+
+    def advance(self, **amount: float) -> None:
+        self.now += timedelta(**amount)
+
+
+@pytest.fixture
+def clock() -> Clock:
+    return Clock()
+
+
+# --- Databases ------------------------------------------------------------------------
+
+
 @pytest.fixture
 def database_url(postgres_url: str) -> Iterator[str]:
     """A new, empty database for one test, on the session's Postgres server."""
@@ -49,34 +73,72 @@ def database_url(postgres_url: str) -> Iterator[str]:
 
 
 @pytest.fixture
+def migrated(database_url: str) -> str:
+    """This test's database, with every migration applied."""
+    schema.upgrade(database_url)
+    return database_url
+
+
+@pytest.fixture
+async def db(migrated: str) -> AsyncIterator[AsyncSession]:
+    """A database session on this test's migrated database, for tests below the API."""
+    engine = create_engine(migrated)
+    async with create_session_factory(engine)() as session:
+        yield session
+    await engine.dispose()
+
+
+# --- The app --------------------------------------------------------------------------
+
+
+@pytest.fixture
 def settings(database_url: str, valkey_url: str) -> Settings:
     """Settings that point at this test's own database and the session's Valkey."""
     return Settings(database_url=SecretStr(database_url), valkey_url=SecretStr(valkey_url))
 
 
-async def _client_for(settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
-    """An HTTP client wired straight to a started app: no server, no network."""
-    app = create_app(settings)
-    transport = httpx.ASGITransport(app=app)
-    async with (
-        app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=transport, base_url="http://testserver") as client,
-    ):
-        yield client
+type StartApp = Callable[[Settings], Awaitable[httpx.AsyncClient]]
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[httpx.AsyncClient]:
+async def start_app(clock: Clock) -> AsyncIterator[StartApp]:
+    """Call with settings to get an HTTP client wired straight to a started app.
+
+    No server and no network: requests go to the app in process. The client's address
+    is the app's public address, so it keeps cookies as a browser there would, and the
+    app reads the time from `clock`.
+    """
+    async with AsyncExitStack() as stack:
+
+        async def start(settings: Settings) -> httpx.AsyncClient:
+            app = create_app(settings)
+            app.dependency_overrides[get_now] = lambda: clock.now
+            await stack.enter_async_context(app.router.lifespan_context(app))
+            return await stack.enter_async_context(
+                httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url=settings.public_url
+                )
+            )
+
+        yield start
+
+
+@pytest.fixture
+async def client(start_app: StartApp) -> httpx.AsyncClient:
     """The app with no database and no Valkey behind it, for what needs neither."""
-    nowhere = Settings(
-        database_url=SecretStr(NOWHERE_DATABASE), valkey_url=SecretStr(NOWHERE_VALKEY)
+    return await start_app(
+        Settings(database_url=SecretStr(NOWHERE_DATABASE), valkey_url=SecretStr(NOWHERE_VALKEY))
     )
-    async for client in _client_for(nowhere):
-        yield client
 
 
 @pytest.fixture
-async def running(settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
-    """The app on this test's database and the session's Valkey."""
-    async for client in _client_for(settings):
-        yield client
+async def running(start_app: StartApp, settings: Settings) -> httpx.AsyncClient:
+    """The app on this test's database as it was created: empty, not migrated."""
+    return await start_app(settings)
+
+
+@pytest.fixture
+async def api(start_app: StartApp, settings: Settings, migrated: str) -> httpx.AsyncClient:
+    """The app on this test's migrated database and the session's Valkey."""
+    assert migrated == settings.database_url.get_secret_value()
+    return await start_app(settings)

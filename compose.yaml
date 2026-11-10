@@ -95,6 +95,9 @@ services:
       # Only Caddy and the web app can reach the API here, so trust the client address
       # and scheme that Caddy forwards.
       ACTIO_FORWARDED_ALLOW_IPS: "*"
+      # The address people open in their browser. Set ACTIO_PUBLIC_URL in .env when
+      # Actio is served under another name, such as https://chat.example.com.
+      ACTIO_PUBLIC_URL: ${ACTIO_PUBLIC_URL:-http://localhost:${ACTIO_HTTP_PORT:-8080}}
     networks: [edge, backend]
     mem_limit: 512m
     depends_on:

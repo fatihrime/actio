@@ -71,6 +71,14 @@ ACTIO_POSTGRES_PORT=5432  # make dev only
 ACTIO_VALKEY_PORT=6379    # make dev only
 ```
 
+If people reach Actio under another address than `http://localhost:8080`, say so in `.env` too:
+
+```sh
+ACTIO_PUBLIC_URL=https://chat.example.com
+```
+
+The API accepts changes only from pages at that address, and over HTTPS it marks the session cookie `Secure`. See [ADR 0009](adr/0009-sessions-in-the-database.md).
+
 ## Troubleshooting
 
 **"Address already in use"**

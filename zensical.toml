@@ -31,6 +31,7 @@ nav = [
     { "0006. Usage-limits engine" = "adr/0006-usage-limits-engine.md" },
     { "0007. Local models through Ollama's native API" = "adr/0007-local-models-through-ollamas-native-api.md" },
     { "0008. Postgres through SQLAlchemy and psycopg 3" = "adr/0008-postgres-through-sqlalchemy-and-psycopg.md" },
+    { "0009. Sessions in the database" = "adr/0009-sessions-in-the-database.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

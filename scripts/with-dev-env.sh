@@ -18,4 +18,6 @@ set +a
 
 export ACTIO_DATABASE_URL="postgresql://actio:${POSTGRES_PASSWORD}@127.0.0.1:${ACTIO_POSTGRES_PORT:-5432}/actio"
 export ACTIO_VALKEY_URL="valkey://:${VALKEY_PASSWORD}@127.0.0.1:${ACTIO_VALKEY_PORT:-6379}/0"
+# The address the browser uses, through Caddy.
+export ACTIO_PUBLIC_URL="http://localhost:${ACTIO_HTTP_PORT:-8080}"
 exec "$@"

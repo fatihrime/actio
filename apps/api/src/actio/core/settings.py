@@ -6,6 +6,7 @@ run.
 """
 
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,12 +39,30 @@ class Settings(BaseSettings):
     valkey_url: SecretStr
     """Valkey, as ``valkey://:password@host:6379/0``. Required, and a secret too."""
 
+    public_url: str = "http://localhost:8080"
+    """The address people open in their browser, such as ``https://chat.example.com``.
+
+    It decides two things. Requests that change something must come from pages at this
+    origin. And when it is ``https``, the session cookie is marked ``Secure`` and takes
+    the ``__Host-`` prefix; over plain ``http`` it can't be.
+    """
+
     @field_validator("database_url")
     @classmethod
     def _is_postgres(cls, value: SecretStr) -> SecretStr:
         if not value.get_secret_value().startswith(("postgresql://", "postgres://")):
             raise ValueError("must start with postgresql://")
         return value
+
+    @field_validator("public_url")
+    @classmethod
+    def _is_an_origin(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("must look like https://chat.example.com")
+        if parts.path not in ("", "/") or parts.query or parts.fragment:
+            raise ValueError("must be an address only, with no path")
+        return f"{parts.scheme}://{parts.netloc}"
 
     @field_validator("valkey_url")
     @classmethod

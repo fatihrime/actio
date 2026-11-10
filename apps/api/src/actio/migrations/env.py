@@ -10,7 +10,8 @@ import os
 from alembic import context
 from sqlalchemy import create_engine, pool, text
 
-from actio.core.database import Base, sqlalchemy_url
+from actio import tables
+from actio.core.database import sqlalchemy_url
 
 MIGRATION_LOCK = 4_203_771_106
 """The key of the Postgres advisory lock that migrators take. Any constant will do, as
@@ -28,7 +29,7 @@ def run_migrations() -> None:
     engine = create_engine(sqlalchemy_url(url), poolclass=pool.NullPool)
     try:
         with engine.connect() as connection:
-            context.configure(connection=connection, target_metadata=Base.metadata)
+            context.configure(connection=connection, target_metadata=tables.metadata)
             with context.begin_transaction():
                 # One migrator at a time. A second one waits here until the first
                 # commits, then finds the schema up to date and does nothing.

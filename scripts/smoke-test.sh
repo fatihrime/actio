@@ -27,6 +27,23 @@ check "API health" /api/healthz '"status":"ok"'
 check "API readiness" /api/readyz '"status":"ready"'
 check "API docs" /api/docs 'swagger-ui'
 
+# A guest session, through the proxy: start one, read it back with its cookie, end it.
+session_round_trip() {
+  local jar started me
+  jar="$(mktemp)"
+  started="$(curl --silent --max-time 5 --cookie-jar "$jar" --request POST "$base/api/session/guest")"
+  me="$(curl --silent --max-time 5 --cookie "$jar" "$base/api/me")"
+  curl --silent --max-time 5 --cookie "$jar" --request DELETE "$base/api/session" >/dev/null
+  rm -f "$jar"
+  [[ $started == *'"is_guest":true'* && $me == "$started" ]]
+}
+if session_round_trip; then
+  printf '  ✓ %s\n' "guest session"
+else
+  printf '  ✗ %s: starting a guest session and reading it back did not work\n' "guest session"
+  failures=$((failures + 1))
+fi
+
 if [ "$failures" -eq 0 ]; then
   echo "All checks passed."
 else

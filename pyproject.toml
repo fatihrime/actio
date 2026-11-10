@@ -164,10 +164,12 @@ broken_contract_guidance = "Each package stands alone. The app is where they mee
 
 [[tool.importlinter.contracts]]
 id = "app-layers"
-name = "Inside the application, imports only point down: cli, app, health, core"
+name = "Inside the application, imports only point down: cli, app, api, identity, core"
 type = "layers"
 containers = ["actio"]
-layers = ["cli", "app", "health", "core"]
+# `api` is the HTTP interface. `tables` lists the domain modules' tables for the
+# migrations. Below them come the domain modules, then `core`.
+layers = ["cli", "app", "api", "tables", "identity", "core"]
 # Every module directly under `actio` must be given a layer above, so a new one can't
 # skip the question of where it belongs.
 exhaustive = true
@@ -175,9 +177,9 @@ exhaustive_ignores = ["__main__"]
 broken_contract_guidance = "A lower layer can't import a higher one. Move the shared part down, or pass it in."
 
 [[tool.importlinter.contracts]]
-id = "core-without-the-web-framework"
-name = "core never imports the web framework"
+id = "web-framework-only-in-the-api"
+name = "core and the domain modules never import the web framework"
 type = "forbidden"
-source_modules = ["actio.core"]
+source_modules = ["actio.core", "actio.identity"]
 forbidden_modules = ["fastapi", "starlette", "uvicorn"]
-broken_contract_guidance = "core is used by every process, including the ones that serve no HTTP."
+broken_contract_guidance = "Processes that serve no HTTP use these modules too. HTTP belongs in actio.api."

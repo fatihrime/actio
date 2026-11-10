@@ -27,7 +27,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 
 | Path | Purpose |
 |---|---|
-| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `core/` holds settings and the database; `migrations/` holds the schema's history |
+| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `identity/` holds accounts and sessions; `core/` holds settings, ids and the database; `migrations/` holds the schema's history |
 | `apps/web` | Next.js web app |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
 | `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`); the router comes later |
@@ -89,7 +89,13 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 - **Commits:** [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `test:`, `chore:` and so on.
 - **Architecture boundaries,** enforced by import-linter at every commit and in CI. The rules are in `pyproject.toml`, under `[tool.importlinter]`:
   - `packages/*` never import the application, or each other;
-  - inside `actio`, imports only point down the layers: `cli`, `app`, `health`, `core`. So `core` imports nothing else from `actio`;
-  - `core` never imports the web framework;
-  - a new module directly under `actio` must be given a layer in that list, or the check fails. Domain modules, when they arrive, go between `health` and `core`, and join the rule against importing the web framework.
+  - inside `actio`, imports only point down the layers: `cli`, `app`, `api`, `tables`, `identity`, `core`. So `core` imports nothing else from `actio`;
+  - only `actio.api` imports the web framework. `core` and the domain modules, such as `identity`, never do;
+  - a new module directly under `actio` must be given a layer in that list, or the check fails. A new domain module goes next to `identity`, and joins the rule against importing the web framework.
+- **API conventions:**
+  - routes live in `actio.api`; rules and tables live in a domain module below it, which never commits: the route decides when the unit of work is done;
+  - errors are RFC 9457 problem documents: raise `Problem(status, detail)`;
+  - nothing below `actio.api` reads the clock. Time comes in as `now`, from the `Now` dependency, so tests can move it;
+  - a route that needs to know who is asking takes `CurrentPrincipal`;
+  - a module that defines tables is named `models` and listed in `actio/tables.py`, or a test fails.
 - **Decisions:** anything hard to reverse gets an ADR. Copy [`docs/adr/0000-template.md`](docs/adr/0000-template.md).

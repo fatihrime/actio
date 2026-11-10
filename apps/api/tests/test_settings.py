@@ -70,6 +70,33 @@ def test_passwords_never_show_when_settings_are_printed() -> None:
     assert "s3cret" not in shown
 
 
+@pytest.mark.usefixtures("stores")
+def test_the_public_address_defaults_to_the_local_stack() -> None:
+    assert Settings().public_url == "http://localhost:8080"
+
+
+@pytest.mark.usefixtures("stores")
+@pytest.mark.parametrize(
+    ("given", "kept"),
+    [
+        ("https://chat.example.com", "https://chat.example.com"),
+        ("https://chat.example.com/", "https://chat.example.com"),  # as browsers write an origin
+        ("http://192.168.1.20:8080", "http://192.168.1.20:8080"),
+    ],
+)
+def test_the_public_address_is_kept_as_an_origin(given: str, kept: str) -> None:
+    assert Settings(public_url=given).public_url == kept
+
+
+@pytest.mark.usefixtures("stores")
+@pytest.mark.parametrize(
+    "given", ["chat.example.com", "ftp://chat.example.com", "https://chat.example.com/app", ""]
+)
+def test_a_public_address_that_is_not_an_origin_is_refused(given: str) -> None:
+    with pytest.raises(ValidationError, match="public_url"):
+        Settings(public_url=given)
+
+
 @pytest.mark.parametrize(
     ("field", "url"),
     [

@@ -32,8 +32,8 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 Actio is one application split into modules, not into services ([ADR 0001](adr/0001-one-app-several-process-roles.md)), so a tool keeps the modules apart. The rules live in `pyproject.toml`, under `[tool.importlinter]`, and `uv run lint-imports` checks them:
 
 - the packages under `packages/` never import the application, or each other;
-- inside the application, imports only point down the layers: `cli`, `app`, `health`, `core`;
-- `core` never imports the web framework, because processes that serve no HTTP use it too;
+- inside the application, imports only point down the layers: `cli`, `app`, `api`, `tables`, `identity`, `core`;
+- only `api`, the HTTP interface, imports the web framework. `core` and the domain modules never do, because processes that serve no HTTP use them too;
 - every module directly under `actio` must be given a layer. A new module fails the check until someone decides where it belongs.
 
 A broken rule names the file, the line and the import, and says what to do instead.

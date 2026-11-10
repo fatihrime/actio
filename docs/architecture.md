@@ -25,11 +25,20 @@ flowchart LR
 ```
 
 - **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies will need.
-- **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, and `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). Today the API serves two probes and its interactive docs:
+- **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, and `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). Today the API serves its interactive docs, two probes and guest sessions:
     - `/api/healthz` answers whenever the process is alive;
-    - `/api/readyz` answers 200 only when the database is reachable and migrated and Valkey answers. Otherwise it answers 503 and names what is missing.
+    - `/api/readyz` answers 200 only when the database is reachable and migrated and Valkey answers. Otherwise it answers 503 and names what is missing;
+    - `POST /api/session/guest` starts a session as a new guest and sets its cookie, `GET /api/me` says who the cookie belongs to, and `DELETE /api/session` ends it ([ADR 0009](adr/0009-sessions-in-the-database.md)).
 - **The web app** is a Next.js application. Today it is a placeholder page.
-- **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both; the database's schema is still empty, and the first tables arrive with accounts.
+- **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both. Postgres holds the first two tables, accounts and their sessions; nothing uses Valkey yet beyond the readiness check.
+
+Inside the API, the code is split into layers that only import downward, and a tool enforces it:
+
+| Layer | Holds |
+|---|---|
+| `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, the error format. The only layer that knows the web framework |
+| `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
+| `actio.core` | Settings, ids, the database connection and its migrations |
 
 | Path | Goes to |
 |---|---|
