@@ -18,5 +18,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0006](0006-usage-limits-engine.md) | Usage limits: reservations in Valkey, a ledger in Postgres, a Python reference model | Accepted |
 | [0007](0007-local-models-through-ollamas-native-api.md) | Local models through Ollama's native API, with silent truncation turned off | Accepted |
 | [0008](0008-postgres-through-sqlalchemy-and-psycopg.md) | Postgres through SQLAlchemy and psycopg 3, with migrations as a job | Accepted |
+| [0009](0009-sessions-in-the-database.md) | Sessions in the database, in a cookie bound to the host | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.
