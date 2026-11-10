@@ -3,7 +3,7 @@
 Actio's model clients: one neutral chat format, and two adapters that speak it.
 
 - **The neutral format** (`chat`): a `ChatRequest` goes in, and text, reasoning, tool calls and one final event with token counts stream out. The rest of Actio never sees a provider's JSON.
-- **The Ollama adapter** (`Ollama`) uses [Ollama](https://ollama.com)'s native API and turns off its silent truncation: a prompt that doesn't fit the model's context window is refused, not quietly cut.
+- **The Ollama adapter** (`Ollama`) uses [Ollama](https://ollama.com)'s native API so that a model never answers from a quietly shortened prompt, and no answer runs without a limit.
 - **The OpenAI-compatible adapter** (`OpenAICompatible`) serves every server that speaks OpenAI's Chat Completions API: [fakellm](https://fatihrime.github.io/actio/reference/fakellm/) in tests, and vLLM or hosted providers later.
 - **A command-line tool** (`actio-llm`) to try the Ollama adapter from a terminal.
 
@@ -60,15 +60,21 @@ A stream is any number of `TextDelta`, `ReasoningDelta` and `ToolCall` events, t
 
 ## What the Ollama adapter guarantees
 
-Measured against Ollama 0.40.16. The left column is what Ollama does when asked nothing special.
+**A model never answers from a shortened prompt, and an answer is never unbounded.** How that is achieved depends on which of Ollama's two engines runs the model. Both were measured against Ollama 0.40.16.
 
-| Situation | Ollama by default | Through this adapter |
+| | Default engine (GGUF models) | MLX engine (the usual build on Apple Silicon) |
 |---|---|---|
-| The prompt is longer than the context window | Answers 200, from roughly the last half-window of the prompt. The start is dropped, system prompt included | `ContextOverflowError`, with the prompt's size and the window's size in tokens |
-| The answer fills the context window | Drops the oldest tokens and keeps writing | Stops, with the finish reason `length` |
-| The context window | 4,096 tokens on a machine with less than 24 GiB of video memory | Whatever the request's `context_window` says |
-| The server is older than 0.40 | It may ignore the two flags behind the rows above | `UnsupportedServerError`, before any prompt is sent |
-| The model asks for a tool | The finish reason is `stop` | The finish reason is `tool_calls` |
+| What Ollama does by itself | Cuts a prompt that doesn't fit: it answers 200 from roughly the last half-window, and the start is gone, system prompt included. Lets an answer that fills the window push the oldest tokens out | Ignores the context window. Reads every prompt in full, and lets an answer run until the model stops |
+| A prompt longer than the window, through this adapter | Refused: `ContextOverflowError`, with the prompt's and the window's size in tokens | Answered in full. Nothing is cut; `Usage.input_tokens` reports the real size |
+| An answer, through this adapter | Stops when the window is full, or at its token limit | Stops at its token limit, which the adapter always sends |
+| Memory | Fixed by the window | Grows with the conversation |
+| `ModelInfo.enforces_window` | `True` | `False`: the window is the caller's budget |
+
+On both engines:
+
+- **Every answer has a token limit:** the request's `max_output_tokens`, never more than its `context_window`, and 4,096 when it names neither. Measured without one: a small reasoning model thought for 7,297 tokens, three minutes, to say hello.
+- **A server older than 0.40 is refused** with `UnsupportedServerError` before any prompt is sent, because it may ignore the flags that stop the default engine from cutting prompts.
+- **A model that asks for a tool** finishes with the reason `tool_calls`. Ollama itself says `stop`.
 
 It also reports what the usage limits and the interface need:
 
@@ -133,6 +139,7 @@ make test-live                  # the same requests, sent to a real Ollama serve
 - **Recorded exchanges.** `tests/fixtures/ollama/` holds real responses from an Ollama server, one file per request. The tests replay them, and fail if the adapter no longer sends exactly the recorded request.
 - **Live mode.** `make test-live` needs `granite4:micro` on the server. It also runs what a recording can't show: that closing a stream frees the server.
   - Set `ACTIO_TEST_OLLAMA_THINKING_MODEL` to a model that can reason, to test reasoning against it too.
+  - Set `ACTIO_TEST_OLLAMA_MLX_MODEL` to a model that runs on the MLX engine, to pin that engine's behaviour. On an Apple Silicon Mac, `qwen3.5:4b` serves for both.
   - Add `ACTIO_RECORD_OLLAMA=1` to save the server's answers as the new recordings, after an Ollama upgrade.
 - **Hand-written responses** cover what a healthy server won't produce on demand: dropped connections, stalls, malformed lines, old versions.
 - **The OpenAI-compatible adapter runs against fakellm,** in process. fakellm is a separate implementation of the format, itself checked with OpenAI's official SDK, so neither is only tested against itself. Directives in the prompt script its reasoning, tool calls and failures.

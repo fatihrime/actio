@@ -1,19 +1,26 @@
-"""Ollama, through its native API, with silent truncation turned off.
+"""Ollama, through its native API, so that a model never answers from a shortened prompt.
 
-Ollama also offers OpenAI-compatible endpoints, but only `/api/chat` can set the context
-window per request, and a model loaded with the default window (4,096 tokens on a 16 GB
-Mac) quietly drops the start of a longer prompt, system prompt included, and still
-answers 200.
+Ollama runs models on two engines, and they treat the context window differently
+(measured against Ollama 0.40.16; see ADR 0007):
 
-So every chat request here carries two flags, measured against Ollama 0.40.16:
+- **The default engine** (models in the GGUF format) enforces the window, and by default
+  it does so quietly: a prompt that doesn't fit loses its start, system prompt included,
+  and the answer still arrives with status 200. Two flags on every request turn that off:
+  - `"truncate": false`: such a prompt is refused with HTTP 400, which becomes
+    `ContextOverflowError`;
+  - `"shift": false`: an answer that fills the window stops there
+    (`FinishReason.LENGTH`) instead of pushing the oldest tokens out to keep writing.
+- **The MLX engine** (the usual build on Apple Silicon) ignores the window, and the two
+  flags with it. It reads every prompt in full, so nothing is cut there either, but
+  nothing stops an answer except its token limit, and memory grows with the conversation.
 
-- `"truncate": false`: a prompt that doesn't fit is refused with HTTP 400, which becomes
-  `ContextOverflowError`, instead of being cut;
-- `"shift": false`: an answer that fills the window stops there (`FinishReason.LENGTH`)
-  instead of pushing the oldest tokens out to keep writing.
+So every request also carries a token limit for the answer (`num_predict`): on the MLX
+engine it is the only bound there is. `ModelInfo.enforces_window` says which engine a
+model runs on.
 
-Older servers may ignore the flags, which would bring silent truncation back, so the
-adapter refuses servers older than `MIN_VERSION`. See ADR 0007.
+Only `/api/chat` can do this: Ollama's OpenAI-compatible endpoint can't set the window.
+Older servers may ignore the flags, which would bring the quiet cut back, so the adapter
+refuses servers older than `MIN_VERSION`.
 """
 
 import json
@@ -57,6 +64,13 @@ from actio_llm.wire import Timeouts, request_json, stream_lines
 MIN_VERSION = (0, 40, 0)
 """The oldest Ollama this adapter accepts: the release line its strict flags were measured on."""
 
+ANSWER_CAP = 4096
+"""The most tokens an answer may have when a request names no limit and no window.
+
+An answer is never unbounded. On the MLX engine nothing else would stop it: a small
+reasoning model, left to its defaults, was measured thinking for 7,297 tokens (three
+minutes) before saying hello."""
+
 _OVERFLOW = re.compile(r"\((\d+) tokens\) exceeds the available context size \((\d+) tokens\)")
 _VERSION = re.compile(r"\d+(?:\.\d+)*")
 
@@ -85,9 +99,24 @@ class ModelInfo:
     """Named reasoning levels, such as `low`, for models that have them."""
     parameter_size: str | None
     quantization: str | None
+    runner: str | None = None
+    """The engine Ollama runs the model on, when it names one: `mlx` for Apple Silicon
+    builds, `llamacpp` (or nothing, for older model files) for the default engine."""
 
     def can(self, capability: str) -> bool:
         return capability in self.capabilities
+
+    @property
+    def enforces_window(self) -> bool:
+        """Whether Ollama holds this model to a request's `context_window`.
+
+        True on the default engine: a prompt that doesn't fit is refused, and an answer
+        stops when the window is full. False on the MLX engine, which ignores the window:
+        the prompt is read in full whatever its size, and only the answer's token limit
+        applies. There the window is the caller's own budget, and `Usage.input_tokens`
+        says how large the prompt really was.
+        """
+        return self.runner != "mlx"
 
 
 class Ollama:
@@ -181,6 +210,7 @@ class Ollama:
             thinking_levels=levels,
             parameter_size=details.get("parameter_size"),
             quantization=details.get("quantization_level"),
+            runner=details.get("runner") or None,
         )
 
     # --- Plumbing --------------------------------------------------------------------
@@ -290,11 +320,13 @@ def _body(request: ChatRequest, keep_alive: str | int) -> dict[str, Any]:
         "shift": False,
         "keep_alive": keep_alive,
     }
+    # The answer's limit is always sent, and never larger than the window: on the MLX
+    # engine it is the only thing that stops an answer.
+    named = [n for n in (request.max_output_tokens, request.context_window) if n is not None]
     options: dict[str, Any] = {}
     if request.context_window is not None:
         options["num_ctx"] = request.context_window
-    if request.max_output_tokens is not None:
-        options["num_predict"] = request.max_output_tokens
+    options["num_predict"] = min(named, default=ANSWER_CAP)
     if request.temperature is not None:
         options["temperature"] = request.temperature
     if request.top_p is not None:
@@ -303,8 +335,7 @@ def _body(request: ChatRequest, keep_alive: str | int) -> dict[str, Any]:
         options["seed"] = request.seed
     if request.stop:
         options["stop"] = list(request.stop)
-    if options:
-        body["options"] = options
+    body["options"] = options
     if request.tools:
         body["tools"] = [
             {

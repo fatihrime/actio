@@ -15,6 +15,7 @@
     "keep_alive": "5m",
     "options": {
       "num_ctx": 4096,
+      "num_predict": 4096,
       "temperature": 0,
       "seed": 7
     },
@@ -41,5 +42,5 @@
   },
   "status": 200,
   "content_type": "application/x-ndjson",
-  "body": "{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.192577Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call_r0q3gclv\",\"function\":{\"index\":0,\"name\":\"get_weather\",\"arguments\":{\"city\":\"Izmir\"}}}]},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.232422Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"total_duration\":1735373417,\"load_duration\":792846250,\"prompt_eval_count\":176,\"prompt_eval_cached_count\":0,\"prompt_eval_duration\":382133000,\"eval_count\":29,\"eval_duration\":556800000}\n"
+  "body": "{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T10:39:45.739964Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call_4lyr3xk6\",\"function\":{\"index\":0,\"name\":\"get_weather\",\"arguments\":{\"city\":\"Izmir\"}}}]},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T10:39:45.779291Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"total_duration\":1470208542,\"load_duration\":546315042,\"prompt_eval_count\":176,\"prompt_eval_cached_count\":0,\"prompt_eval_duration\":371172000,\"eval_count\":29,\"eval_duration\":550346000}\n"
 }

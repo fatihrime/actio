@@ -84,13 +84,17 @@ class ChatRequest:
     messages: Sequence[Message] = field(hash=False)
     tools: Sequence[ToolSpec] = field(default=(), hash=False)
     max_output_tokens: int | None = None
-    """The most tokens the answer may have, reasoning included. `None`: no limit but
-    the context window."""
+    """The most tokens the answer may have, reasoning included. `None`: the adapter's
+    own bound, which is never more than the context window."""
     context_window: int | None = None
-    """How many tokens the model may hold: the prompt plus the answer. A local runtime
-    loads the model with this size, so keep it the same for every request to a model:
-    changing it reloads the model. Hosted providers ignore it. `None`: the provider's
-    default."""
+    """How many tokens the model may hold: the prompt plus the answer. `None`: the
+    provider's default.
+
+    Who enforces it depends on the provider. A local runtime that sizes the model's
+    memory by it refuses a prompt that doesn't fit, and reloads the model when the size
+    changes, so keep it the same for every request to a model. Other runtimes and the
+    hosted providers ignore it: there it only caps the answer, and keeping the prompt
+    inside it is the caller's job."""
     thinking: bool | str | None = None
     """`True` or `False` to turn reasoning on or off, or a level the model defines,
     such as `"low"`. `None`: the model's default."""

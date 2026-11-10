@@ -90,7 +90,7 @@ def test_chat_streams_the_reasoning_then_the_answer_then_the_statistics(
         {"role": "system", "content": "Be brief."},
         {"role": "user", "content": "Selam"},
     ]
-    assert sent["options"] == {"num_ctx": 8192}
+    assert sent["options"] == {"num_ctx": 8192, "num_predict": 8192}
     assert sent["think"] is True
 
 
@@ -98,7 +98,7 @@ def test_chat_leaves_the_models_defaults_alone(server: list[dict[str, Any]]) -> 
     cli.main(["chat", "qwen3.5:4b", "Selam"])
 
     [sent] = server
-    assert "options" not in sent
+    assert sent["options"] == {"num_predict": 4096}  # only the answer's safety limit
     assert "think" not in sent
 
 

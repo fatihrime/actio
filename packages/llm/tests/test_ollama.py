@@ -195,6 +195,8 @@ async def test_describe_reads_what_a_model_can_do(ollama_with: Any) -> None:
     assert not info.can("thinking")
     assert info.context_length == 131_072
     assert info.parameter_size == "3.4B"
+    assert info.runner is None  # the default engine, which enforces the context window
+    assert info.enforces_window
 
 
 async def test_models_lists_what_is_on_disk(ollama_with: Any) -> None:
@@ -369,7 +371,7 @@ async def test_a_request_becomes_ollamas_json(serve: Serve) -> None:
     ]
 
 
-async def test_a_plain_request_sets_nothing_it_was_not_asked_to(serve: Serve) -> None:
+async def test_a_plain_request_sets_only_the_safety_settings(serve: Serve) -> None:
     sent: list[dict[str, Any]] = []
 
     def chat(request: httpx2.Request) -> httpx2.Response:
@@ -386,8 +388,56 @@ async def test_a_plain_request_sets_nothing_it_was_not_asked_to(serve: Serve) ->
             "truncate": False,
             "shift": False,
             "keep_alive": "5m",
+            "options": {"num_predict": 4096},  # an answer is never unbounded
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("limits", "sent"),
+    [
+        ({}, 4096),
+        ({"max_output_tokens": 300}, 300),
+        ({"context_window": 8192}, 8192),
+        ({"max_output_tokens": 300, "context_window": 8192}, 300),
+        ({"max_output_tokens": 9000, "context_window": 8192}, 8192),
+    ],
+)
+async def test_every_answer_has_a_token_limit(
+    serve: Serve, limits: dict[str, Any], sent: int
+) -> None:
+    """Ollama's MLX engine ignores the context window, so there only this limit stops an
+    answer. Measured: a model left to its defaults thought for 7,297 tokens to say hello."""
+    bodies: list[dict[str, Any]] = []
+
+    def chat(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(200, content=ndjson(DONE))
+
+    await collect(serve(chat).stream(ChatRequest(model="m", messages=[User("hi")], **limits)))
+
+    assert bodies[0]["options"]["num_predict"] == sent
+
+
+async def test_describe_says_which_engine_ignores_the_context_window() -> None:
+    """Written from what `/api/show` answered for an MLX model on Ollama 0.40.16."""
+    shown = {
+        "capabilities": ["completion", "vision", "thinking", "tools"],
+        "details": {"format": "safetensors", "parameter_size": "4.5B", "runner": "mlx"},
+        "model_info": {"qwen3_5.context_length": 262_144},
+        "thinking": {"values": [False, True], "default": True},
+    }
+    async with httpx2.AsyncClient(
+        base_url="http://ollama.test",
+        transport=httpx2.MockTransport(lambda _request: httpx2.Response(200, json=shown)),
+    ) as client:
+        info = await Ollama(client).describe("qwen3.5:4b")
+
+    assert info.runner == "mlx"
+    assert not info.enforces_window
+    assert info.can("thinking")
+    assert info.thinking_levels == ()  # this model's reasoning is on or off, with no levels
+    assert info.context_length == 262_144
 
 
 async def test_lines_split_across_network_chunks_are_put_back_together(serve: Serve) -> None:

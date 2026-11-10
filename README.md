@@ -42,9 +42,9 @@ Actio tackles these problems end to end on a 16 GB laptop and free tiers.
   - [The design (ADR 0006)](docs/adr/0006-usage-limits-engine.md) · [the rules](https://fatihrime.github.io/actio/reference/quota/) · [the tests](packages/quota/tests)
 
 - **A local-model client that never answers from half your prompt.**
-  - Measured: by default, Ollama cuts a prompt that doesn't fit the model's context window, system prompt included, and still answers as if nothing happened.
-  - Actio's adapter uses Ollama's native API with strict settings, so such a prompt is refused with a clear error, and an answer stops when the window is full.
-  - Its tests replay exchanges recorded from a real server. With the strict settings removed, they fail.
+  - Measured: Ollama has two engines. By default, one cuts a prompt that doesn't fit the model's context window, system prompt included, and still answers as if nothing happened. The other ignores the window and lets an answer run on: a small model thought for three minutes to say hello.
+  - Actio's adapter makes the first refuse such a prompt with a clear error, and gives every answer a limit on both.
+  - Its tests replay exchanges recorded from a real server, and live tests pin what each engine really does. With the strict settings removed, they fail.
   - [The design (ADR 0007)](docs/adr/0007-local-models-through-ollamas-native-api.md) · [what it guarantees](https://fatihrime.github.io/actio/reference/llm/) · [the tests](packages/llm/tests)
 
 _More are added as each piece ships, with links to the design records (ADRs), tests and measurements._
