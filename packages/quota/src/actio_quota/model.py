@@ -160,7 +160,9 @@ class Outcome(StrEnum):
     SETTLED = "settled"
     RELEASED = "released"
     EXPIRED = "expired"
-    """Its holder stopped extending it, so the engine released it."""
+    """Its holder stopped extending it, so the engine gave its held credits back. It
+    hasn't ended yet: the first settle or release still decides how, so a `Finished`
+    never carries this outcome."""
     UNKNOWN = "unknown"
     """Never reserved, forgotten after `DONE_TTL_MS`, or lost with Valkey's data."""
 
@@ -179,7 +181,8 @@ class Finished:
 
     outcome: Outcome
     applied: bool
-    """False when the reservation had already ended: the call changed nothing."""
+    """False when the reservation had already ended, or isn't known: the call changed
+    nothing, and `outcome` says how it ended before."""
     warnings: tuple[UsageWarning, ...] = ()
 
 

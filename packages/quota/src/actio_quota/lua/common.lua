@@ -78,14 +78,10 @@ local function warn(name, b, out)
   end
 end
 
--- End a live reservation: give back its held credits in every window that admitted it
--- and is still current, charge `credits` if settled, and leave a done marker.
-local function finish(rid, outcome, credits, now)
-  local grant = redis.call('HGET', KEYS[3], rid)
-  redis.call('HDEL', KEYS[3], rid)
-  redis.call('ZREM', KEYS[4], rid)
+-- End a reservation: give back `held` credits and, if settled, charge `credits`, in
+-- every window that admitted it and is still current. Then leave a done marker.
+local function finish(rid, grant, held, outcome, credits, now)
   local g = split(grant)
-  local held = tonumber(g[1])
   local warnings = {}
   for i = 3, #g, 2 do
     local name, start = g[i], tonumber(g[i + 1])
@@ -104,11 +100,19 @@ local function finish(rid, outcome, credits, now)
   return warnings
 end
 
+-- End a live reservation: what it holds is its grant's credits.
+local function finish_live(rid, outcome, credits, now)
+  local grant = redis.call('HGET', KEYS[3], rid)
+  redis.call('HDEL', KEYS[3], rid)
+  redis.call('ZREM', KEYS[4], rid)
+  return finish(rid, grant, tonumber(split(grant)[1]), outcome, credits, now)
+end
+
 -- Release up to GC_BATCH expired reservations, oldest expiry first (ties by id), and
 -- forget up to GC_BATCH stale done markers. Returns how many reservations expired.
 local function collect(now)
   local expired = redis.call('ZRANGE', KEYS[4], '-inf', S(now), 'BYSCORE', 'LIMIT', 0, GC_BATCH)
-  for _, rid in ipairs(expired) do finish(rid, 'expired', 0, now) end
+  for _, rid in ipairs(expired) do finish_live(rid, 'expired', 0, now) end
   local stale = redis.call('ZRANGE', KEYS[6], '-inf', S(now), 'BYSCORE', 'LIMIT', 0, GC_BATCH)
   for _, rid in ipairs(stale) do
     redis.call('HDEL', KEYS[5], rid)

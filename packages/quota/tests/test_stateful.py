@@ -70,6 +70,8 @@ class QuotaMachine(RuleBasedStateMachine):
         self.oracle = engine or QuotaOracle()
         self.clock = ManualClock(1_800_000_000_000)
         self.ledger: list[LedgerEntry] = []
+        self.uncounted: list[LedgerEntry] = []
+        """Ledger entries whose settle the engine reported as not applied."""
         self.counter = 0
 
     def buckets(self) -> list[Bucket]:
@@ -89,6 +91,7 @@ class QuotaMachine(RuleBasedStateMachine):
         assert self.oracle.rebuild(
             USER, self.buckets(), self.ledger, now_ms=self.clock.now_ms(), if_epoch=epoch
         )
+        self.uncounted.clear()  # a rebuild counts the whole ledger again
 
     @initialize()
     def start(self) -> None:
@@ -137,9 +140,15 @@ class QuotaMachine(RuleBasedStateMachine):
     @rule(target=finished, grant=consumes(granted), error=st.integers(-30, 30))
     def settle(self, grant: Granted, error: int) -> Granted:
         actual = max(0, grant.credits + error)  # the prompt estimate may be off either way
-        self.ledger.append(LedgerEntry(grant.rid, actual, grant.windows))  # the ledger first
+        entry = LedgerEntry(grant.rid, actual, grant.windows)
+        self.ledger.append(entry)  # the ledger first
         result = self.oracle.settle(USER, grant.rid, actual, now_ms=self.clock.now_ms())
-        assert result.outcome in {Outcome.SETTLED, Outcome.EXPIRED, Outcome.UNKNOWN}
+        # Expiry never stops a settle. Only a reservation the engine no longer knows goes
+        # uncounted: lost with Valkey's data, or forgotten after two days.
+        assert result.outcome in {Outcome.SETTLED, Outcome.UNKNOWN}
+        assert result.applied == (result.outcome is Outcome.SETTLED)
+        if not result.applied:
+            self.uncounted.append(entry)
         for warning in result.warnings:
             assert warning.percent in WARN_THRESHOLDS
         return grant
@@ -147,7 +156,8 @@ class QuotaMachine(RuleBasedStateMachine):
     @rule(target=finished, grant=consumes(granted))
     def release(self, grant: Granted) -> Granted:
         result = self.oracle.release(USER, grant.rid, now_ms=self.clock.now_ms())
-        assert result.outcome in {Outcome.RELEASED, Outcome.EXPIRED, Outcome.UNKNOWN}
+        assert result.outcome in {Outcome.RELEASED, Outcome.UNKNOWN}
+        assert result.applied == (result.outcome is Outcome.RELEASED)
         return grant
 
     @rule(grant=consumes(granted))
@@ -212,11 +222,13 @@ class QuotaMachine(RuleBasedStateMachine):
 
     @invariant()
     @precondition(lambda self: self.ledger)
-    def counters_never_exceed_the_ledger(self) -> None:
-        """Counters only ever undercount, never invent usage."""
+    def counters_match_the_ledger(self) -> None:
+        """Every settled credit is counted, except the settles the engine said it lost."""
         for name, view in self.views().items():
             if view.start_ms is not None:
-                assert view.used <= ledger_total(self.ledger, name, view.start_ms)
+                settled = ledger_total(self.ledger, name, view.start_ms)
+                lost = ledger_total(self.uncounted, name, view.start_ms)
+                assert view.used == settled - lost, name
 
 
 TestQuotaOracle = QuotaMachine.TestCase

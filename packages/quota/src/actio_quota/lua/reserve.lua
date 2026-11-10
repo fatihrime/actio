@@ -16,10 +16,12 @@ if live then return grant_reply(live) end
 local _, finished = done_marker(rid, now)
 if finished then return grant_reply(finished) end
 
--- 2. Release expired reservations.
-collect(now)
+-- 2. Release expired reservations. That writes, even if this request is then denied,
+--    so it pushes back the idle expiry like any other write.
+if collect(now) > 0 then touch() end
 
--- 3. Each bucket's current window: a past window counts as closed.
+-- 3. Each bucket's current window: a past window counts as closed. A calendar window
+--    only moves forward: a caller with an older one joins the stored window.
 local current = {}
 local i = 9
 for n = 1, tonumber(ARGV[8]) do
@@ -30,7 +32,7 @@ for n = 1, tonumber(ARGV[8]) do
   if c.kind == 'r' then
     if stored and now < stored.reset then c.state = stored end
   else
-    if stored and stored.start == c.a then c.state = stored else c.start, c.reset = c.a, c.b end
+    if stored and stored.start >= c.a then c.state = stored else c.start, c.reset = c.a, c.b end
   end
   if c.state then
     c.used, c.reserved = c.state.used, c.state.reserved

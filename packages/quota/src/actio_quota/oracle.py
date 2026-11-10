@@ -11,7 +11,8 @@ Per user, the engine stores:
   already announced in this window;
 - **reservations:** admitted requests that haven't finished, each with its grant and an
   expiry time that the holder keeps pushing back with `extend`;
-- **done markers:** how each finished reservation ended, kept for `DONE_TTL_MS`;
+- **done markers:** how each reservation that is no longer running ended, or that it
+  expired and can still be settled or released, kept for `DONE_TTL_MS`;
 - **epoch:** bumped by every rebuild. A user with no epoch has no counters yet.
 
 Time only matters through the `now_ms` arguments. Expired state is never deleted on a
@@ -166,6 +167,9 @@ class QuotaOracle:
         Only windows that are still the ones that admitted it change: their `reserved`
         drops by the held credits and their `used` grows by `credits`. `credits` may be
         more than was held (the prompt estimate was low): it is recorded as it is.
+
+        A reservation that expired first is still charged. Its held credits are already
+        back, but a settle follows a ledger row, so the usage is real.
         """
         check_count("credits", credits, MAX_CREDITS)
         return self._finish(user_id, rid, Outcome.SETTLED, credits, now_ms)
@@ -193,7 +197,8 @@ class QuotaOracle:
             (r.expires_ms, rid) for rid, r in user.reservations.items() if r.expires_ms <= now_ms
         )[:GC_BATCH]
         for _, rid in expired:
-            self._end(user, rid, Outcome.EXPIRED, 0, now_ms)
+            grant = user.reservations.pop(rid).grant
+            self._end(user, grant, grant.credits, Outcome.EXPIRED, 0, now_ms)
         return len(expired)
 
     def _finish(
@@ -203,26 +208,32 @@ class QuotaOracle:
         if user is None:
             return Finished(Outcome.UNKNOWN, applied=False)
         if rid in user.reservations:
-            return Finished(outcome, True, self._end(user, rid, outcome, credits, now_ms))
+            grant = user.reservations.pop(rid).grant
+            warnings = self._end(user, grant, grant.credits, outcome, credits, now_ms)
+            return Finished(outcome, True, warnings)
         done = user.done.get(rid)
-        if done is not None and now_ms < done.expires_ms:
-            return Finished(done.outcome, applied=False)
-        return Finished(Outcome.UNKNOWN, applied=False)
+        if done is None or now_ms >= done.expires_ms:
+            return Finished(Outcome.UNKNOWN, applied=False)
+        if done.outcome is Outcome.EXPIRED:
+            # Expiry gave back the hold, but the request ends only now: nothing is held.
+            return Finished(outcome, True, self._end(user, done.grant, 0, outcome, credits, now_ms))
+        return Finished(done.outcome, applied=False)
 
     def _end(
-        self, user: _User, rid: str, outcome: Outcome, credits: int, now_ms: int
+        self, user: _User, grant: Granted, held: int, outcome: Outcome, credits: int, now_ms: int
     ) -> tuple[UsageWarning, ...]:
-        grant = user.reservations.pop(rid).grant
+        """Give back `held` credits and, if settled, charge `credits`, in every window
+        that admitted the request and is still current. Then leave a done marker."""
         warnings: list[UsageWarning] = []
         for name, start in grant.windows.items():
             state = user.buckets.get(name)
             if state is None or state.start_ms != start:
                 continue  # that window has rolled over; its counters are gone
-            state.reserved -= grant.credits
+            state.reserved -= held
             if outcome is Outcome.SETTLED:
                 state.used += credits
                 warnings += warn(name, state)
-        user.done[rid] = _Done(outcome, grant, now_ms + DONE_TTL_MS)
+        user.done[grant.rid] = _Done(outcome, grant, now_ms + DONE_TTL_MS)
         return tuple(warnings)
 
     # --- Reading and recovering ------------------------------------------------------

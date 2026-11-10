@@ -22,6 +22,7 @@ cost_credits(Usage(input_tokens=12_000, output_tokens=800), standard)  # 15.2, r
 **Buckets.** A user's plan gives them buckets, and a request must fit in all of them:
 - `session`: a rolling window. It opens at the first *admitted* request and resets 5 hours later.
 - `week`: a calendar window that resets at a fixed local time, worked out with `CalendarReset`.
+  - A calendar window only moves forward. Around a reset, a request that read its clock just before it can arrive after one that read it just after; it joins the new window instead of reopening the old one.
 - Others follow the same two shapes, such as a premium-model bucket or a daily search bucket.
 
 **Admission is strict.** A request is admitted only if `used + reserved + cost ≤ limit` holds in every bucket.
@@ -37,7 +38,9 @@ cost_credits(Usage(input_tokens=12_000, output_tokens=800), standard)  # 15.2, r
 - Retrying a reserve, settle or release is safe: the engine remembers finished requests for 48 hours.
 - Each bucket warns once per window, at 50%, 75% and 90%.
 
-**Crashes heal themselves.** A running request keeps extending its reservation. If its process dies, the reservation expires, and the next reserve for that user releases it.
+**Crashes heal themselves.** A running request keeps extending its reservation. If its process dies, the reservation expires, and the next reserve for that user gives its held credits back.
+- Expiry gives back the hold, not the bill. If the request settles after all (it was only slow, or a cleanup job records what a crashed request had already produced), its usage is still charged.
+- An expired reservation ends like any other: the first settle or release decides how.
 
 **The ledger is the truth.** Settled usage is first written to an append-only ledger in Postgres. If Valkey loses its data, each user's counters are rebuilt from the ledger the next time they're needed.
 
@@ -72,8 +75,8 @@ Each user has six keys, all under the hash tag `{u:<id>}`, so a cluster keeps th
 | `q:{u:<id>}:b` | hash | Per bucket: `<name>/start`, `/reset`, `/limit`, `/used`, `/reserved`, `/warned` |
 | `q:{u:<id>}:rsv` | hash | Running reservations: id → grant |
 | `q:{u:<id>}:rsv_exp` | sorted set | Running reservations by expiry time |
-| `q:{u:<id>}:done` | hash | Finished reservations: id → outcome and grant |
-| `q:{u:<id>}:done_exp` | sorted set | Finished reservations by when they're forgotten |
+| `q:{u:<id>}:done` | hash | Finished and expired reservations: id → outcome and grant |
+| `q:{u:<id>}:done_exp` | sorted set | The same reservations by when they're forgotten |
 
 Times come from the `now_ms` arguments, never from Valkey's clock, so tests can replay any sequence of events. Every write also sets all six keys to expire after 8 idle days; a returning user is rebuilt from the ledger.
 
@@ -88,7 +91,7 @@ The Valkey tests start a throwaway container from the image pinned in `compose.y
 
 - **Rule tests** pin down each rule with one example, and run against both engines.
 - **Property tests** check the credit math, and that reset windows tile time exactly across DST changes in six time zones.
-- **A state machine** fires random reserves, settles, releases, retries, crashes, clock jumps and data loss. After every step it checks that admission is exact, `reserved` matches the running reservations, a denial writes nothing, retries change nothing, and counters never exceed the ledger.
-- **The differential test** runs that state machine with every call sent to both engines, and compares results and complete stored state after every step. Planted bugs in the Lua (an off-by-one in admission, a missed rollover check, a smaller cleanup batch) each fail it or the rule tests.
+- **A state machine** fires random reserves, settles, releases, retries, crashes, clock jumps and data loss. After every step it checks that admission is exact, `reserved` matches the running reservations, a denial writes nothing, retries change nothing, and the counters equal the ledger. The only usage they may miss is a settle the engine itself reported as lost: after Valkey lost its data, or more than 48 hours late.
+- **The differential test** runs that state machine with every call sent to both engines, and compares results and complete stored state after every step. Planted bugs in the Lua (an off-by-one in admission, a missed rollover check, a smaller cleanup batch, a late settle that isn't charged) each fail it or the rule tests.
 - **Concurrency:** 256 simultaneous requests over 8 connections admit exactly ⌊limit / cost⌋. With 30% of them crashing, every held credit still comes back.
 - `make test` fails if this package's coverage drops below 90%.

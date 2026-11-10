@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 import pytest
 from valkey.asyncio import Valkey
 
-from actio_quota import Bucket, Estimate, Fixed, Granted, QuotaOracle, Rates, Rolling
+from actio_quota import Bucket, Denied, Estimate, Fixed, Granted, QuotaOracle, Rates, Rolling
 from actio_quota.cost import MAX_CREDITS
 from actio_quota.engine import IDLE_TTL_MS, ValkeyQuota
 
@@ -117,6 +117,27 @@ async def test_a_users_keys_expire_together_when_idle(clients: list[Valkey]) -> 
     assert keys == ["q:{u:u1}:b", "q:{u:u1}:done", "q:{u:u1}:done_exp", "q:{u:u1}:meta"]
     for key in keys:
         assert 0 < await clients[0].pttl(key) <= IDLE_TTL_MS
+
+
+@pytest.mark.anyio
+async def test_a_denial_that_releases_reservations_keeps_the_keys_expiring(
+    clients: list[Valkey],
+) -> None:
+    """A denied reserve still releases expired reservations, which writes done markers.
+
+    If the user never comes back, those markers must expire with their other keys.
+    """
+    engine = ValkeyQuota(clients[0], prefix="q")
+    assert await engine.rebuild("u1", buckets(10), [], now_ms=T0, if_epoch=None)
+    await engine.reserve("u1", "r1", buckets(10), Estimate.flat(3), ttl_ms=TTL, now_ms=T0)
+    denied = await engine.reserve(
+        "u1", "r2", buckets(10), Estimate.flat(11), ttl_ms=TTL, now_ms=T0 + TTL
+    )
+    assert isinstance(denied, Denied)  # 11 never fits in 10, but r1 had expired
+    keys = sorted(k.decode() for k in await clients[0].keys("q:{u:u1}:*"))
+    assert keys == ["q:{u:u1}:b", "q:{u:u1}:done", "q:{u:u1}:done_exp", "q:{u:u1}:meta"]
+    for key in keys:
+        assert 0 < await clients[0].pttl(key) <= IDLE_TTL_MS, key
 
 
 @pytest.mark.anyio

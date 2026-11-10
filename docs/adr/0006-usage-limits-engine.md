@@ -48,3 +48,23 @@ We chose option 3, with a plain-Python reference model as its specification.
 - Tests of the Lua need a real Valkey server. They start a throwaway container from the image pinned in `compose.yaml`, so they test what production runs.
 - Two stores can drift. A nightly job will compare them and export the drift as a metric.
 - **How to reverse it:** the engine sits behind a small interface (reserve, settle, release, extend, rebuild, snapshot). A Postgres-only implementation could replace the Lua scripts and run against the same differential tests.
+
+## Revisions
+
+### 2026-11-10: three gaps found by walking the callers' flows through the engine
+
+The first version was specified one operation at a time: what reserve does, what settle does. Before building the ledger and the chat pipeline on top, we walked their planned flows through the engine, step by step, asking who calls each operation and when. Three cases behaved wrongly. All three involve two actors, or two clocks, which is why specifying single operations hadn't shown them.
+
+- **A settle after expiry is now charged.**
+  - Before: once an expired reservation's credits had been given back, settling it changed nothing.
+  - The flow that exposed it: a worker dies mid-answer, its reservation expires, and the user's next message releases it. A cleanup job then writes the partial answer to the ledger and settles it. The ledger had the usage, and the counters ignored it.
+  - Now: expiry gives back the held credits but doesn't end the request. The first settle or release still decides how it ends, and a settle charges the windows that admitted it. This follows the rule above: the ledger is the truth, so every ledger row must reach the counters.
+- **A calendar window never moves backward.**
+  - Before: a request that carried an older window than the stored one reopened the old window, wiping the new one's counters.
+  - The flow that exposed it: time is an argument, so two callers can disagree about it. Around the weekly reset, a request that read its clock just before midnight can reach Valkey after one that read it just after.
+  - Now: the stored window stays, and the late request is admitted into it.
+- **A denial that releases expired reservations refreshes the idle expiry.** Only successful writes did. The markers such a denial wrote could outlive the user's other keys, which are meant to vanish together. This is in the Lua only: the reference model has no key expiry.
+
+**Why change it now:** nothing reads or writes these counters in a running system yet, so the fix is three small changes with no stored data to reconcile. Once the ledger exists, changing what "settled" means would also mean correcting rows already written.
+
+**The tests got stricter with it.** The random state machine used to allow the counters to undercount the ledger. Now they must equal it, minus only the settles the engine itself reports as lost: after Valkey lost its data, or more than 48 hours late.

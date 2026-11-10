@@ -64,7 +64,10 @@ def current(stored: BucketState | None, spec: Bucket, now_ms: int) -> Current:
 
     - A rolling window is live until `reset_ms`. Once closed, it has no times: it opens
       when the next request is admitted.
-    - A calendar window is live while its start matches the one the caller passed in.
+    - A calendar window is live while it starts at the time the caller passed in, or
+      later. Windows only move forward: a caller with an older window read its clock
+      before the reset and arrived after a caller that read it later, so it joins the
+      stored window instead of reopening the past one.
     """
     match spec.window:
         case Rolling():
@@ -72,7 +75,7 @@ def current(stored: BucketState | None, spec: Bucket, now_ms: int) -> Current:
                 return Current(spec, stored, stored.start_ms, stored.reset_ms)
             return Current(spec, None, None, None)
         case Fixed(start_ms=start, end_ms=end):
-            if stored is not None and stored.start_ms == start:
+            if stored is not None and stored.start_ms >= start:
                 return Current(spec, stored, stored.start_ms, stored.reset_ms)
             return Current(spec, None, start, end)
 

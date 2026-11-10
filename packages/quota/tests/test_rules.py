@@ -200,11 +200,65 @@ def test_expired_reservations_are_released_by_the_next_reserve(engine: QuotaOrac
     assert engine.extend("u1", "r2", ttl_ms=2 * TTL, now_ms=T0)
     after_ttl = T0 + TTL
     assert isinstance(reserve(engine, "r3", 60, now=after_ttl), Granted)  # r1 was collected
-    assert engine.settle("u1", "r1", 60, now_ms=after_ttl) == Finished(
-        Outcome.EXPIRED, applied=False
-    )
+    assert not engine.extend("u1", "r1", ttl_ms=TTL, now_ms=after_ttl)  # its hold is gone
     assert engine.settle("u1", "r2", 30, now_ms=after_ttl).applied  # r2 was kept alive
-    assert not engine.extend("u1", "r1", ttl_ms=TTL, now_ms=after_ttl)
+
+
+def test_a_settle_after_expiry_is_still_charged(engine: QuotaOracle) -> None:
+    """Expiry gives back the hold, not the bill.
+
+    A settle follows a ledger row, so the usage is real: a slow request, or the partial
+    answer of a crashed one. The counters must follow the ledger.
+    """
+    assert isinstance(reserve(engine, "r1", 60), Granted)
+    after_ttl = T0 + TTL
+    assert isinstance(reserve(engine, "r2", 60, now=after_ttl), Granted)  # r1's hold was released
+    late = engine.settle("u1", "r1", 55, now_ms=after_ttl)
+    assert late == Finished(Outcome.SETTLED, applied=True, warnings=(UsageWarning("session", 50),))
+    now = views(engine, after_ttl)
+    assert (now["session"].used, now["session"].reserved) == (55, 60)  # over the limit, and shown
+    assert now["week"].used == 55
+    # It has ended now, so settling it again changes nothing.
+    assert engine.settle("u1", "r1", 55, now_ms=after_ttl) == Finished(
+        Outcome.SETTLED, applied=False
+    )
+    assert views(engine, after_ttl)["session"].used == 55
+
+
+def test_a_release_after_expiry_ends_the_reservation(engine: QuotaOracle) -> None:
+    assert isinstance(reserve(engine, "r1", 60), Granted)
+    after_ttl = T0 + TTL
+    assert engine.collect_expired("u1", now_ms=after_ttl) == 1
+    assert engine.release("u1", "r1", now_ms=after_ttl) == Finished(Outcome.RELEASED, applied=True)
+    # The first finish decided how it ended: a settle after it is a retry.
+    assert engine.settle("u1", "r1", 60, now_ms=after_ttl) == Finished(
+        Outcome.RELEASED, applied=False
+    )
+    assert views(engine, after_ttl)["session"].used == 0
+
+
+def test_a_late_request_cannot_reopen_last_weeks_window(engine: QuotaOracle) -> None:
+    """Two requests race across the weekly reset, and arrive in the wrong order.
+
+    Time is an argument, so callers can disagree about it: the request that read its
+    clock just before the reset reaches the engine after one that read it just after.
+    """
+    reset = WEEK.end_ms
+    next_week = Fixed(reset, reset + 7 * 24 * HOUR)
+    after_reset = [Bucket("week", 1_000, next_week)]
+    before_reset = [Bucket("week", 1_000, WEEK)]
+    first = engine.reserve("u1", "r1", after_reset, Estimate.flat(40), ttl_ms=TTL, now_ms=reset)
+    assert isinstance(first, Granted)
+    late = engine.reserve("u1", "r2", before_reset, Estimate.flat(40), ttl_ms=TTL, now_ms=reset - 1)
+    assert isinstance(late, Granted)
+    assert late.windows == {"week": reset}  # it joined the window that is open
+    (week,) = engine.snapshot("u1", after_reset, now_ms=reset) or ()
+    assert (week.start_ms, week.reserved) == (reset, 80)  # and r1's hold survived
+    # Both still settle into the new week.
+    engine.settle("u1", "r1", 40, now_ms=reset)
+    engine.settle("u1", "r2", 40, now_ms=reset)
+    (week,) = engine.snapshot("u1", after_reset, now_ms=reset) or ()
+    assert (week.used, week.reserved) == (80, 0)
 
 
 def test_garbage_collection_is_batched(engine: QuotaOracle) -> None:
