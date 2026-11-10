@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/api/version",
+  "request": null,
+  "status": 200,
+  "content_type": "application/json; charset=utf-8",
+  "body": "{\"version\":\"0.40.16\"}"
+}

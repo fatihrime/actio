@@ -4,7 +4,7 @@
 
 > A self-hostable, local-first AI platform: a ChatGPT/Claude-style assistant and an OpenAI- and Anthropic-compatible developer gateway, both governed by Claude-inspired usage limits whose correctness is tested.
 
-**Status:** early development, Phase 1 of 7. The foundation and the usage-limits engine are in place; the chat that uses them comes next. This README grows with each phase, and nothing below counts as done until it ships with tests.
+**Status:** early development, Phase 1 of 7. The foundation, the usage-limits engine and the client for local models are in place; the chat that uses them comes next. This README grows with each phase, and nothing below counts as done until it ships with tests.
 
 **Documentation:** <https://fatihrime.github.io/actio/>: getting started, architecture, development and the decision records.
 
@@ -41,6 +41,12 @@ Actio tackles these problems end to end on a 16 GB laptop and free tiers.
   - A plain-Python reference model is its specification. Random sequences of requests, crashes, clock jumps and data loss run against both, and their results and stored state must match after every step.
   - [The design (ADR 0006)](docs/adr/0006-usage-limits-engine.md) · [the rules](https://fatihrime.github.io/actio/reference/quota/) · [the tests](packages/quota/tests)
 
+- **A local-model client that never answers from half your prompt.**
+  - Measured: by default, Ollama cuts a prompt that doesn't fit the model's context window, system prompt included, and still answers as if nothing happened.
+  - Actio's adapter uses Ollama's native API with strict settings, so such a prompt is refused with a clear error, and an answer stops when the window is full.
+  - Its tests replay exchanges recorded from a real server. With the strict settings removed, they fail.
+  - [The design (ADR 0007)](docs/adr/0007-local-models-through-ollamas-native-api.md) · [what it guarantees](https://fatihrime.github.io/actio/reference/llm/) · [the tests](packages/llm/tests)
+
 _More are added as each piece ships, with links to the design records (ADRs), tests and measurements._
 
 ## Quickstart
@@ -66,7 +72,7 @@ make dev         # starts the stack; open http://localhost:8080
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: repo, tooling, CI, docs | done |
-| 1 | Local chat + usage limits | in progress: the limits engine is done, the chat is next |
+| 1 | Local chat + usage limits | in progress: the limits engine and the model client are done, the chat is next |
 | 2 | Model router + developer gateway | planned |
 | 3 | Core chat UX | planned |
 | 4 | Knowledge + web search | planned |

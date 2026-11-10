@@ -36,6 +36,17 @@ make dev         # starts the stack; Ctrl-C stops the API and the web app
 
 In this mode, saving a Python file restarts the API, and the browser picks up changes to the web app by itself. `make dev` first stops any containers that `make up` started, so you can switch between the two modes freely. Postgres and Valkey keep their data in Docker volumes in both modes, so it survives restarts.
 
+## Talk to a local model
+
+The chat interface isn't built yet, but the client it will use is. With the development setup above and [Ollama](https://ollama.com/download) 0.40 or newer running:
+
+```sh
+ollama pull granite4:micro     # 2.1 GB
+uv run actio-llm chat granite4:micro "Say hello in five words." --context 4096
+```
+
+The answer streams to your terminal, followed by its token counts and speed. `uv run actio-llm models` lists the models on your machine and what each can do. See the [model clients reference](reference/llm.md).
+
 ## Commands
 
 | Command | What it does |

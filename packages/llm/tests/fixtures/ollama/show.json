@@ -1,0 +1,10 @@
+{
+  "method": "POST",
+  "path": "/api/show",
+  "request": {
+    "model": "granite4:micro"
+  },
+  "status": 200,
+  "content_type": "application/json; charset=utf-8",
+  "body": "{\"details\": {\"format\": \"gguf\", \"family\": \"granite\", \"families\": [\"granite\"], \"parameter_size\": \"3.4B\", \"quantization_level\": \"Q4_K_M\"}, \"model_info\": {\"general.architecture\": \"granite\", \"general.file_type\": 15, \"general.license\": \"apache-2.0\", \"general.parameter_count\": 3402836480, \"general.quantization_version\": 2, \"general.size_label\": \"3.4B\", \"general.tags\": [\"language\", \"granite-4.0\"], \"general.type\": \"model\", \"granite.attention.head_count\": 40, \"granite.attention.head_count_kv\": [8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8], \"granite.attention.layer_norm_rms_epsilon\": 1e-05, \"granite.attention.scale\": 0.015625, \"granite.block_count\": 40, \"granite.context_length\": 131072, \"granite.embedding_length\": 2560, \"granite.embedding_scale\": 12, \"granite.expert_count\": 0, \"granite.expert_shared_feed_forward_length\": 8192, \"granite.expert_used_count\": 0, \"granite.feed_forward_length\": 8192, \"granite.logit_scale\": 10, \"granite.residual_scale\": 0.22, \"granite.rope.dimension_count\": 64, \"granite.rope.freq_base\": 10000000, \"granite.rope.scaling.finetuned\": true, \"granite.ssm.conv_kernel\": 4, \"granite.ssm.group_count\": 1, \"granite.ssm.inner_size\": 5120, \"granite.ssm.state_size\": 256, \"granite.ssm.time_step_rank\": 128, \"granite.vocab_size\": 100352, \"tokenizer.ggml.add_bos_token\": false, \"tokenizer.ggml.bos_token_id\": 100257, \"tokenizer.ggml.eos_token_id\": 100257, \"tokenizer.ggml.merges\": [], \"tokenizer.ggml.model\": \"gpt2\", \"tokenizer.ggml.padding_token_id\": 100256, \"tokenizer.ggml.pre\": \"dbrx\", \"tokenizer.ggml.token_type\": [], \"tokenizer.ggml.tokens\": [], \"tokenizer.ggml.unknown_token_id\": 100269}, \"capabilities\": [\"completion\", \"tools\"]}"
+}

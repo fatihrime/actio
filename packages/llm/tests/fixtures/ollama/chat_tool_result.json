@@ -1,0 +1,66 @@
+{
+  "method": "POST",
+  "path": "/api/chat",
+  "request": {
+    "model": "granite4:micro",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What is the weather in Izmir right now?"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "index": 0,
+              "name": "get_weather",
+              "arguments": {
+                "city": "Izmir"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_name": "get_weather",
+        "content": "18 degrees Celsius, light rain"
+      }
+    ],
+    "stream": true,
+    "truncate": false,
+    "shift": false,
+    "keep_alive": "5m",
+    "options": {
+      "num_ctx": 4096,
+      "temperature": 0,
+      "seed": 7
+    },
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the current weather for a city.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "status": 200,
+  "content_type": "application/x-ndjson",
+  "body": "{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.321933Z\",\"message\":{\"role\":\"assistant\",\"content\":\"The\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.343655Z\",\"message\":{\"role\":\"assistant\",\"content\":\" current\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.363288Z\",\"message\":{\"role\":\"assistant\",\"content\":\" weather\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.383752Z\",\"message\":{\"role\":\"assistant\",\"content\":\" in\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.403454Z\",\"message\":{\"role\":\"assistant\",\"content\":\" Iz\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.423739Z\",\"message\":{\"role\":\"assistant\",\"content\":\"mir\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.443243Z\",\"message\":{\"role\":\"assistant\",\"content\":\" is\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.462771Z\",\"message\":{\"role\":\"assistant\",\"content\":\" **\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.482327Z\",\"message\":{\"role\":\"assistant\",\"content\":\"18\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.521746Z\",\"message\":{\"role\":\"assistant\",\"content\":\" \"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.541666Z\",\"message\":{\"role\":\"assistant\",\"content\":\"°C\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.561631Z\",\"message\":{\"role\":\"assistant\",\"content\":\"**\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.581152Z\",\"message\":{\"role\":\"assistant\",\"content\":\" with\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.600695Z\",\"message\":{\"role\":\"assistant\",\"content\":\" **\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.620166Z\",\"message\":{\"role\":\"assistant\",\"content\":\"light\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.639953Z\",\"message\":{\"role\":\"assistant\",\"content\":\" rain\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.660216Z\",\"message\":{\"role\":\"assistant\",\"content\":\"**\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.679654Z\",\"message\":{\"role\":\"assistant\",\"content\":\".\"},\"done\":false}\n{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-10T08:34:39.699324Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"total_duration\":462946041,\"load_duration\":1511541,\"prompt_eval_count\":217,\"prompt_eval_cached_count\":188,\"prompt_eval_duration\":82634000,\"eval_count\":20,\"eval_duration\":377313000}\n"
+}

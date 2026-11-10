@@ -1,0 +1,25 @@
+{
+  "method": "POST",
+  "path": "/api/chat",
+  "request": {
+    "model": "granite4:micro",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Line 0: the quick brown fox jumps over the lazy dog.\nLine 1: the quick brown fox jumps over the lazy dog.\nLine 2: the quick brown fox jumps over the lazy dog.\nLine 3: the quick brown fox jumps over the lazy dog.\nLine 4: the quick brown fox jumps over the lazy dog.\nLine 5: the quick brown fox jumps over the lazy dog.\nLine 6: the quick brown fox jumps over the lazy dog.\nLine 7: the quick brown fox jumps over the lazy dog.\nLine 8: the quick brown fox jumps over the lazy dog.\nLine 9: the quick brown fox jumps over the lazy dog.\nLine 10: the quick brown fox jumps over the lazy dog.\nLine 11: the quick brown fox jumps over the lazy dog.\nLine 12: the quick brown fox jumps over the lazy dog.\nLine 13: the quick brown fox jumps over the lazy dog.\nLine 14: the quick brown fox jumps over the lazy dog.\nLine 15: the quick brown fox jumps over the lazy dog.\nLine 16: the quick brown fox jumps over the lazy dog.\nLine 17: the quick brown fox jumps over the lazy dog.\nLine 18: the quick brown fox jumps over the lazy dog.\nLine 19: the quick brown fox jumps over the lazy dog.\nLine 20: the quick brown fox jumps over the lazy dog.\nLine 21: the quick brown fox jumps over the lazy dog.\nLine 22: the quick brown fox jumps over the lazy dog.\nLine 23: the quick brown fox jumps over the lazy dog.\nLine 24: the quick brown fox jumps over the lazy dog.\nLine 25: the quick brown fox jumps over the lazy dog.\nLine 26: the quick brown fox jumps over the lazy dog.\nLine 27: the quick brown fox jumps over the lazy dog.\nLine 28: the quick brown fox jumps over the lazy dog.\nLine 29: the quick brown fox jumps over the lazy dog."
+      }
+    ],
+    "stream": true,
+    "truncate": false,
+    "shift": false,
+    "keep_alive": "5m",
+    "options": {
+      "num_ctx": 256,
+      "temperature": 0,
+      "seed": 7
+    }
+  },
+  "status": 400,
+  "content_type": "application/json",
+  "body": "{\"error\":\"request (450 tokens) exceeds the available context size (256 tokens), try increasing it\"}"
+}

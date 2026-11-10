@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/api/tags",
+  "request": null,
+  "status": 200,
+  "content_type": "application/json; charset=utf-8",
+  "body": "{\"models\": [{\"name\": \"granite4:micro\", \"model\": \"granite4:micro\", \"modified_at\": \"2026-05-21T21:28:07.497627799+03:00\", \"size\": 2099521385, \"digest\": \"89962fcc75239ac434cdebceb6b7e0669397f92eaef9c487774b718bc36a3e5f\", \"details\": {\"format\": \"gguf\", \"family\": \"granite\", \"families\": [\"granite\"], \"parameter_size\": \"3.4B\", \"quantization_level\": \"Q4_K_M\", \"context_length\": 131072, \"embedding_length\": 2560, \"runner\": \"ggml\"}, \"capabilities\": [\"completion\", \"tools\"]}]}"
+}

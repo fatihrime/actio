@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke docs check lint fmt test build
+.PHONY: help doctor bootstrap install up dev down smoke docs check lint fmt test test-live build
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -60,6 +60,10 @@ fmt: ## Format code and apply safe lint fixes
 test: ## Run the Python and web tests (needs Docker); fails below 90% coverage of the quota engine
 	ACTIO_REQUIRE_DOCKER=1 uv run pytest --cov
 	pnpm --dir apps/web run test
+
+# Not part of `make check`: CI has no Ollama. Pull the model first: ollama pull granite4:micro
+test-live: ## Run the model-client tests against a real Ollama server, with granite4:micro
+	ACTIO_TEST_OLLAMA_URL=$${ACTIO_TEST_OLLAMA_URL:-http://127.0.0.1:11434} uv run pytest packages/llm
 
 build: ## Build the web app for production, and the documentation site (strict: warnings fail)
 	pnpm --dir apps/web run build

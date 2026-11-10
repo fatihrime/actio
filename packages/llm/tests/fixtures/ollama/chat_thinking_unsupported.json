@@ -1,0 +1,26 @@
+{
+  "method": "POST",
+  "path": "/api/chat",
+  "request": {
+    "model": "granite4:micro",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What is 17 * 23?"
+      }
+    ],
+    "stream": true,
+    "truncate": false,
+    "shift": false,
+    "keep_alive": "5m",
+    "options": {
+      "num_ctx": 4096,
+      "temperature": 0,
+      "seed": 7
+    },
+    "think": true
+  },
+  "status": 400,
+  "content_type": "application/json; charset=utf-8",
+  "body": "{\"error\":\"\\\"granite4:micro\\\" does not support thinking\"}"
+}

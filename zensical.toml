@@ -18,6 +18,7 @@ nav = [
   { "How AI is used" = "ai-workflow.md" },
   { "Reference" = [
     { "fakellm" = "reference/fakellm.md" },
+    { "Model clients (llm)" = "reference/llm.md" },
     { "Usage limits (quota)" = "reference/quota.md" },
   ] },
   { "Decisions" = [
@@ -28,6 +29,7 @@ nav = [
     { "0004. Local development stack" = "adr/0004-local-development-stack.md" },
     { "0005. Container images" = "adr/0005-container-images.md" },
     { "0006. Usage-limits engine" = "adr/0006-usage-limits-engine.md" },
+    { "0007. Local models through Ollama's native API" = "adr/0007-local-models-through-ollamas-native-api.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

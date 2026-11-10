@@ -29,7 +29,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `apps/api` | FastAPI modular monolith (`python -m actio --role api\|worker\|all`) |
 | `apps/web` | Next.js web app |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
-| `packages/llm` | Model router and provider adapters |
+| `packages/llm` | Model clients: the neutral chat format and the Ollama adapter (`actio-llm`); the router comes later |
 | `packages/fakellm` | Deterministic fake LLM server for tests |
 | `config/` | `models.yaml`, `plans.yaml`, assistant profiles, demo knowledge base |
 | `compose.yaml` | The production-shaped stack behind `make up`: Caddy, web, API, Postgres, Valkey |
@@ -53,9 +53,10 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `make docs` | Preview the documentation site at http://localhost:8001, reloading on edits |
 | `make down` | Stop all containers. Their data stays in Docker volumes |
 | `make check` | Run everything CI runs: every static check on all files, the tests, then the builds (web app and docs site) |
+| `make test-live` | Run the model-client tests against a real Ollama server (0.40 or newer, with `granite4:micro` pulled). Not part of `make check` |
 | `make fmt` | Format code and apply safe lint fixes |
 
-`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. End-to-end tests (`make e2e`) arrive with the chat interface.
+`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. `uv run actio-llm chat <model> "<prompt>"` talks to a local model through the Ollama adapter. End-to-end tests (`make e2e`) arrive with the chat interface.
 
 `make up` needs only Docker; it builds the images from `apps/api/Dockerfile` and `apps/web/Dockerfile`. `make dev` needs Docker Desktop: its containers reach the natively running API and web app through `host.docker.internal`. Changes to the containers must keep `deploy/tests/` passing; if a rule must change, change the test on purpose and record why in an ADR. `.env` holds the local passwords. It is created once from `.env.example`, git-ignored, and never read by tests. Postgres keeps the password it first started with, so if you recreate `.env`, also wipe the local data with `docker compose down --volumes`.
 
@@ -69,7 +70,9 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - `mypy --strict` on core packages;
   - tests with `pytest`; property and state-machine tests with Hypothesis (`HYPOTHESIS_PROFILE=dev|ci|nightly`);
   - `make test` fails below 90% coverage of `packages/quota`, and needs Docker running: the quota tests start a Valkey container;
-  - change the Lua in `packages/quota` only together with the Python reference model (`oracle.py`): the differential test requires both to behave identically.
+  - change the Lua in `packages/quota` only together with the Python reference model (`oracle.py`): the differential test requires both to behave identically;
+  - new HTTP client code uses `httpx2`, the maintained continuation of httpx ([ADR 0007](docs/adr/0007-local-models-through-ollamas-native-api.md)). The older test fixtures that call an app in-process still use httpx;
+  - the Ollama adapter's tests replay recorded exchanges (`packages/llm/tests/fixtures/`), and fail if the request it sends changes. After changing what it sends, run `ACTIO_RECORD_OLLAMA=1 make test-live` to record them again from a real server, and review the diff.
 - **TypeScript:**
   - `pnpm` 12; pnpm also installs the Node.js version pinned in the root `package.json` (26 LTS);
   - add dependencies with `pnpm --dir apps/web add`, never `npm`;

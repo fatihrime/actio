@@ -8,11 +8,12 @@ required-version = ">=0.13"
 python-preference = "only-managed"
 
 [tool.uv.workspace]
-members = ["apps/api", "packages/fakellm", "packages/quota"]
+members = ["apps/api", "packages/fakellm", "packages/llm", "packages/quota"]
 
 [tool.uv.sources]
 actio = { workspace = true }
 actio-fakellm = { workspace = true }
+actio-llm = { workspace = true }
 actio-quota = { workspace = true }
 
 [dependency-groups]
@@ -20,6 +21,7 @@ actio-quota = { workspace = true }
 dev = [
     "actio",
     "actio-fakellm",
+    "actio-llm",
     "actio-quota",
     "httpx>=0.28.1",
     "httpx2>=2.16.0",
@@ -40,7 +42,13 @@ docs = [
 
 [tool.pytest]
 minversion = "9.0"
-testpaths = ["apps/api/tests", "packages/fakellm/tests", "packages/quota/tests", "deploy/tests"]
+testpaths = [
+    "apps/api/tests",
+    "packages/fakellm/tests",
+    "packages/llm/tests",
+    "packages/quota/tests",
+    "deploy/tests",
+]
 # importlib mode lets test files in different packages share names.
 addopts = ["--import-mode=importlib", "-ra"]
 strict = true
@@ -60,7 +68,7 @@ skip_covered = true
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-src = ["apps/api/src", "packages/fakellm/src", "packages/quota/src"]
+src = ["apps/api/src", "packages/fakellm/src", "packages/llm/src", "packages/quota/src"]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -113,6 +121,8 @@ files = [
     "apps/api/tests",
     "packages/fakellm/src",
     "packages/fakellm/tests",
+    "packages/llm/src",
+    "packages/llm/tests",
     "packages/quota/src",
     "packages/quota/tests",
     "deploy/tests",
@@ -120,7 +130,7 @@ files = [
 # Name modules by their path, so each test folder's conftest.py is a distinct module.
 # The src folders are roots, so `actio` and `actio_fakellm` keep their import names.
 explicit_package_bases = true
-mypy_path = ["apps/api/src", "packages/fakellm/src", "packages/quota/src"]
+mypy_path = ["apps/api/src", "packages/fakellm/src", "packages/llm/src", "packages/quota/src"]
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

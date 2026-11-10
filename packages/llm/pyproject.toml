@@ -1,0 +1,18 @@
+[project]
+name = "actio-llm"
+version = "0.0.0"
+description = "Actio's model clients: one neutral chat format, and an adapter for Ollama's native API."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+classifiers = ["Private :: Do Not Upload"]
+dependencies = [
+    "httpx2>=2.16.0",
+]
+
+[project.scripts]
+actio-llm = "actio_llm.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"

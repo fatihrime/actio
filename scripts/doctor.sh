@@ -66,10 +66,15 @@ echo
 echo "Optional"
 
 if have ollama; then
-  if curl -fsS --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
-    ok ollama "$(version_of ollama --version), server running"
+  # With no server running, `ollama --version` prints a warning line first; the client's
+  # version is the last number on its last line.
+  ollama_version="$(ollama --version 2>/dev/null | tail -n 1 | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | tail -n 1)"
+  if ! version_ge "${ollama_version:-0}" 0.40.0; then
+    warn ollama "found ${ollama_version:-an unknown version}; Actio needs 0.40 or newer: https://ollama.com/download"
+  elif curl -fsS --max-time 2 http://localhost:11434/api/version >/dev/null 2>&1; then
+    ok ollama "$ollama_version, server running"
   else
-    warn ollama "installed but not serving: run 'ollama serve' or open the Ollama app"
+    warn ollama "$ollama_version installed but not serving: run 'ollama serve' or open the Ollama app"
   fi
 else
   warn ollama "not installed; needed only for real local models (tests use a fake LLM): https://ollama.com/download"

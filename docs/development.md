@@ -2,7 +2,7 @@
 
 ## Toolchains
 
-- **Python 3.13 with uv.** One workspace (`apps/api`, `packages/fakellm` and `packages/quota`), one lockfile, and uv's own CPython build. See [ADR 0002](adr/0002-python-workspace-with-uv.md).
+- **Python 3.13 with uv.** One workspace (`apps/api`, `packages/fakellm`, `packages/llm` and `packages/quota`), one lockfile, and uv's own CPython build. See [ADR 0002](adr/0002-python-workspace-with-uv.md).
 - **TypeScript with pnpm 12.**
   - pnpm also installs the pinned Node.js, 26 LTS.
   - TypeScript stays on 6.0 and ESLint on 9 until the linters support the next major versions.
@@ -33,6 +33,7 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 |---|---|---|
 | `apps/api/tests` | pytest | Settings, the CLI, the health check |
 | `packages/fakellm/tests` | pytest | The wire format, checked with OpenAI's official Python SDK too |
+| `packages/llm/tests` | pytest | The Ollama adapter, against exchanges recorded from a real server: streaming, tool calls, refused prompts, broken connections, timeouts |
 | `packages/quota/tests` | pytest, Hypothesis, Valkey | Credit math, reset windows across DST, the usage-limits rules under random event sequences, the Lua scripts against the Python reference model, and concurrency |
 | `deploy/tests` | pytest | The containers' security rules |
 | `apps/web` | Vitest | The page renders |
@@ -41,6 +42,7 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 
 - **Coverage gate:** `make test` fails if the quota engine's test coverage drops below 90%.
 - **Docker:** the quota engine's Valkey tests start a throwaway Valkey container, from the image pinned in `compose.yaml`. Without Docker, `uv run pytest` skips them; `make test`, and so CI, sets `ACTIO_REQUIRE_DOCKER=1`, so there they fail with the reason instead. Set `ACTIO_TEST_VALKEY_URL` to use a server you already run.
+- **Real models:** `make test-live` runs the model-client tests against a real Ollama server instead of the recordings. It needs Ollama 0.40 or newer with `granite4:micro` pulled, so it isn't part of `make check`. See the [model clients reference](reference/llm.md#tests).
 - **Nightly:** a scheduled workflow runs the quota tests with 5,000 random examples each.
 - **Random tests:** Hypothesis tries 100 random examples per property on a laptop and 200 in CI. Set `HYPOTHESIS_PROFILE=nightly` for 5,000. When a test fails, Hypothesis shrinks it to a minimal sequence of steps and prints it.
 

@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "actio",
     "actio-fakellm",
+    "actio-llm",
     "actio-quota",
 ]
 
@@ -17,6 +18,7 @@ members = [
 dev = [
     { name = "actio", editable = "apps/api" },
     { name = "actio-fakellm", editable = "packages/fakellm" },
+    { name = "actio-llm", editable = "packages/llm" },
     { name = "actio-quota", editable = "packages/quota" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "httpx2", specifier = ">=2.16.0" },
@@ -67,6 +69,17 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
+
+[[package]]
+name = "actio-llm"
+version = "0.0.0"
+source = { editable = "packages/llm" }
+dependencies = [
+    { name = "httpx2" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx2", specifier = ">=2.16.0" }]
 
 [[package]]
 name = "actio-quota"
