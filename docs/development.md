@@ -2,7 +2,7 @@
 
 ## Toolchains
 
-- **Python 3.13 with uv.** One workspace (`apps/api` and `packages/fakellm`), one lockfile, and uv's own CPython build. See [ADR 0002](adr/0002-python-workspace-with-uv.md).
+- **Python 3.13 with uv.** One workspace (`apps/api`, `packages/fakellm` and `packages/quota`), one lockfile, and uv's own CPython build. See [ADR 0002](adr/0002-python-workspace-with-uv.md).
 - **TypeScript with pnpm 12.**
   - pnpm also installs the pinned Node.js, 26 LTS.
   - TypeScript stays on 6.0 and ESLint on 9 until the linters support the next major versions.
