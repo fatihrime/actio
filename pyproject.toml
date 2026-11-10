@@ -26,6 +26,7 @@ dev = [
     "httpx>=0.28.1",
     "httpx2>=2.16.0",
     "hypothesis>=6.170.15",
+    "import-linter>=2.16",
     "mypy>=2.4.1",
     "openai>=3.46.0",
     "pre-commit>=4.7.0",
@@ -138,3 +139,45 @@ mypy_path = ["apps/api/src", "packages/fakellm/src", "packages/llm/src", "packag
 init_forbid_extra = true
 init_typed = true
 warn_required_dynamic_aliases = true
+
+# Import rules, checked by `lint-imports` at every commit and in CI. They are the
+# boundaries ADR 0001 relies on: the application is split into modules, not services, so
+# a tool has to keep the modules apart.
+[tool.importlinter]
+root_packages = ["actio", "actio_fakellm", "actio_llm", "actio_quota"]
+include_external_packages = true  # so that a rule can name fastapi
+
+[[tool.importlinter.contracts]]
+id = "packages-below-app"
+name = "The shared packages never import the application"
+type = "forbidden"
+source_modules = ["actio_fakellm", "actio_llm", "actio_quota"]
+forbidden_modules = ["actio"]
+broken_contract_guidance = "A package under packages/ must work without the app. Pass what it needs in as an argument."
+
+[[tool.importlinter.contracts]]
+id = "packages-independent"
+name = "The shared packages don't import each other"
+type = "independence"
+modules = ["actio_fakellm", "actio_llm", "actio_quota"]
+broken_contract_guidance = "Each package stands alone. The app is where they meet."
+
+[[tool.importlinter.contracts]]
+id = "app-layers"
+name = "Inside the application, imports only point down: cli, app, health, core"
+type = "layers"
+containers = ["actio"]
+layers = ["cli", "app", "health", "core"]
+# Every module directly under `actio` must be given a layer above, so a new one can't
+# skip the question of where it belongs.
+exhaustive = true
+exhaustive_ignores = ["__main__"]
+broken_contract_guidance = "A lower layer can't import a higher one. Move the shared part down, or pass it in."
+
+[[tool.importlinter.contracts]]
+id = "core-without-the-web-framework"
+name = "core never imports the web framework"
+type = "forbidden"
+source_modules = ["actio.core"]
+forbidden_modules = ["fastapi", "starlette", "uvicorn"]
+broken_contract_guidance = "core is used by every process, including the ones that serve no HTTP."

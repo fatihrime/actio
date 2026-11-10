@@ -45,6 +45,13 @@ repos:
         language: unsupported
         types_or: [python, pyi]
         pass_filenames: false
+      # Which module may import which: the rules are in pyproject.toml.
+      - id: import-linter
+        name: import rules (import-linter)
+        entry: uv run lint-imports --no-logo
+        language: unsupported
+        files: (\.pyi?$|^pyproject\.toml$)
+        pass_filenames: false
 
   # Web app, with the tool versions locked in pnpm-lock.yaml. Each hook runs a script from
   # apps/web/package.json over the whole app, and only when a commit touches apps/web.

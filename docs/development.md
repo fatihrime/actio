@@ -18,7 +18,7 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 | Area | Checks |
 |---|---|
 | Every file | Whitespace, line endings, merge markers, file size, YAML and TOML syntax |
-| Python | Ruff (lint and format), mypy in strict mode |
+| Python | Ruff (lint and format), mypy in strict mode, import rules (import-linter) |
 | Web app | Prettier, ESLint with typescript-eslint's strict type-checked rules, `tsc` |
 | Shell scripts | shellcheck |
 | Docker Compose | `docker compose config` |
@@ -26,6 +26,17 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 | Secrets | gitleaks, plus a private denylist of names that must never appear |
 
 `make fmt` applies formatting and safe fixes. Don't bypass a failing check with `git commit --no-verify`; fix what it reports.
+
+### Import rules
+
+Actio is one application split into modules, not into services ([ADR 0001](adr/0001-one-app-several-process-roles.md)), so a tool keeps the modules apart. The rules live in `pyproject.toml`, under `[tool.importlinter]`, and `uv run lint-imports` checks them:
+
+- the packages under `packages/` never import the application, or each other;
+- inside the application, imports only point down the layers: `cli`, `app`, `health`, `core`;
+- `core` never imports the web framework, because processes that serve no HTTP use it too;
+- every module directly under `actio` must be given a layer. A new module fails the check until someone decides where it belongs.
+
+A broken rule names the file, the line and the import, and says what to do instead.
 
 ## Tests
 

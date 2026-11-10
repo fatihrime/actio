@@ -87,8 +87,9 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - Next.js 16 changed many APIs: read the version-matched docs in `apps/web/node_modules/next/dist/docs/` before writing Next.js code;
   - tests with Vitest, and Playwright for end-to-end tests.
 - **Commits:** [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `test:`, `chore:` and so on.
-- **Architecture boundaries,** to be enforced with import-linter:
-  - `core` imports nothing internal;
-  - domain modules never import FastAPI;
-  - `packages/*` never import from `apps/*`.
+- **Architecture boundaries,** enforced by import-linter at every commit and in CI. The rules are in `pyproject.toml`, under `[tool.importlinter]`:
+  - `packages/*` never import the application, or each other;
+  - inside `actio`, imports only point down the layers: `cli`, `app`, `health`, `core`. So `core` imports nothing else from `actio`;
+  - `core` never imports the web framework;
+  - a new module directly under `actio` must be given a layer in that list, or the check fails. Domain modules, when they arrive, go between `health` and `core`, and join the rule against importing the web framework.
 - **Decisions:** anything hard to reverse gets an ADR. Copy [`docs/adr/0000-template.md`](docs/adr/0000-template.md).
