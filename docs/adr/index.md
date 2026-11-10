@@ -16,5 +16,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0004](0004-local-development-stack.md) | A hybrid local stack: services in Docker, the apps native, Caddy in front | Accepted |
 | [0005](0005-container-images.md) | Container images and the production-shaped stack | Accepted |
 | [0006](0006-usage-limits-engine.md) | Usage limits: reservations in Valkey, a ledger in Postgres, a Python reference model | Accepted |
+| [0007](0007-local-models-through-ollamas-native-api.md) | Local models through Ollama's native API, with silent truncation turned off | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.
