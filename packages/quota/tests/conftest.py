@@ -4,8 +4,8 @@ Hypothesis profiles: HYPOTHESIS_PROFILE=dev|ci|nightly (default: dev).
 
 Valkey: tests use ACTIO_TEST_VALKEY_URL if it's set. Otherwise they start a throwaway
 container from the image pinned in compose.yaml, so tests run what production runs. If
-Docker isn't available they're skipped, unless ACTIO_REQUIRE_DOCKER=1 (set in CI), which
-turns the skip into a failure.
+Docker isn't available they're skipped, unless ACTIO_REQUIRE_DOCKER=1 (set by `make test`,
+and so in CI), which turns the skip into a failure.
 """
 
 import asyncio
@@ -21,6 +21,8 @@ from typing import Any
 import pytest
 from hypothesis import settings
 from valkey.asyncio import Valkey
+from valkey.exceptions import ConnectionError as ValkeyConnectionError
+from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from actio_quota import (
     Bucket,
@@ -54,6 +56,14 @@ def _docker(*args: str) -> str:
     return done.stdout.strip()
 
 
+def _docker_running() -> bool:
+    try:
+        _docker("info", "--format", "{{.ServerVersion}}")
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
 def _unavailable(reason: str) -> None:
     if os.environ.get("ACTIO_REQUIRE_DOCKER") == "1":
         pytest.fail(f"Valkey is required here, but {reason}")
@@ -68,9 +78,7 @@ def valkey_url() -> Iterator[str]:
         return
     if shutil.which("docker") is None:
         _unavailable("the docker command isn't installed")
-    try:
-        _docker("info", "--format", "{{.ServerVersion}}")
-    except subprocess.CalledProcessError:
+    if not _docker_running():
         _unavailable("the Docker daemon isn't running")
     container = _docker(
         "run", "--detach", "--rm", "--read-only", "--tmpfs", "/data",
@@ -80,26 +88,44 @@ def valkey_url() -> Iterator[str]:
     try:
         host_port = _docker("port", container, "6379/tcp").splitlines()[0]
         url = f"valkey://{host_port}/0"
-        _wait_until_ready(url)
+        _wait_until_ready(url, container)
         yield url
     finally:
         _docker("rm", "--force", container)
 
 
-def _wait_until_ready(url: str) -> None:
-    async def ping() -> bool:
-        async with Valkey.from_url(url) as client:
-            return bool(await client.ping())
+def _wait_until_ready(url: str, container: str, timeout_s: float = 30) -> None:
+    """Ping Valkey through its published port until it answers.
 
-    deadline = time.monotonic() + 30
+    On Linux, Docker's port proxy accepts connections before the server in the container
+    is listening, then drops them. valkey-py reports a dropped connection as its own
+    `ConnectionError`, which is not an `OSError`, so both are retried.
+    """
+
+    async def ping() -> None:
+        async with Valkey.from_url(url) as client:
+            await client.ping()
+
+    deadline = time.monotonic() + timeout_s
     while True:
         try:
-            if asyncio.run(ping()):
-                return
-        except OSError:
+            asyncio.run(ping())
+        except (OSError, ValkeyConnectionError, ValkeyTimeoutError) as error:
             if time.monotonic() > deadline:
-                raise
-        time.sleep(0.1)
+                raise RuntimeError(
+                    f"Valkey didn't answer on {url} within {timeout_s:g} s. "
+                    f"Container log:\n{_container_log(container)}"
+                ) from error
+            time.sleep(0.1)
+        else:
+            return
+
+
+def _container_log(container: str) -> str:
+    try:
+        return _docker("logs", container) or "(empty)"
+    except subprocess.CalledProcessError:
+        return "(none: the container has already exited)"
 
 
 class SyncValkeyQuota:

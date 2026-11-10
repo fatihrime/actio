@@ -84,7 +84,7 @@ uv run pytest packages/quota                              # 100 random sequences
 HYPOTHESIS_PROFILE=nightly uv run pytest packages/quota   # 5,000, as the nightly workflow runs
 ```
 
-The Valkey tests start a throwaway container from the image pinned in `compose.yaml`, so Docker must be running. To use a server you already run, set `ACTIO_TEST_VALKEY_URL`. Without Docker those tests are skipped; CI sets `ACTIO_REQUIRE_DOCKER=1`, which turns the skip into a failure.
+The Valkey tests start a throwaway container from the image pinned in `compose.yaml`, so Docker must be running. To use a server you already run, set `ACTIO_TEST_VALKEY_URL`. Without Docker, `uv run pytest` skips those tests; `make test`, and so CI, sets `ACTIO_REQUIRE_DOCKER=1`, which turns the skip into a failure that names the reason.
 
 - **Rule tests** pin down each rule with one example, and run against both engines.
 - **Property tests** check the credit math, and that reset windows tile time exactly across DST changes in six time zones.

@@ -55,8 +55,10 @@ fmt: ## Format code and apply safe lint fixes
 	pnpm --dir apps/web run format
 	pnpm --dir apps/web run lint --fix
 
-test: ## Run the Python and web tests; fails if the quota engine's coverage drops below 90%
-	uv run pytest --cov
+# The quota tests need Docker for Valkey. Without it they'd be skipped and the coverage
+# gate would fail with a misleading number, so require it and fail with the real reason.
+test: ## Run the Python and web tests (needs Docker); fails below 90% coverage of the quota engine
+	ACTIO_REQUIRE_DOCKER=1 uv run pytest --cov
 	pnpm --dir apps/web run test
 
 build: ## Build the web app for production, and the documentation site (strict: warnings fail)

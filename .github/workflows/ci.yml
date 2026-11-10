@@ -42,7 +42,6 @@ jobs:
         env:
           SKIP: gitleaks # the secrets job below scans the full history instead
           HYPOTHESIS_PROFILE: ci # more random examples than on a laptop
-          ACTIO_REQUIRE_DOCKER: "1" # fail, don't skip, if the Valkey tests can't start
 
   quickstart:
     name: Quickstart on Linux (make up)
