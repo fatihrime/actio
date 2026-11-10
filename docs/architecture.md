@@ -52,7 +52,7 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
-- **models:** Ollama on your machine for local models, and cloud providers behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them. The [client for Ollama](reference/llm.md) already exists as a package, with a command-line tool ([ADR 0007](adr/0007-local-models-through-ollamas-native-api.md)). The API doesn't call it yet;
+- **models:** Ollama on your machine for local models, and cloud providers behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them. The [clients](reference/llm.md) for Ollama and for OpenAI-compatible servers already exist as a package, with a command-line tool ([ADR 0007](adr/0007-local-models-through-ollamas-native-api.md)). The API doesn't call them yet, and the router isn't written;
 - **usage limits:** session and weekly windows, enforced atomically in Valkey and recorded in a Postgres ledger. The [engine](reference/quota.md) already exists as a package, tested against a real Valkey server ([ADR 0006](adr/0006-usage-limits-engine.md)). Connecting it to the API, with the ledger, is still to come.
 
 ## Repository layout
@@ -61,8 +61,8 @@ The next phases add:
 |---|---|
 | `apps/api` | The Python application: the API today, plus the worker later |
 | `apps/web` | The Next.js web app |
-| `packages/fakellm` | A fake LLM server for tests |
-| `packages/llm` | Model clients: a neutral chat format, the Ollama adapter and the `actio-llm` command |
+| `packages/fakellm` | A fake LLM server for tests, scripted by directives in the prompt |
+| `packages/llm` | Model clients: a neutral chat format, adapters for Ollama and for OpenAI-compatible servers, and the `actio-llm` command |
 | `packages/quota` | The usage-limits engine: Lua scripts for Valkey, and the Python reference model they're tested against |
 | `compose.yaml`, `compose.dev.yaml` | The stack for `make up`, and the overlay for `make dev` |
 | `deploy/` | Caddy's configuration, and the tests for the containers' rules |

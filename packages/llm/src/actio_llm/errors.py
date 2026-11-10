@@ -16,6 +16,15 @@ class ProviderUnavailableError(LLMError):
     """
 
 
+class RateLimitedError(ProviderUnavailableError):
+    """The provider is refusing requests for now: a rate limit or a spent quota."""
+
+    def __init__(self, detail: str, *, retry_after_s: float | None = None) -> None:
+        super().__init__(detail)
+        self.retry_after_s = retry_after_s
+        """How long the provider asks to wait, in seconds, when it says."""
+
+
 class StreamInterruptedError(LLMError):
     """The answer started and then broke off: the connection dropped, the provider
     reported an error half-way, or it went silent for too long.

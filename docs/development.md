@@ -32,8 +32,8 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 | Suite | Runner | What it covers |
 |---|---|---|
 | `apps/api/tests` | pytest | Settings, the CLI, the health check |
-| `packages/fakellm/tests` | pytest | The wire format, checked with OpenAI's official Python SDK too |
-| `packages/llm/tests` | pytest | The Ollama adapter, against exchanges recorded from a real server: streaming, tool calls, refused prompts, broken connections, timeouts |
+| `packages/fakellm/tests` | pytest | The wire format, checked with OpenAI's official Python SDK too; the directives that script reasoning, tool calls and failures |
+| `packages/llm/tests` | pytest | The Ollama adapter, against exchanges recorded from a real server; the OpenAI-compatible adapter, against fakellm. Streaming, tool calls, refused prompts, broken connections, timeouts |
 | `packages/quota/tests` | pytest, Hypothesis, Valkey | Credit math, reset windows across DST, the usage-limits rules under random event sequences, the Lua scripts against the Python reference model, and concurrency |
 | `deploy/tests` | pytest | The containers' security rules |
 | `apps/web` | Vitest | The page renders |

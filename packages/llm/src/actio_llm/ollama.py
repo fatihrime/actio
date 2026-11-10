@@ -16,11 +16,10 @@ Older servers may ignore the flags, which would bring silent truncation back, so
 adapter refuses servers older than `MIN_VERSION`. See ADR 0007.
 """
 
-import asyncio
-import contextlib
 import json
 import re
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,26 +52,13 @@ from actio_llm.errors import (
     UnsupportedFeatureError,
     UnsupportedServerError,
 )
+from actio_llm.wire import Timeouts, request_json, stream_lines
 
 MIN_VERSION = (0, 40, 0)
 """The oldest Ollama this adapter accepts: the release line its strict flags were measured on."""
 
 _OVERFLOW = re.compile(r"\((\d+) tokens\) exceeds the available context size \((\d+) tokens\)")
 _VERSION = re.compile(r"\d+(?:\.\d+)*")
-
-
-@dataclass(frozen=True, slots=True)
-class Timeouts:
-    """How long to wait, in seconds, at each stage of a call."""
-
-    connect_s: float = 3.0
-    first_event_s: float = 90.0
-    """From sending a chat request to its first chunk. Generous: it covers loading a cold
-    model, and waiting in Ollama's queue behind another request."""
-    idle_s: float = 20.0
-    """Between two chunks of an answer."""
-    request_s: float = 10.0
-    """For the small calls: version, model list, model details."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,59 +118,17 @@ class Ollama:
         Closing the generator closes the connection, and Ollama stops generating.
         """
         await self._ensure_supported()
-        limits = self._timeouts
-        first_deadline = asyncio.get_running_loop().time() + limits.first_event_s
-        # No read timeout from the HTTP client: a timeout that spans a `yield` would also
-        # count the consumer's time. Each read gets its own deadline below instead.
-        http_timeout = httpx2.Timeout(
-            connect=limits.connect_s, read=None, write=limits.request_s, pool=limits.connect_s
-        )
         parser = _Parser()
-        async with contextlib.AsyncExitStack() as stack:
-            try:
-                async with asyncio.timeout_at(first_deadline):
-                    response = await stack.enter_async_context(
-                        self._client.stream(
-                            "POST",
-                            "/api/chat",
-                            json=_body(request, self._keep_alive),
-                            timeout=http_timeout,
-                        )
-                    )
-                    if response.status_code != 200:
-                        body = (await response.aread()).decode(errors="replace")
-                        raise _rejection(response.status_code, body, request.model)
-            except TimeoutError as error:
-                raise _too_slow(limits) from error
-            except httpx2.TransportError as error:
-                raise ProviderUnavailableError(f"can't reach Ollama: {error!r}") from error
-
-            lines = response.aiter_lines()
-            started = False
-            while True:
-                watchdog = (
-                    asyncio.timeout(limits.idle_s)
-                    if started
-                    else asyncio.timeout_at(first_deadline)
-                )
-                try:
-                    async with watchdog:
-                        line = await anext(lines, None)
-                except TimeoutError as error:
-                    if not started:
-                        raise _too_slow(limits) from error
-                    raise StreamInterruptedError(
-                        f"Ollama sent nothing for {limits.idle_s:g} s in the middle of an answer"
-                    ) from error
-                except httpx2.TransportError as error:
-                    raise StreamInterruptedError(
-                        f"the connection to Ollama broke: {error!r}"
-                    ) from error
-                if line is None:
-                    break
-                if not line.strip():
-                    continue
-                started = True
+        lines = stream_lines(
+            self._client,
+            "/api/chat",
+            _body(request, self._keep_alive),
+            provider="Ollama",
+            timeouts=self._timeouts,
+            rejection=lambda response, text: _rejection(response.status_code, text, request.model),
+        )
+        async with aclosing(lines):  # closing this stream must close the connection too
+            async for line in lines:
                 for event in parser.feed(line):
                     yield event
                 if parser.finished:
@@ -256,25 +200,15 @@ class Ollama:
     async def _json(
         self, method: str, path: str, *, body: dict[str, Any] | None = None, model: str = ""
     ) -> dict[str, Any]:
-        limits = self._timeouts
-        try:
-            response = await self._client.request(
-                method,
-                path,
-                json=body,
-                timeout=httpx2.Timeout(limits.request_s, connect=limits.connect_s),
-            )
-        except httpx2.TransportError as error:
-            raise ProviderUnavailableError(f"can't reach Ollama: {error!r}") from error
-        if response.status_code != 200:
-            raise _rejection(response.status_code, response.text, model)
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise ProviderError(f"Ollama answered {path} with something that isn't JSON") from error
-        if not isinstance(data, dict):
-            raise ProviderError(f"Ollama answered {path} with JSON that isn't an object")
-        return data
+        return await request_json(
+            self._client,
+            method,
+            path,
+            body=body,
+            provider="Ollama",
+            timeouts=self._timeouts,
+            rejection=lambda response, text: _rejection(response.status_code, text, model),
+        )
 
 
 class _Parser:
@@ -447,12 +381,6 @@ def _error_text(body: str) -> str:
     if isinstance(data, dict) and isinstance(data.get("error"), str):
         return str(data["error"])
     return body.strip()[:500] or "(empty response)"
-
-
-def _too_slow(limits: Timeouts) -> ProviderUnavailableError:
-    return ProviderUnavailableError(
-        f"Ollama didn't start answering within {limits.first_event_s:g} s"
-    )
 
 
 def _dotted(version: tuple[int, ...]) -> str:

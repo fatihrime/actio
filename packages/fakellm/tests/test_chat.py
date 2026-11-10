@@ -1,6 +1,7 @@
 """The Chat Completions endpoint, checked against OpenAI's wire format."""
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -138,3 +139,191 @@ async def test_healthz_reports_ok(client: httpx.AsyncClient) -> None:
     response = await client.get("/healthz")
 
     assert response.json() == {"status": "ok"}
+
+
+# --- Scripted replies: directives in the last user message ----------------------------
+
+
+def asking(content: str, **fields: Any) -> dict[str, Any]:
+    return {"model": "fake-chat", "messages": [{"role": "user", "content": content}], **fields}
+
+
+async def test_think_puts_reasoning_before_the_answer(client: httpx.AsyncClient) -> None:
+    response = await client.post(URL, json=asking("[[think: two plus two]] What is 2+2?"))
+
+    body = response.json()
+    assert body["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "Echo: What is 2+2?",  # the directive is left out of the echo
+        "reasoning": "two plus two",
+    }
+    assert body["usage"] == {"prompt_tokens": 7, "completion_tokens": 7, "total_tokens": 14}
+
+
+async def test_think_streams_reasoning_deltas_first(client: httpx.AsyncClient) -> None:
+    events = await stream_events(client, asking("[[think: two plus two]] What is 2+2?"))
+
+    deltas = [json.loads(event)["choices"][0]["delta"] for event in events[:-1]]
+    assert deltas[0] == {"role": "assistant", "content": ""}  # no reasoning key when unset
+    assert [delta.get("reasoning") for delta in deltas[1:4]] == ["two ", "plus ", "two"]
+    assert "".join(delta["content"] or "" for delta in deltas) == "Echo: What is 2+2?"
+
+
+async def test_the_output_limit_cuts_the_reasoning_first(client: httpx.AsyncClient) -> None:
+    request = asking("[[think: two plus two]] What is 2+2?", max_completion_tokens=2)
+    choice = (await client.post(URL, json=request)).json()["choices"][0]
+
+    assert choice["message"] == {"role": "assistant", "content": "", "reasoning": "two plus "}
+    assert choice["finish_reason"] == "length"
+
+
+async def test_call_returns_a_tool_call_instead_of_an_answer(client: httpx.AsyncClient) -> None:
+    response = await client.post(URL, json=asking('[[call: get_weather {"city": "Izmir"}]] Go'))
+
+    body = response.json()
+    assert body["choices"][0] == {
+        "index": 0,
+        "message": {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_fake_000001",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "Izmir"}'},
+                }
+            ],
+        },
+        "finish_reason": "tool_calls",
+    }
+    assert body["usage"]["completion_tokens"] == 3  # the name, and two words of arguments
+
+
+async def test_call_streams_its_arguments_in_fragments(client: httpx.AsyncClient) -> None:
+    events = await stream_events(client, asking('[[call: get_weather {"city": "Izmir"}]] Go'))
+
+    chunks = [json.loads(event) for event in events[:-1]]
+    parts = [part for c in chunks for part in c["choices"][0]["delta"].get("tool_calls", [])]
+    assert parts == [
+        {
+            "index": 0,
+            "id": "call_fake_000001",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": ""},
+        },
+        {"index": 0, "function": {"arguments": '{"city": "Iz'}},
+        {"index": 0, "function": {"arguments": 'mir"}'}},
+    ]
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    assert all(not c["choices"][0]["delta"]["content"] for c in chunks)
+
+
+async def test_two_calls_get_their_own_index_and_id(client: httpx.AsyncClient) -> None:
+    response = await client.post(URL, json=asking("[[call: first]] [[call: second {}]] Go"))
+
+    calls = response.json()["choices"][0]["message"]["tool_calls"]
+    assert [(call["id"], call["function"]) for call in calls] == [
+        ("call_fake_000001", {"name": "first", "arguments": "{}"}),
+        ("call_fake_000002", {"name": "second", "arguments": "{}"}),
+    ]
+
+
+async def test_after_a_tool_result_the_reply_echoes_it(client: httpx.AsyncClient) -> None:
+    """So a scripted tool call isn't repeated for ever: the next step gets a plain answer."""
+    messages = [
+        {"role": "user", "content": "[[call: get_weather]] Weather?"},
+        {"role": "assistant", "content": None, "tool_calls": []},
+        {"role": "tool", "tool_call_id": "call_fake_000001", "content": "[[fail: 500]] 18 degrees"},
+    ]
+    response = await client.post(URL, json={"model": "fake-chat", "messages": messages})
+
+    # A directive inside a tool's result is just text: only the user scripts the fake.
+    assert response.json()["choices"][0]["message"]["content"] == "Echo: [[fail: 500]] 18 degrees"
+
+
+async def test_directives_in_earlier_messages_are_ignored(client: httpx.AsyncClient) -> None:
+    messages = [
+        {"role": "user", "content": "[[fail: 503]] first"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "second"},
+    ]
+    response = await client.post(URL, json={"model": "fake-chat", "messages": messages})
+
+    assert response.json()["choices"][0]["message"]["content"] == "Echo: second"
+
+
+@pytest.mark.parametrize(
+    ("directive", "status", "kind", "code"),
+    [
+        ("[[fail: 503]]", 503, "server_error", None),
+        (
+            "[[fail: 400 context_length_exceeded]]",
+            400,
+            "invalid_request_error",
+            "context_length_exceeded",
+        ),
+    ],
+)
+async def test_fail_answers_with_an_openai_style_error(
+    client: httpx.AsyncClient, directive: str, status: int, kind: str, code: str | None
+) -> None:
+    response = await client.post(URL, json=asking(f"{directive} hello", stream=True))
+
+    assert response.status_code == status
+    assert response.json() == {
+        "error": {
+            "message": f"fakellm: scripted failure ({status})",
+            "type": kind,
+            "param": None,
+            "code": code,
+        }
+    }
+    assert "retry-after" not in response.headers
+
+
+async def test_a_scripted_429_says_when_to_retry(client: httpx.AsyncClient) -> None:
+    response = await client.post(URL, json=asking("[[fail: 429]] hello"))
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "1"
+
+
+async def test_drop_ends_the_stream_without_finishing_it(client: httpx.AsyncClient) -> None:
+    events = await stream_events(client, asking("[[drop: 2]] hello there"))
+
+    chunks = [json.loads(event) for event in events]  # no "[DONE]" among them
+    assert [c["choices"][0]["delta"]["content"] for c in chunks] == ["", "Echo: ", "hello "]
+    assert all(c["choices"][0]["finish_reason"] is None for c in chunks)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_delay_waits_before_answering(client: httpx.AsyncClient, stream: bool) -> None:
+    started = time.monotonic()
+    response = await client.post(URL, json=asking("[[delay: 0.2]] hello", stream=stream))
+
+    assert response.status_code == 200
+    assert time.monotonic() - started >= 0.2
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        "[[dance: now]]",
+        "[[fail: 200]]",
+        "[[fail: soon]]",
+        "[[call: f not-json]]",
+        "[[call: f [1, 2]]]",
+        "[[drop: -1]]",
+        "[[delay: 3600]]",
+    ],
+)
+async def test_a_directive_that_cannot_be_read_is_a_400(
+    client: httpx.AsyncClient, directive: str
+) -> None:
+    """A typo in a test's script should fail that test, not be echoed back as text."""
+    response = await client.post(URL, json=asking(f"{directive} hello"))
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["message"].startswith("fakellm: ")
+    assert error["param"] == "messages"

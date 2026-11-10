@@ -1,14 +1,21 @@
 """The part of OpenAI's Chat Completions wire format that fakellm speaks.
 
 Requests accept and ignore fields the fake doesn't use (temperature, tools, ...), as
-OpenAI-compatible servers do. Responses send unset fields as explicit nulls.
+OpenAI-compatible servers do. Responses send unset fields as explicit nulls, except the
+ones marked `_OMITTED`: reasoning and tool calls appear only in replies that have them,
+as on real servers.
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-FinishReason = Literal["stop", "length"]
+FinishReason = Literal["stop", "length", "tool_calls"]
+
+
+def _omitted_when_unset() -> Any:
+    """A field that is left out of the JSON while it is None."""
+    return Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ContentPart(BaseModel):
@@ -53,9 +60,23 @@ class Usage(BaseModel):
     total_tokens: int
 
 
+class FunctionCall(BaseModel):
+    name: str
+    arguments: str
+    """The arguments as JSON text, which is how OpenAI's format carries them."""
+
+
+class ToolCall(BaseModel):
+    id: str
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
 class AssistantMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
-    content: str
+    content: str | None
+    reasoning: str | None = _omitted_when_unset()
+    tool_calls: list[ToolCall] | None = _omitted_when_unset()
 
 
 class Choice(BaseModel):
@@ -73,9 +94,24 @@ class ChatCompletion(BaseModel):
     usage: Usage
 
 
+class FunctionCallDelta(BaseModel):
+    name: str | None = _omitted_when_unset()
+    arguments: str
+    """The next fragment of the arguments' JSON text."""
+
+
+class ToolCallDelta(BaseModel):
+    index: int
+    id: str | None = _omitted_when_unset()
+    type: Literal["function"] | None = _omitted_when_unset()
+    function: FunctionCallDelta
+
+
 class Delta(BaseModel):
     role: Literal["assistant"] | None = None
     content: str | None = None
+    reasoning: str | None = _omitted_when_unset()
+    tool_calls: list[ToolCallDelta] | None = _omitted_when_unset()
 
 
 class ChunkChoice(BaseModel):

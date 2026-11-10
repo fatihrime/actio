@@ -138,12 +138,14 @@ async def _chat(ollama: Ollama, args: argparse.Namespace) -> None:
 
 
 def _stats(finish: Finish) -> str:
-    usage = finish.usage
-    parts = [
-        f"[{finish.reason}]",
-        f"prompt {usage.input_tokens} tokens ({usage.cached_input_tokens} from cache)",
-        f"answer {usage.output_tokens} tokens",
-    ]
+    parts = [f"[{finish.reason}]"]
+    if (usage := finish.usage) is None:
+        parts.append("token counts not reported")
+    else:
+        parts += [
+            f"prompt {usage.input_tokens} tokens ({usage.cached_input_tokens} from cache)",
+            f"answer {usage.output_tokens} tokens",
+        ]
     if (speed := finish.tokens_per_second) is not None:
         parts.append(f"{speed:.1f} tokens/s")
     if finish.timings is not None:

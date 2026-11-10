@@ -3,6 +3,8 @@
 - `chat`: the neutral chat format every adapter speaks.
 - `errors`: why a model call failed.
 - `ollama`: the adapter for Ollama's native API.
+- `openai_compatible`: the adapter for servers that speak OpenAI's Chat Completions API.
+- `wire`: reading a streamed answer under deadlines, shared by the adapters.
 - `cli`: `actio-llm`, to chat with a local model from the terminal.
 """
 
@@ -30,12 +32,15 @@ from actio_llm.errors import (
     ModelNotFoundError,
     ProviderError,
     ProviderUnavailableError,
+    RateLimitedError,
     RequestRejectedError,
     StreamInterruptedError,
     UnsupportedFeatureError,
     UnsupportedServerError,
 )
-from actio_llm.ollama import LocalModel, ModelInfo, Ollama, Timeouts
+from actio_llm.ollama import LocalModel, ModelInfo, Ollama
+from actio_llm.openai_compatible import OpenAICompatible
+from actio_llm.wire import Timeouts
 
 __all__ = [
     "Assistant",
@@ -50,8 +55,10 @@ __all__ = [
     "ModelInfo",
     "ModelNotFoundError",
     "Ollama",
+    "OpenAICompatible",
     "ProviderError",
     "ProviderUnavailableError",
+    "RateLimitedError",
     "ReasoningDelta",
     "RequestRejectedError",
     "StreamEvent",

@@ -138,6 +138,8 @@ class FinishReason(StrEnum):
     """The answer hit `max_output_tokens`, or filled the context window."""
     TOOL_CALLS = "tool_calls"
     """The model asked for tools: run them and send the results back."""
+    CONTENT_FILTER = "content_filter"
+    """The provider's own safety filter cut the answer."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,13 +172,15 @@ class Finish:
     """The last event of every stream."""
 
     reason: FinishReason
-    usage: Usage
+    usage: Usage | None
+    """`None` when the provider reported no token counts. Zeros would read as "free",
+    so the caller must count the tokens itself."""
     timings: Timings | None = None
 
     @property
     def tokens_per_second(self) -> float | None:
         """Generation speed, when the provider reported how long generation took."""
-        if self.timings is None or self.timings.generation_ms <= 0:
+        if self.usage is None or self.timings is None or self.timings.generation_ms <= 0:
             return None
         return self.usage.output_tokens * 1000 / self.timings.generation_ms
 

@@ -29,8 +29,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `apps/api` | FastAPI modular monolith (`python -m actio --role api\|worker\|all`) |
 | `apps/web` | Next.js web app |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
-| `packages/llm` | Model clients: the neutral chat format and the Ollama adapter (`actio-llm`); the router comes later |
-| `packages/fakellm` | Deterministic fake LLM server for tests |
+| `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`); the router comes later |
+| `packages/fakellm` | Deterministic fake LLM server for tests, scripted by directives in the prompt (`[[think: ...]]`, `[[call: ...]]`, `[[fail: 503]]`) |
 | `config/` | `models.yaml`, `plans.yaml`, assistant profiles, demo knowledge base |
 | `compose.yaml` | The production-shaped stack behind `make up`: Caddy, web, API, Postgres, Valkey |
 | `compose.dev.yaml` | The overlay behind `make dev`: Caddy routes to the native processes; data ports open on 127.0.0.1 |

@@ -105,6 +105,7 @@ async def test_max_output_tokens_cuts_the_answer(ollama_with: Any) -> None:
     finish = events[-1]
     assert isinstance(finish, Finish)
     assert finish.reason is FinishReason.LENGTH
+    assert finish.usage is not None
     assert finish.usage.output_tokens == 5
 
 
@@ -129,6 +130,7 @@ async def test_an_answer_stops_when_the_context_window_is_full(ollama_with: Any)
     finish = events[-1]
     assert isinstance(finish, Finish)
     assert finish.reason is FinishReason.LENGTH
+    assert finish.usage is not None
     assert finish.usage.input_tokens + finish.usage.output_tokens == 256
 
 
