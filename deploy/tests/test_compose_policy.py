@@ -18,6 +18,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILES = ["apps/api/Dockerfile", "apps/web/Dockerfile"]
 DATA_SERVICES = ["postgres", "valkey"]
+# Containers that do one thing and exit. Listed by name on purpose: adding one here is
+# a decision, because a job is exempt from the health check rule.
+ONE_SHOT_JOBS = {"migrate"}
 
 
 def resolved_config(*files: str) -> dict[str, Any]:
@@ -80,22 +83,51 @@ def test_every_container_is_locked_down(stack: dict[str, Any]) -> None:
     problems = [
         f"{name}: {problem}"
         for name, svc in stack["services"].items()
-        for problem in hardening_problems(svc)
+        for problem in hardening_problems(svc, is_job=name in ONE_SHOT_JOBS)
     ]
 
     assert problems == []
 
 
-def hardening_problems(svc: dict[str, Any]) -> list[str]:
+def hardening_problems(svc: dict[str, Any], *, is_job: bool = False) -> list[str]:
     failed = {
         "runs as root": svc.get("user", "root") in {"", "root", "0", "0:0"},
         "has a writable root filesystem": svc.get("read_only") is not True,
         "keeps Linux capabilities": svc.get("cap_drop") != ["ALL"],
         "can gain new privileges": "no-new-privileges:true" not in svc.get("security_opt", []),
         "has no memory limit": not svc.get("mem_limit"),
-        "has no health check": "test" not in svc.get("healthcheck", {}),
+        # A job exits when it is done, so there is nothing to probe: see ADR 0008.
+        "has no health check": not is_job and "test" not in svc.get("healthcheck", {}),
     }
     return [problem for problem, is_failed in failed.items() if is_failed]
+
+
+@pytest.mark.parametrize("job", sorted(ONE_SHOT_JOBS))
+def test_a_job_runs_once_and_something_waits_for_it_to_succeed(
+    stack: dict[str, Any], job: str
+) -> None:
+    """The exemption from health checks is only for containers that are really jobs."""
+    assert stack["services"][job]["restart"] == "no"
+    waiting = [
+        name
+        for name, svc in stack["services"].items()
+        if svc.get("depends_on", {}).get(job, {}).get("condition")
+        == "service_completed_successfully"
+    ]
+    assert waiting, f"nothing waits for {job} to succeed"
+
+
+def test_the_api_starts_only_after_the_schema_is_migrated(stack: dict[str, Any]) -> None:
+    depends_on = stack["services"]["api"]["depends_on"]
+
+    assert depends_on["migrate"]["condition"] == "service_completed_successfully"
+    assert stack["services"]["migrate"]["depends_on"]["postgres"]["condition"] == "service_healthy"
+
+
+def test_the_migration_job_cannot_be_reached_or_reach_out(stack: dict[str, Any]) -> None:
+    internal = {name for name, network in stack["networks"].items() if network.get("internal")}
+
+    assert set(stack["services"]["migrate"]["networks"]) <= internal
 
 
 def test_dev_overlay_publishes_ports_only_on_localhost() -> None:

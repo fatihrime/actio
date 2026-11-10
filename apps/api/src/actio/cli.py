@@ -1,19 +1,25 @@
 """Command-line entry point: ``python -m actio --role api``.
 
-Actio is one application that runs as different processes, chosen with ``--role``.
-Phase 0 has only the HTTP API. The background worker role arrives with the job
-queue in Phase 1.
+Actio is one application that runs as different processes, chosen with ``--role``:
+
+- ``api`` serves HTTP;
+- ``migrate`` brings the database schema up to date, then exits. It runs before the API
+  starts, as its own step, so the API never changes the schema it is serving from.
+
+The background worker role arrives with the job queue.
 """
 
 import argparse
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 import uvicorn
 
-from actio.settings import Settings
+from actio.core import schema
+from actio.core.settings import Settings
 
-ROLES = ("api",)
+ROLES = ("api", "migrate")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -22,11 +28,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--role", choices=ROLES, default="api", help="process to run (default: %(default)s)"
     )
     parser.add_argument(
-        "--reload", action="store_true", help="restart when the code changes (development only)"
+        "--reload",
+        action="store_true",
+        help="restart the API when the code changes (development only)",
     )
     args = parser.parse_args(argv)
 
     settings = Settings()
+    if args.role == "migrate":
+        revision = schema.upgrade(settings.database_url.get_secret_value())
+        sys.stdout.write(f"The database schema is at migration {revision}.\n")
+        return
+
     uvicorn.run(
         "actio.app:create_app",
         factory=True,

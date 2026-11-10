@@ -19,25 +19,27 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 - **Never bypass the checks.** Don't use `git commit --no-verify`; fix what the hook reports.
 - **Written from scratch.**
   - Don't paste code from other projects.
-  - Third-party code enters only as declared dependencies with compatible licenses (MIT, BSD, Apache-2.0).
+  - Third-party code enters only as declared dependencies with compatible licenses: MIT, BSD, Apache-2.0 and similar permissive ones, or the LGPL for a library used unmodified ([ADR 0008](docs/adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). No GPL or AGPL code.
+  - Check a new dependency's license from its own metadata before adding it. If it reaches a container image under anything but a permissive license, list it in `THIRD_PARTY_NOTICES.md`.
 - **Fictional data only.** Demo content, such as the "Velora Cycles" knowledge base, is fictional.
 
 ## Layout (planned)
 
 | Path | Purpose |
 |---|---|
-| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|worker\|all`) |
+| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `core/` holds settings and the database; `migrations/` holds the schema's history |
 | `apps/web` | Next.js web app |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
 | `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`); the router comes later |
 | `packages/fakellm` | Deterministic fake LLM server for tests, scripted by directives in the prompt (`[[think: ...]]`, `[[call: ...]]`, `[[fail: 503]]`) |
 | `config/` | `models.yaml`, `plans.yaml`, assistant profiles, demo knowledge base |
-| `compose.yaml` | The production-shaped stack behind `make up`: Caddy, web, API, Postgres, Valkey |
+| `compose.yaml` | The production-shaped stack behind `make up`: Caddy, web, API, Postgres, Valkey, and the `migrate` job that runs before the API |
 | `compose.dev.yaml` | The overlay behind `make dev`: Caddy routes to the native processes; data ports open on 127.0.0.1 |
 | `deploy/caddy/` | Caddy config: one entry point routing `/api/*` and `/v1/*` to the API, the rest to the web app |
 | `deploy/tests/` | Policy tests for the containers: published ports, pinned images, networks, hardening |
 | `docs/` | The documentation site's pages (built by Zensical from `zensical.toml`), including the ADRs in `docs/adr/` |
 | `scripts/` | Developer scripts |
+| `conftest.py` | Test fixtures shared by every suite: a throwaway Postgres and Valkey, from the images pinned in `compose.yaml` |
 
 ## Commands
 
@@ -49,7 +51,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `make install` | Install the Python and JavaScript workspaces with their dev tools, plus the git hooks |
 | `make up` | Build and run the whole stack in containers, shaped like production, at http://localhost:8080 |
 | `make dev` | Run the stack at http://localhost:8080 with the API and web app native, with hot reload |
-| `make smoke` | Check a running stack through Caddy: the web page, the API's health and docs |
+| `make smoke` | Check a running stack through Caddy: the web page, and that the API is healthy, ready (database migrated, Valkey answering) and serves its docs |
+| `make migration name="..."` | Write a new database migration from the table models, as a numbered draft to read and edit |
 | `make docs` | Preview the documentation site at http://localhost:8001, reloading on edits |
 | `make down` | Stop all containers. Their data stays in Docker volumes |
 | `make check` | Run everything CI runs: every static check on all files, the tests, then the builds (web app and docs site) |
@@ -69,7 +72,9 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - formatted and linted with `ruff`;
   - `mypy --strict` on core packages;
   - tests with `pytest`; property and state-machine tests with Hypothesis (`HYPOTHESIS_PROFILE=dev|ci|nightly`);
-  - `make test` fails below 90% coverage of `packages/quota`, and needs Docker running: the quota tests start a Valkey container;
+  - `make test` fails below 90% coverage of `packages/quota`, and needs Docker running: the quota and API tests start throwaway Valkey and Postgres containers;
+  - a change to a table model needs a migration in the same commit (`make migration name="..."`): a test fails when the models and the migrations disagree. Never edit a migration that is already on `main`; write the next one;
+  - `apps/api/src/actio/core` imports nothing else from `actio`;
   - change the Lua in `packages/quota` only together with the Python reference model (`oracle.py`): the differential test requires both to behave identically;
   - new HTTP client code uses `httpx2`, the maintained continuation of httpx ([ADR 0007](docs/adr/0007-local-models-through-ollamas-native-api.md)). The older test fixtures that call an app in-process still use httpx;
   - the Ollama adapter's tests replay recorded exchanges (`packages/llm/tests/fixtures/`), and fail if the request it sends changes. After changing what it sends, run `ACTIO_RECORD_OLLAMA=1 make test-live` to record them again from a real server, and review the diff.

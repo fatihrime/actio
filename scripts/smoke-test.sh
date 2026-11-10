@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks a running stack (`make dev` or `make up`) through Caddy: the web page, the API's
-# health check and the API docs. Retries for up to a minute while the stack starts.
+# health and readiness, and the API docs. Retries for up to a minute while the stack starts.
 # Usage: scripts/smoke-test.sh [base URL]    (default: http://localhost:8080)
 set -uo pipefail
 
@@ -23,6 +23,8 @@ check() {
 echo "Smoke test against $base"
 check "web page" / '>Actio</h1>'
 check "API health" /api/healthz '"status":"ok"'
+# Ready means: the database is reachable and migrated, and Valkey answers.
+check "API readiness" /api/readyz '"status":"ready"'
 check "API docs" /api/docs 'swagger-ui'
 
 if [ "$failures" -eq 0 ]; then

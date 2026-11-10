@@ -21,7 +21,8 @@ The first run builds the images, which takes a few minutes; later runs take seco
 
 - <http://localhost:8080>: the web app;
 - <http://localhost:8080/api/docs>: the API's interactive documentation;
-- <http://localhost:8080/api/healthz>: the API's health check.
+- <http://localhost:8080/api/healthz>: the API's health check;
+- <http://localhost:8080/api/readyz>: whether the API can do its work. It says `ready` when the database is reachable and migrated and Valkey answers, and otherwise names what is missing.
 
 `make smoke` checks all three from the command line. `make down` stops everything.
 
@@ -74,6 +75,9 @@ ACTIO_VALKEY_PORT=6379    # make dev only
 
 **"Address already in use"**
 :   Another program holds a port Actio needs. That's 8080 for both modes, or `ACTIO_HTTP_PORT` if you changed it. `make dev` also needs 3000 (the web app) and 8000 (the API). Stop the other program, or change `ACTIO_HTTP_PORT`.
+
+**`/api/readyz` says `migrations pending` or `unreachable`**
+:   The API is running but can't do its work yet. `migrations pending`: the database is older than the code; `make up` and `make dev` both apply the missing migrations when you run them again. `unreachable`: Postgres or Valkey isn't running or refuses the password; `docker compose ps` shows their state, and the API's log says more.
 
 **Postgres rejects its password after you recreated `.env`**
 :   Postgres keeps the password it was first started with. Delete the local data with `docker compose down --volumes`, then start again.

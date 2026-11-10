@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke docs check lint fmt test test-live build
+.PHONY: help doctor bootstrap install up dev down smoke migration docs check lint fmt test test-live build
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -30,16 +30,29 @@ up: .env ## Run the whole stack in containers, shaped like production, at http:/
 dev: .env ## Run the stack at http://localhost:8080 with the API and web app native; Ctrl-C stops them
 	docker compose stop api web # in case `make up` left them running
 	$(DEV_COMPOSE) up --detach --wait postgres valkey caddy
+	./scripts/with-dev-env.sh uv run actio --role migrate
 	@echo "Open http://localhost:8080 (API docs: /api/docs). 'make down' stops the containers."
-	pnpm exec concurrently --kill-others --names api,web --prefix-colors cyan,magenta \
+	./scripts/with-dev-env.sh pnpm exec concurrently --kill-others --names api,web \
+	    --prefix-colors cyan,magenta \
 	    "uv run actio --role api --reload" \
 	    "pnpm --dir apps/web dev"
 
 down: ## Stop all containers; their data is kept
 	$(DEV_COMPOSE) down
 
-smoke: ## Check the running stack through Caddy: the web page, the API's health and docs
+smoke: ## Check the running stack through Caddy: the web page, and that the API is healthy and ready
 	@./scripts/smoke-test.sh
+
+# Compares the table models with a database at the latest migration, and writes what
+# differs into a new numbered file in apps/api/src/actio/migrations/versions/. Read it
+# before committing: it is a draft.
+migration: .env ## Write a new database migration from the table models: make migration name="add users"
+	@test -n "$(name)" || { echo 'Usage: make migration name="what it does"'; exit 1; }
+	$(DEV_COMPOSE) up --detach --wait postgres
+	./scripts/with-dev-env.sh uv run actio --role migrate
+	./scripts/with-dev-env.sh uv run alembic --config apps/api/alembic.ini revision --autogenerate \
+	    --rev-id "$$(printf '%04d' $$(( $$(ls apps/api/src/actio/migrations/versions/*.py | wc -l) + 1 )))" \
+	    --message "$(name)"
 
 docs: ## Preview the documentation site at http://localhost:8001, reloading on edits
 	uv run zensical serve --dev-addr 127.0.0.1:8001

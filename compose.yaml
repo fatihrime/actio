@@ -8,13 +8,25 @@
 #   - every image is pinned by digest, or built from Dockerfiles whose base images are;
 #   - the data services sit only on the internal network;
 #   - every container runs as a non-root user, read-only, without Linux capabilities,
-#     with a memory limit and a health check.
+#     with a memory limit and a health check. A job that runs once and exits, such as
+#     `migrate`, has no health check: what depends on it waits for it to succeed.
 name: actio
 
 x-hardening: &hardening
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
+
+# The API and the migration job run the same image.
+x-api-build: &api-build
+  context: .
+  dockerfile: apps/api/Dockerfile
+
+# Where the API finds its data, with the passwords from .env. They are generated as hex,
+# so they need no escaping inside a URL.
+x-api-stores: &api-stores
+  ACTIO_DATABASE_URL: postgresql://actio:${POSTGRES_PASSWORD:?run make bootstrap to create .env}@postgres:5432/actio
+  ACTIO_VALKEY_URL: valkey://:${VALKEY_PASSWORD:?run make bootstrap to create .env}@valkey:6379/0
 
 services:
   caddy:
@@ -57,19 +69,39 @@ services:
       timeout: 3s
       retries: 10
 
+  # Brings the database schema up to date, then exits. The API starts only after it
+  # succeeded, so the API never serves from a schema it doesn't expect.
+  migrate:
+    build: *api-build
+    <<: *hardening
+    user: actio
+    tmpfs: [/tmp]
+    command: [actio, --role, migrate]
+    restart: "no"
+    environment: *api-stores
+    networks: [backend]
+    mem_limit: 256m
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    build: *api-build
     <<: *hardening
     user: actio
     tmpfs: [/tmp]
     environment:
+      <<: *api-stores
       # Only Caddy and the web app can reach the API here, so trust the client address
       # and scheme that Caddy forwards.
       ACTIO_FORWARDED_ALLOW_IPS: "*"
     networks: [edge, backend]
     mem_limit: 512m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD

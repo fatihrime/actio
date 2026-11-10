@@ -2,7 +2,7 @@
 
 ## Today
 
-`make up` runs five containers behind one address, <http://localhost:8080>:
+`make up` runs five containers behind one address, <http://localhost:8080>, after a sixth, `migrate`, has brought the database schema up to date and exited:
 
 ```mermaid
 flowchart LR
@@ -13,19 +13,23 @@ flowchart LR
         api["API<br>FastAPI"]
     end
     subgraph backend ["backend network: internal, no route out"]
+        migrate["migrate<br>runs once, first"]
         postgres[("Postgres 17<br>with pgvector")]
         valkey[("Valkey 9")]
     end
     caddy -->|"/api/* and /v1/*"| api
     caddy -->|"everything else"| web
+    migrate -->|"schema changes"| postgres
     api --> postgres
     api --> valkey
 ```
 
 - **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies will need.
-- **The API** is one Python application, `actio`, built on FastAPI. It will run as several processes from the same code, chosen with `--role`. Today it serves its health check and interactive docs.
+- **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, and `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). Today the API serves two probes and its interactive docs:
+    - `/api/healthz` answers whenever the process is alive;
+    - `/api/readyz` answers 200 only when the database is reachable and migrated and Valkey answers. Otherwise it answers 503 and names what is missing.
 - **The web app** is a Next.js application. Today it is a placeholder page.
-- **Postgres and Valkey** sit on an internal network. Only the API can reach them, and they can't reach the internet. Nothing stores data in them yet.
+- **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both; the database's schema is still empty, and the first tables arrive with accounts.
 
 | Path | Goes to |
 |---|---|
