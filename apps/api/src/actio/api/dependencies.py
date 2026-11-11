@@ -1,7 +1,7 @@
 """What routes ask for: a database session, the time, and who is asking."""
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, Request, Response
@@ -11,6 +11,7 @@ from actio.api.problems import Problem
 from actio.core.resources import Resources
 from actio.core.settings import Settings
 from actio.identity import sessions
+from actio.identity.passwords import Passwords
 from actio.identity.sessions import Principal
 
 
@@ -38,9 +39,15 @@ def get_now() -> datetime:
     return datetime.now(UTC)
 
 
+def get_passwords(request: Request) -> Passwords:
+    passwords: Passwords = request.app.state.passwords
+    return passwords
+
+
 Database = Annotated[AsyncSession, Depends(get_database)]
 Now = Annotated[datetime, Depends(get_now)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
+PasswordHashing = Annotated[Passwords, Depends(get_passwords)]
 
 
 # --- The session cookie ---------------------------------------------------------------
@@ -53,13 +60,24 @@ def cookie_name(settings: Settings) -> str:
     return "__Host-actio_session" if _is_https(settings) else "actio_session"
 
 
+COOKIE_MAX_AGE_ACCOUNT = timedelta(days=400)
+"""How long a browser keeps an account's cookie: the longest browsers allow. The
+session itself ends sooner, on the server, after 30 days without a request."""
+
+
 def set_session_cookie(
-    response: Response, settings: Settings, token: str, *, expires_at: datetime, now: datetime
+    response: Response, settings: Settings, token: str, principal: Principal, *, now: datetime
 ) -> None:
+    """Hand the browser a session's token.
+
+    A guest's cookie lasts exactly as long as the guest. An account's session is renewed
+    on the server each time it is used, so its cookie just has to outlive it.
+    """
+    lifetime = principal.session_expires_at - now if principal.is_guest else COOKIE_MAX_AGE_ACCOUNT
     response.set_cookie(
         cookie_name(settings),
         token,
-        max_age=max(0, int((expires_at - now).total_seconds())),
+        max_age=max(0, int(lifetime.total_seconds())),
         path="/",
         secure=_is_https(settings),
         httponly=True,  # page scripts can't read it

@@ -3,23 +3,40 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, LargeBinary
+from sqlalchemy import CheckConstraint, ForeignKey, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column
 
 from actio.core.database import Base
 
 
 class User(Base):
-    """An account. A guest is an account nobody can log in to again: it lasts as long
-    as the one session it was created with."""
+    """An account: a guest, or a lasting one with an email address and a password.
+
+    A guest is an account nobody can log in to again. It lasts as long as the one
+    session it was created with, unless its owner signs up: then the same row becomes a
+    lasting account, and keeps everything it owns.
+    """
 
     __tablename__ = "users"
+    __table_args__ = (
+        # A row is wholly one kind or the other, whatever code writes it.
+        CheckConstraint(
+            "(is_guest AND email IS NULL AND password_hash IS NULL AND expires_at IS NOT NULL)"
+            " OR (NOT is_guest AND email IS NOT NULL AND password_hash IS NOT NULL"
+            " AND expires_at IS NULL)",
+            name="guest_or_account",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     is_guest: Mapped[bool]
     created_at: Mapped[datetime]
     expires_at: Mapped[datetime | None]
     """For a guest: when the account, and everything it owns, may be deleted."""
+    email: Mapped[str | None] = mapped_column(unique=True)
+    """In lower case, so that one address is one account however it was typed."""
+    password_hash: Mapped[str | None]
+    """An Argon2id hash, which names its own parameters and salt."""
 
 
 class BrowserSession(Base):

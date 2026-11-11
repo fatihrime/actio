@@ -143,6 +143,13 @@ async def test_over_https_the_cookie_is_secure_and_bound_to_the_host(
 async def test_the_routes_are_in_the_api_description(api: httpx.AsyncClient) -> None:
     paths = (await api.get("/api/openapi.json")).json()["paths"]
 
-    assert set(paths["/api/session/guest"]) == {"post"}
-    assert set(paths["/api/session"]) == {"delete"}
-    assert set(paths["/api/me"]) == {"get"}
+    routes = {(path, method) for path, methods in paths.items() for method in methods}
+    assert {route for route in routes if "session" in route[0] or "account" in route[0]} == {
+        ("/api/session/guest", "post"),
+        ("/api/session", "post"),
+        ("/api/session", "delete"),
+        ("/api/sessions", "delete"),
+        ("/api/account", "post"),
+        ("/api/account/password", "put"),
+    }
+    assert ("/api/me", "get") in routes

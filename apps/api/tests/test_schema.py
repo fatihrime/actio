@@ -68,6 +68,27 @@ def test_every_migration_can_be_undone(database_url: str) -> None:
     assert revisions_in(database_url) == []
 
 
+def test_going_back_before_accounts_keeps_the_guests(database_url: str) -> None:
+    """Migration 0003 added what an account needs. Undoing it can't keep accounts, and
+    says so; guests, which need none of it, survive, and going forward again works."""
+    schema.upgrade(database_url)
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            "INSERT INTO users (id, is_guest, created_at, expires_at)"
+            " VALUES (gen_random_uuid(), true, now(), now())"
+        )
+        connection.execute(
+            "INSERT INTO users (id, is_guest, created_at, email, password_hash)"
+            " VALUES (gen_random_uuid(), false, now(), 'deniz@example.com', 'a hash')"
+        )
+
+    schema.downgrade(database_url, "0002")
+
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT is_guest FROM users").fetchall() == [(True,)]
+    assert schema.upgrade(database_url) == schema.head()
+
+
 def test_the_models_and_the_migrations_agree(database_url: str) -> None:
     """Fails when a table model changes and no migration was written for it."""
     schema.upgrade(database_url)

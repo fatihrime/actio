@@ -10,10 +10,14 @@ from actio.api import health, identity, problems
 from actio.api.same_origin import SameOriginOnly
 from actio.core.resources import open_resources
 from actio.core.settings import Settings
+from actio.identity.passwords import Passwords
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """The application. Without `settings`, they are read from the environment."""
+def create_app(settings: Settings | None = None, *, passwords: Passwords | None = None) -> FastAPI:
+    """The application. Without `settings`, they are read from the environment.
+
+    `passwords` replaces the password hasher: tests pass a cheap one.
+    """
     settings = settings or Settings()
 
     @asynccontextmanager
@@ -33,6 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.passwords = passwords or Passwords()
     problems.install(app)
     app.add_middleware(SameOriginOnly, origin=settings.public_url)
     app.include_router(health.router)

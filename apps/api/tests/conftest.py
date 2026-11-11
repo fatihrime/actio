@@ -9,9 +9,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 
+import argon2.profiles
 import httpx
 import psycopg
 import pytest
+from argon2 import PasswordHasher
 from psycopg import sql
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +23,7 @@ from actio.app import create_app
 from actio.core import schema
 from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
+from actio.identity.passwords import Passwords
 
 # For tests that never reach a database: nothing listens on port 1.
 NOWHERE_DATABASE = "postgresql://actio:unused@127.0.0.1:1/actio"
@@ -56,6 +59,17 @@ class Clock:
 @pytest.fixture
 def clock() -> Clock:
     return Clock()
+
+
+def cheap_passwords() -> Passwords:
+    """Real Argon2id with the smallest parameters, so a test's hash takes microseconds
+    instead of 50 ms. The hashes are as real as production's, only weaker."""
+    return Passwords(PasswordHasher.from_parameters(argon2.profiles.CHEAPEST))
+
+
+@pytest.fixture
+def passwords() -> Passwords:
+    return cheap_passwords()
 
 
 # --- Databases ------------------------------------------------------------------------
@@ -111,7 +125,7 @@ async def start_app(clock: Clock) -> AsyncIterator[StartApp]:
     async with AsyncExitStack() as stack:
 
         async def start(settings: Settings) -> httpx.AsyncClient:
-            app = create_app(settings)
+            app = create_app(settings, passwords=cheap_passwords())
             app.dependency_overrides[get_now] = lambda: clock.now
             await stack.enter_async_context(app.router.lifespan_context(app))
             return await stack.enter_async_context(

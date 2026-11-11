@@ -21,16 +21,19 @@ Actio allows LGPL libraries that are used unmodified, as separate libraries ([AD
 
 ## Everything else the images ship
 
-**The API image** (Python): MIT, BSD-3-Clause, Apache-2.0 and PSF-2.0 licenses.
+**The API image** (Python): MIT, BSD-3-Clause, Apache-2.0, ISC and PSF-2.0 licenses, and one public-domain dedication.
 
 | License | Packages |
 |---|---|
-| MIT | alembic, annotated-doc, annotated-types, anyio, fastapi, h11, httptools, mako, pydantic, pydantic-core, pydantic-settings, pyyaml, sqlalchemy, typing-inspection, valkey, watchfiles |
+| MIT | alembic, annotated-doc, annotated-types, anyio, argon2-cffi, argon2-cffi-bindings, fastapi, h11, httptools, mako, pydantic, pydantic-core, pydantic-settings, pyyaml, sqlalchemy, typing-inspection, valkey, watchfiles |
+| MIT-0 | cffi |
 | MIT and PSF-2.0 | greenlet |
 | MIT or Apache-2.0 | uvloop |
-| BSD-3-Clause | click, idna, markupsafe, python-dotenv, starlette, uvicorn, websockets |
+| BSD-3-Clause | click, idna, markupsafe, pycparser, python-dotenv, starlette, uvicorn, websockets |
 | Apache-2.0 | opentelemetry-api, tzdata |
+| ISC | dnspython |
 | PSF-2.0 | typing-extensions |
+| The Unlicense (public domain) | email-validator |
 
 **The web image** (JavaScript, production dependencies only): 45 packages under MIT, including Next.js and React, and the rest under Apache-2.0, ISC, BSD-3-Clause and 0BSD. `caniuse-lite`, the browser-support data used at build time, is under CC-BY-4.0.
 
