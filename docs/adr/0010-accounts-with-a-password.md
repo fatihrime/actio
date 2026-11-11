@@ -76,3 +76,10 @@ We chose **an email address and a password, stored as an Argon2id hash.** The ot
 - **A refused attempt is never checked.** It costs 3 ms instead of 61 ms, and no memory for hashing. The price: while an account is being guessed at, the right password is refused too.
 
 Signing up still says whether an address is registered. The limit on sign-ups per address bounds how many addresses can be asked about.
+
+### 2026-11-11: a guest who logs in keeps their conversations
+
+Logging in from a browser that holds a guest session ends that session, which deletes the guest. Until now a guest owned nothing, so nothing was lost. With conversations ([ADR 0012](0012-conversations-as-a-tree-of-messages.md)) there is something to lose: someone tries Actio as a guest, then remembers they have an account.
+
+- **The guest's conversations move to the account** they log in to, before the guest is deleted.
+- Logging in from one account to another moves nothing: each account keeps its own.
