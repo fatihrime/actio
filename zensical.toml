@@ -34,6 +34,7 @@ nav = [
     { "0009. Sessions in the database" = "adr/0009-sessions-in-the-database.md" },
     { "0010. Accounts with a password" = "adr/0010-accounts-with-a-password.md" },
     { "0011. Rate limits in Valkey" = "adr/0011-rate-limits-as-token-buckets-in-valkey.md" },
+    { "0012. Conversations as a tree of messages" = "adr/0012-conversations-as-a-tree-of-messages.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

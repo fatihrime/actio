@@ -104,6 +104,9 @@ ignore = ["E501"]  # the formatter owns line length
 [tool.ruff.lint.per-file-ignores]
 # pytest is built on assert; passwords in tests are made up; seeded random is fine there.
 "**/tests/**" = ["S101", "S105", "S106", "S311"]
+# These routes take the conversation itself, from a dependency that reads the path's id
+# and checks who owns it. The rule only looks for the id in the route's own signature.
+"apps/api/src/actio/api/conversations.py" = ["FAST003"]
 
 [tool.ruff.lint.flake8-builtins]
 # `credits` is only a builtin in the interactive shell, and it's the quota engine's unit.
@@ -164,12 +167,13 @@ broken_contract_guidance = "Each package stands alone. The app is where they mee
 
 [[tool.importlinter.contracts]]
 id = "app-layers"
-name = "Inside the application, imports only point down: cli, app, api, identity, core"
+name = "Inside the application, imports only point down: cli, app, api, the domain modules, core"
 type = "layers"
 containers = ["actio"]
 # `api` is the HTTP interface. `tables` lists the domain modules' tables for the
-# migrations. Below them come the domain modules, then `core`.
-layers = ["cli", "app", "api", "tables", "identity", "core"]
+# migrations. Below them come the domain modules, then `core`. `chat` is above
+# `identity` because a conversation belongs to an account: its table points at theirs.
+layers = ["cli", "app", "api", "tables", "chat", "identity", "core"]
 # Every module directly under `actio` must be given a layer above, so a new one can't
 # skip the question of where it belongs.
 exhaustive = true
@@ -180,6 +184,6 @@ broken_contract_guidance = "A lower layer can't import a higher one. Move the sh
 id = "web-framework-only-in-the-api"
 name = "core and the domain modules never import the web framework"
 type = "forbidden"
-source_modules = ["actio.core", "actio.identity"]
+source_modules = ["actio.core", "actio.chat", "actio.identity"]
 forbidden_modules = ["fastapi", "starlette", "uvicorn"]
 broken_contract_guidance = "Processes that serve no HTTP use these modules too. HTTP belongs in actio.api."

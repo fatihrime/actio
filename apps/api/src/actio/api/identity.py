@@ -32,6 +32,7 @@ from actio.api.dependencies import (
 )
 from actio.api.problems import Problem
 from actio.api.rate_limits import Limits
+from actio.chat import conversations
 from actio.core.resources import Resources
 from actio.identity import accounts, sessions
 from actio.identity.passwords import MAX_LENGTH, MIN_LENGTH
@@ -165,7 +166,8 @@ async def log_in(
     """Log in with an email address and a password, and set a new session's cookie.
 
     401 for an unknown address and for a wrong password alike. The session this browser
-    had before, if any, ends: a guest's is deleted with the guest.
+    had before, if any, ends. A guest's is deleted with the guest, whose conversations
+    move to the account.
 
     429 after too many attempts from the client's address, or for this email address
     from anywhere. Every attempt counts, right or wrong, and a refused one isn't checked
@@ -179,6 +181,10 @@ async def log_in(
         raise Problem(401, "Wrong email address or password.")
     token, principal = started
     if current is not None:
+        if current.is_guest:
+            # The guest turned out to have an account: what they started as a guest
+            # goes with them, before the guest is deleted.
+            await conversations.move_all(db, from_user=current.user_id, to_user=principal.user_id)
         await sessions.end_session(db, current.session_id)
     await db.commit()
     set_session_cookie(response, settings, token, principal, now=now)

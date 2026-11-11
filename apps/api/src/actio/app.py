@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from actio import __version__
-from actio.api import health, identity, problems
+from actio.api import conversations, health, identity, problems
 from actio.api.same_origin import SameOriginOnly
 from actio.core.resources import open_resources
 from actio.core.settings import Settings
@@ -42,4 +42,5 @@ def create_app(settings: Settings | None = None, *, passwords: Passwords | None 
     app.add_middleware(SameOriginOnly, origin=settings.public_url)
     app.include_router(health.router)
     app.include_router(identity.router)
+    app.include_router(conversations.router)
     return app

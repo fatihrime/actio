@@ -1,8 +1,11 @@
 """The list of table modules is complete, and the migrations create what they declare."""
 
 import pkgutil
+import subprocess
+import sys
 
 import psycopg
+import pytest
 
 import actio
 from actio import tables
@@ -18,6 +21,28 @@ def test_every_models_module_is_listed() -> None:
     }
 
     assert found == set(tables.MODULES)
+
+
+@pytest.mark.parametrize("module", tables.MODULES)
+def test_a_table_module_brings_along_the_tables_it_points_at(module: str) -> None:
+    """A process that loads one table module, such as a background job that only handles
+    conversations, must be able to write its rows. SQLAlchemy refuses when a table points
+    at one that was never loaded, so each module imports the modules it points into.
+
+    The API loads every module, which hides a missing import; a new interpreter that
+    loads only this one doesn't.
+    """
+    alone = (
+        f"import {module}\n"
+        "from actio.core.database import Base\n"
+        "print(len(Base.metadata.sorted_tables))  # fails if a pointed-at table is unknown\n"
+    )
+
+    done = subprocess.run(  # noqa: S603 - this interpreter, running the three lines above
+        [sys.executable, "-c", alone], capture_output=True, text=True, check=False
+    )
+
+    assert done.returncode == 0, done.stderr[-400:]
 
 
 def test_the_migrations_create_exactly_the_declared_tables(migrated: str) -> None:

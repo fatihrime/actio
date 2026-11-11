@@ -30,10 +30,11 @@ flowchart LR
     - `/api/readyz` answers 200 only when the database is reachable and migrated and Valkey answers. Otherwise it answers 503 and names what is missing;
     - `POST /api/session/guest` starts a session as a new guest and sets its cookie, `GET /api/me` says who the cookie belongs to, and `DELETE /api/session` ends it ([ADR 0009](adr/0009-sessions-in-the-database.md));
     - `POST /api/account` turns a guest into a lasting account with an email address and a password, `POST /api/session` logs in, `PUT /api/account/password` changes the password, and `DELETE /api/sessions` logs out of every browser ([ADR 0010](adr/0010-accounts-with-a-password.md));
-    - new guests, sign-ups and password attempts are rate-limited. Past a limit, the answer is 429 with a `Retry-After` header ([ADR 0011](adr/0011-rate-limits-as-token-buckets-in-valkey.md)).
+    - new guests, sign-ups and password attempts are rate-limited. Past a limit, the answer is 429 with a `Retry-After` header ([ADR 0011](adr/0011-rate-limits-as-token-buckets-in-valkey.md));
+    - `GET /api/conversations` lists your conversations a page at a time, and `GET /api/conversations/{id}` returns one with its messages. `PATCH` renames it, `DELETE` deletes it, and `PUT …/branch` shows another version of a question or an answer ([ADR 0012](adr/0012-conversations-as-a-tree-of-messages.md)). Nothing adds messages yet: that is the next step.
 - **The web app** is a Next.js application. Today it is a placeholder page.
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
-    - Postgres holds the first two tables: accounts and their sessions.
+    - Postgres holds four tables: accounts, their sessions, conversations, and the messages of each conversation, which form a tree.
     - Valkey holds the rate limits' counters: one number per client address or email address that has made an attempt lately, under a hashed name.
 
 Inside the API, the code is split into layers that only import downward, and a tool enforces it:
@@ -41,6 +42,7 @@ Inside the API, the code is split into layers that only import downward, and a t
 | Layer | Holds |
 |---|---|
 | `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, which attempts are rate-limited, the error format. The only layer that knows the web framework |
+| `actio.chat` | Conversations and their tree of messages: tables and rules, with no HTTP |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
 | `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter |
 
