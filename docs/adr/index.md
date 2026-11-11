@@ -22,5 +22,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0010](0010-accounts-with-a-password.md) | Lasting accounts with an email address and a password | Accepted |
 | [0011](0011-rate-limits-as-token-buckets-in-valkey.md) | Rate limits on the open routes, as token buckets in Valkey | Accepted |
 | [0012](0012-conversations-as-a-tree-of-messages.md) | Conversations as a tree of messages | Accepted |
+| [0013](0013-the-models-on-offer-are-a-file.md) | The models on offer are a file | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.
