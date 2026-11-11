@@ -1,0 +1,49 @@
+# The models this installation offers, and where each one runs.
+#
+# People and conversations refer to a model by the name it has here, such as
+# "standard". What is behind that name can then change, to a larger model or to another
+# server, without anything that asked for "standard" having to know.
+#
+# The API reads this file when it starts: restart it after a change. A mistake here
+# stops it from starting, with a message that says what is wrong.
+# See docs/adr/0013-the-models-on-offer-are-a-file.md.
+
+# The model used when a request names none.
+default = "standard"
+
+# --- Where models run -------------------------------------------------------------------
+#
+# kind = "ollama": an Ollama server. Its address is ACTIO_OLLAMA_URL, which defaults to
+#   this machine. What a model can do, such as reasoning before it answers, is asked
+#   from the server, not written here.
+#
+# kind = "openai-compatible": any server that speaks OpenAI's Chat Completions API, such
+#   as LM Studio, llama.cpp's server or vLLM. It needs a `url` that ends where the API
+#   starts, and may name the environment variable that holds its key:
+#
+#   [providers.lmstudio]
+#   kind = "openai-compatible"
+#   url = "http://127.0.0.1:1234/v1"
+#   api_key_env = "LMSTUDIO_API_KEY"
+
+[providers.ollama]
+kind = "ollama"
+
+# --- The models -------------------------------------------------------------------------
+#
+# title              what people see
+# provider           one of the providers above
+# model              the model's name on that server
+# context_window     how many tokens the model holds: the conversation and its answer
+# max_output_tokens  the most tokens one answer may have, reasoning included
+# thinking           for an "openai-compatible" server only: whether the model can reason
+#                    before it answers (true or false). Ollama says so itself.
+
+[models.standard]
+title = "Qwen 3.5 4B"
+provider = "ollama"
+# Get it with: ollama pull qwen3.5:4b-q4_K_M  (3.3 GB)
+model = "qwen3.5:4b-q4_K_M"
+# Ollama sizes the model's memory by this: 3.3 GB here, 4.2 GB at 32768.
+context_window = 8192
+max_output_tokens = 2048

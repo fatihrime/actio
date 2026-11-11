@@ -32,7 +32,7 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 Actio is one application split into modules, not into services ([ADR 0001](adr/0001-one-app-several-process-roles.md)), so a tool keeps the modules apart. The rules live in `pyproject.toml`, under `[tool.importlinter]`, and `uv run lint-imports` checks them:
 
 - the packages under `packages/` never import the application, or each other;
-- inside the application, imports only point down the layers: `cli`, `app`, `api`, `tables`, `chat`, `identity`, `core`. `chat` is above `identity` because a conversation belongs to an account;
+- inside the application, imports only point down the layers: `cli`, `app`, `api`, `tables`, `chat`, then `catalog` and `identity` side by side, `core`. `chat` is above `identity` because a conversation belongs to an account; `catalog` and `identity` don't import each other;
 - only `api`, the HTTP interface, imports the web framework. `core` and the domain modules never do, because processes that serve no HTTP use them too;
 - every module directly under `actio` must be given a layer. A new module fails the check until someone decides where it belongs.
 
@@ -42,7 +42,7 @@ A broken rule names the file, the line and the import, and says what to do inste
 
 | Suite | Runner | What it covers |
 |---|---|---|
-| `apps/api/tests` | pytest, Hypothesis, Postgres, Valkey | Settings, the CLI, database migrations (also run by several processes at once), the health and readiness probes, sessions and accounts, the rate limiter's Lua script against a plain token bucket, the limits over HTTP, conversations and the queries on their message tree against a plain tree |
+| `apps/api/tests` | pytest, Hypothesis, Postgres, Valkey | Settings, the CLI, database migrations (also run by several processes at once), the health and readiness probes, sessions and accounts, the rate limiter's Lua script against a plain token bucket, the limits over HTTP, conversations and the queries on their message tree against a plain tree, the models file and what each kind of model server says about a model |
 | `packages/fakellm/tests` | pytest | The wire format, checked with OpenAI's official Python SDK too; the directives that script reasoning, tool calls and failures |
 | `packages/llm/tests` | pytest | The Ollama adapter, against exchanges recorded from a real server; the OpenAI-compatible adapter, against fakellm. Streaming, tool calls, refused prompts, broken connections, timeouts |
 | `packages/quota/tests` | pytest, Hypothesis, Valkey | Credit math, reset windows across DST, the usage-limits rules under random event sequences, the Lua scripts against the Python reference model, and concurrency |

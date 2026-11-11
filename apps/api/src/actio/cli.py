@@ -16,6 +16,7 @@ from pathlib import Path
 
 import uvicorn
 
+from actio.catalog import CatalogError, read_file
 from actio.core import schema
 from actio.core.settings import Settings
 
@@ -39,6 +40,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         revision = schema.upgrade(settings.database_url.get_secret_value())
         sys.stdout.write(f"The database schema is at migration {revision}.\n")
         return
+
+    try:
+        # The app reads the models file again when it starts. Reading it here first
+        # turns a mistake in it into one clear line, instead of a failed startup's trace.
+        read_file(settings.models_file)
+    except CatalogError as error:
+        parser.exit(2, f"actio: {error}\n")
 
     uvicorn.run(
         "actio.app:create_app",

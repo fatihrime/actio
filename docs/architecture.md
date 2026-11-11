@@ -17,11 +17,13 @@ flowchart LR
         postgres[("Postgres 17<br>with pgvector")]
         valkey[("Valkey 9")]
     end
+    ollama(["Ollama<br>on your machine, not in a container"])
     caddy -->|"/api/* and /v1/*"| api
     caddy -->|"everything else"| web
     migrate -->|"schema changes"| postgres
     api --> postgres
     api --> valkey
+    api -->|"host.docker.internal"| ollama
 ```
 
 - **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies will need.
@@ -31,7 +33,9 @@ flowchart LR
     - `POST /api/session/guest` starts a session as a new guest and sets its cookie, `GET /api/me` says who the cookie belongs to, and `DELETE /api/session` ends it ([ADR 0009](adr/0009-sessions-in-the-database.md));
     - `POST /api/account` turns a guest into a lasting account with an email address and a password, `POST /api/session` logs in, `PUT /api/account/password` changes the password, and `DELETE /api/sessions` logs out of every browser ([ADR 0010](adr/0010-accounts-with-a-password.md));
     - new guests, sign-ups and password attempts are rate-limited. Past a limit, the answer is 429 with a `Retry-After` header ([ADR 0011](adr/0011-rate-limits-as-token-buckets-in-valkey.md));
-    - `GET /api/conversations` lists your conversations a page at a time, and `GET /api/conversations/{id}` returns one with its messages. `PATCH` renames it, `DELETE` deletes it, and `PUT …/branch` shows another version of a question or an answer ([ADR 0012](adr/0012-conversations-as-a-tree-of-messages.md)). Nothing adds messages yet: that is the next step.
+    - `GET /api/conversations` lists your conversations a page at a time, and `GET /api/conversations/{id}` returns one with its messages. `PATCH` renames it, `DELETE` deletes it, and `PUT …/branch` shows another version of a question or an answer ([ADR 0012](adr/0012-conversations-as-a-tree-of-messages.md)). Nothing adds messages yet: that is the next step;
+    - `GET /api/models` lists the models on offer, from `config/models.toml`, and says whether each can answer right now: `ready`, `missing` from its server, or its server `unreachable` ([ADR 0013](adr/0013-the-models-on-offer-are-a-file.md)).
+- **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
 - **The web app** is a Next.js application. Today it is a placeholder page.
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
     - Postgres holds four tables: accounts, their sessions, conversations, and the messages of each conversation, which form a tree.
@@ -43,6 +47,7 @@ Inside the API, the code is split into layers that only import downward, and a t
 |---|---|
 | `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, which attempts are rate-limited, the error format. The only layer that knows the web framework |
 | `actio.chat` | Conversations and their tree of messages: tables and rules, with no HTTP |
+| `actio.catalog` | The models on offer: reading `config/models.toml`, and asking a model's server about it |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
 | `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter |
 
@@ -71,7 +76,8 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
-- **models:** Ollama on your machine for local models, and cloud providers behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them. The [clients](reference/llm.md) for Ollama and for OpenAI-compatible servers already exist as a package, with a command-line tool ([ADR 0007](adr/0007-local-models-through-ollamas-native-api.md)). The API doesn't call them yet, and the router isn't written;
+- **turns:** a message goes to a model and the answer streams back. The [clients](reference/llm.md) for Ollama and for OpenAI-compatible servers exist as a package ([ADR 0007](adr/0007-local-models-through-ollamas-native-api.md)), and the API knows which models it offers. It doesn't send them anything yet;
+- **more providers:** cloud models behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them;
 - **usage limits:** session and weekly windows, enforced atomically in Valkey and recorded in a Postgres ledger. The [engine](reference/quota.md) already exists as a package, tested against a real Valkey server ([ADR 0006](adr/0006-usage-limits-engine.md)). Connecting it to the API, with the ledger, is still to come.
 
 ## Repository layout
@@ -84,6 +90,7 @@ The next phases add:
 | `packages/llm` | Model clients: a neutral chat format, adapters for Ollama and for OpenAI-compatible servers, and the `actio-llm` command |
 | `packages/quota` | The usage-limits engine: Lua scripts for Valkey, and the Python reference model they're tested against |
 | `compose.yaml`, `compose.dev.yaml` | The stack for `make up`, and the overlay for `make dev` |
+| `config/` | What an installation changes without touching code. Today: `models.toml`, the models on offer |
 | `deploy/` | Caddy's configuration, and the tests for the containers' rules |
 | `docs/` | This site, including the decision records |
 | `scripts/` | Developer scripts: tool checks, the denylist hook, the smoke test |

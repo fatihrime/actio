@@ -26,6 +26,21 @@ The first run builds the images, which takes a few minutes; later runs take seco
 
 `make smoke` checks all three from the command line. `make down` stops everything.
 
+## Models
+
+Actio runs its models on [Ollama](https://ollama.com), version 0.40 or newer, installed on your machine itself: not in a container, so it can use the graphics processor. Install it, start it, and download the model Actio offers by default (3.3 GB):
+
+```sh
+ollama pull qwen3.5:4b-q4_K_M
+```
+
+`make smoke` then stops noting that no model's server answers. The API says the same in more detail: with a session, `GET /api/models` lists each model as `ready`, `missing` from its server, or its server as `unreachable`.
+
+Which models are offered is in `config/models.toml`: the file explains itself. To offer another model, or one on LM Studio or any other server that speaks OpenAI's API, edit it and run `make up` or `make dev` again. A mistake in the file stops the API from starting, with a line that says what is wrong. See [ADR 0013](adr/0013-the-models-on-offer-are-a-file.md).
+
+!!! note "On Linux"
+    Ollama listens only on `127.0.0.1` by default, which containers can't reach, so with `make up` the model shows as `unreachable`. Ollama's `OLLAMA_HOST` setting changes where it listens: Docker's bridge address, usually `172.17.0.1`, is reachable from containers and not from your network. This follows Ollama's and Docker's documentation; this project's own Linux run, in CI, has no Ollama to try it with.
+
 ## Develop it
 
 ```sh
@@ -100,6 +115,12 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 
 **"Too many new guests from your network", or another 429**
 :   A rate limit was reached. The answer says how long to wait, and its `Retry-After` header says it in seconds. On your own machine, raise the limit in `.env` (see [Configuration](#configuration)) and run `make up` or `make dev` again.
+
+**A model is `missing` or `unreachable`**
+:   `GET /api/models` says so, and `make smoke` notes it. `missing`: Ollama runs but hasn't got the model; `ollama pull` it, by the name in `config/models.toml`. `unreachable`: Ollama isn't running, or isn't where the API looks. If it runs on another machine, set `ACTIO_OLLAMA_URL` in `.env`. It takes up to 15 seconds for a change to show.
+
+**The API doesn't start, and says `actio: … models.toml: …`**
+:   `config/models.toml` has a mistake, and the line says which. Fix it and start again.
 
 **Logging in answers 503, "This can't be done right now"**
 :   The API can't reach Valkey, so it can't count attempts, and refuses them instead of letting them through uncounted. `/api/readyz` and `docker compose ps` show what is down. People who are already logged in are not affected.

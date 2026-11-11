@@ -12,6 +12,7 @@ from typing import Protocol
 
 import argon2.profiles
 import httpx
+import httpx2
 import psycopg
 import pytest
 from argon2 import PasswordHasher
@@ -19,12 +20,15 @@ from psycopg import sql
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from actio import catalog as catalogs
 from actio.api.dependencies import get_now
 from actio.app import create_app
+from actio.catalog import Catalog, CatalogFile
 from actio.core import schema
 from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
 from actio.identity.passwords import Passwords
+from actio_fakellm.app import create_app as create_fake_llm
 
 # For tests that never reach a database: nothing listens on port 1.
 NOWHERE_DATABASE = "postgresql://actio:unused@127.0.0.1:1/actio"
@@ -120,27 +124,72 @@ def settings(database_url: str, valkey_url: str) -> Settings:
     )
 
 
+FAKE_MODELS = CatalogFile.model_validate(
+    {
+        "default": "standard",
+        "providers": {"fake": {"kind": "openai-compatible", "url": "http://fakellm/v1"}},
+        "models": {
+            "standard": {
+                "title": "Fake",
+                "provider": "fake",
+                "model": "fake-chat",
+                "context_window": 8192,
+                "max_output_tokens": 1024,
+                "thinking": True,
+            }
+        },
+    }
+)
+"""What the app under test offers: one model, on a provider called `fake`."""
+
+
+@pytest.fixture
+async def catalog() -> AsyncIterator[Catalog]:
+    """The models of the app under test, served by fakellm inside this process: no
+    Ollama, no network, and answers that are the same every time."""
+    fake = httpx2.ASGITransport(app=create_fake_llm())
+    async with catalogs.build(
+        FAKE_MODELS, ollama_url="http://127.0.0.1:1", transports={"fake": fake}
+    ) as built:
+        yield built
+
+
 class StartApp(Protocol):
     def __call__(
-        self, settings: Settings, *, address: str = "127.0.0.1", passwords: Passwords | None = None
+        self,
+        settings: Settings,
+        *,
+        address: str = "127.0.0.1",
+        passwords: Passwords | None = None,
+        catalog: Catalog | None = None,
     ) -> Awaitable[httpx.AsyncClient]: ...
 
 
 @pytest.fixture
-async def start_app(clock: Clock) -> AsyncIterator[StartApp]:
+async def start_app(clock: Clock, catalog: Catalog) -> AsyncIterator[StartApp]:
     """Call with settings to get an HTTP client wired straight to a started app.
 
     No server and no network: requests go to the app in process. The client's URL is
     the app's public address, so it keeps cookies as a browser there would, and the app
     reads the time from `clock`. `address` is the network address the app sees the
-    requests come from. `passwords` replaces the cheap password hasher, to watch it.
+    requests come from. `passwords` replaces the cheap password hasher, to watch it, and
+    `catalog` the fake models.
     """
+    fake_models = catalog
     async with AsyncExitStack() as stack:
 
         async def start(
-            settings: Settings, *, address: str = "127.0.0.1", passwords: Passwords | None = None
+            settings: Settings,
+            *,
+            address: str = "127.0.0.1",
+            passwords: Passwords | None = None,
+            catalog: Catalog | None = None,
         ) -> httpx.AsyncClient:
-            app = create_app(settings, passwords=passwords or cheap_passwords())
+            app = create_app(
+                settings,
+                passwords=passwords or cheap_passwords(),
+                catalog=catalog or fake_models,
+            )
             app.dependency_overrides[get_now] = lambda: clock.now
             await stack.enter_async_context(app.router.lifespan_context(app))
             return await stack.enter_async_context(

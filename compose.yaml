@@ -104,6 +104,16 @@ services:
       ACTIO_LIMIT_SIGNUPS_PER_ADDRESS:
       ACTIO_LIMIT_LOGINS_PER_ADDRESS:
       ACTIO_LIMIT_LOGINS_PER_EMAIL:
+      # Ollama runs on this machine itself, not in a container: there it can use the
+      # graphics processor, which a container on macOS can't. From inside a container
+      # the machine is called host.docker.internal.
+      ACTIO_OLLAMA_URL: ${ACTIO_OLLAMA_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Docker Desktop knows that name by itself. On Linux, this line teaches it.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # The models on offer. Edit config/models.toml and restart the API: no rebuild.
+      - ./config:/app/config:ro
     networks: [edge, backend]
     mem_limit: 512m
     depends_on:

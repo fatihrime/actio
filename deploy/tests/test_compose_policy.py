@@ -190,6 +190,48 @@ def test_a_rate_limit_set_in_env_reaches_the_api(limit: str) -> None:
     assert api_environment()[limit] is None  # left out: the API's own default applies
 
 
+def test_the_api_reads_the_models_file_from_a_read_only_mount(stack: dict[str, Any]) -> None:
+    """config/models.toml is edited on the host and read in the container. The mount must
+    land where the image expects the file, and the container must not be able to write it."""
+    [mount] = stack["services"]["api"]["volumes"]
+    dockerfile = (ROOT / "apps/api/Dockerfile").read_text()
+    expected = re.search(r"ACTIO_MODELS_FILE=(\S+)", dockerfile)
+
+    assert expected is not None
+    assert mount["type"] == "bind"
+    assert Path(mount["source"]) == ROOT / "config"
+    assert mount["read_only"] is True
+    assert Path(expected[1]).parent == Path(mount["target"])
+    assert (ROOT / "config" / Path(expected[1]).name).is_file()
+    assert "COPY config /app/config" in dockerfile  # so the image also starts on its own
+
+
+def test_the_api_finds_ollama_on_the_host_unless_told_otherwise() -> None:
+    """Ollama runs on the machine itself. A container's own 127.0.0.1 is the container."""
+    env = os.environ | {"POSTGRES_PASSWORD": "placeholder", "VALKEY_PASSWORD": "placeholder"}
+    env.pop("ACTIO_OLLAMA_URL", None)
+    command = ["docker", "compose", "--env-file", ".env.example", "--file", "compose.yaml"]
+
+    def api(**extra: str) -> dict[str, Any]:
+        result = subprocess.run(  # noqa: S603 - the docker CLI, with arguments fixed here
+            [*command, "config", "--format", "json"],
+            cwd=ROOT,
+            env=env | extra,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        service: dict[str, Any] = json.loads(result.stdout)["services"]["api"]
+        return service
+
+    by_default = api()
+    elsewhere = api(ACTIO_OLLAMA_URL="http://192.168.1.50:11434")
+
+    assert by_default["environment"]["ACTIO_OLLAMA_URL"] == "http://host.docker.internal:11434"
+    assert any(host.startswith("host.docker.internal") for host in by_default["extra_hosts"])
+    assert elsewhere["environment"]["ACTIO_OLLAMA_URL"] == "http://192.168.1.50:11434"
+
+
 def test_dev_overlay_publishes_ports_only_on_localhost() -> None:
     dev = resolved_config("compose.yaml", "compose.dev.yaml")
     host_ips = {

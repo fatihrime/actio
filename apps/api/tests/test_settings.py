@@ -116,6 +116,34 @@ def test_rejects_urls_for_other_kinds_of_server(field: str, url: str) -> None:
 
 
 @pytest.mark.usefixtures("stores")
+def test_models_are_listed_in_the_repositorys_file_and_run_on_this_machines_ollama() -> None:
+    settings = Settings()
+
+    assert settings.models_file == Path("config/models.toml")
+    assert settings.ollama_url == "http://127.0.0.1:11434"
+
+
+@pytest.mark.usefixtures("stores")
+def test_the_models_file_and_ollama_can_be_elsewhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ACTIO_MODELS_FILE", "/app/config/models.toml")
+    monkeypatch.setenv("ACTIO_OLLAMA_URL", "http://host.docker.internal:11434")
+
+    settings = Settings()
+
+    assert settings.models_file == Path("/app/config/models.toml")
+    assert settings.ollama_url == "http://host.docker.internal:11434"
+
+
+@pytest.mark.usefixtures("stores")
+@pytest.mark.parametrize(
+    "url", ["127.0.0.1:11434", "ollama", "ftp://ollama:11434", "http://ollama:11434/api", ""]
+)
+def test_ollamas_address_is_a_server_not_a_path_on_one(url: str) -> None:
+    with pytest.raises(ValidationError, match="ollama_url"):
+        Settings(ollama_url=url)
+
+
+@pytest.mark.usefixtures("stores")
 def test_the_rate_limits_have_defaults() -> None:
     settings = Settings()
 

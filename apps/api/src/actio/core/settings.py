@@ -5,6 +5,7 @@ environment. Tests build their own settings, so local secrets can't leak into a 
 run.
 """
 
+from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -63,6 +64,14 @@ class Settings(BaseSettings):
 
     valkey_prefix: str = Field(default="actio", pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")
     """Starts every key Actio keeps in Valkey, so two deployments can share a database."""
+
+    models_file: Path = Path("config/models.toml")
+    """The file that lists the models on offer. The default is where the repository
+    keeps it, seen from the repository's root; the container image sets its own path."""
+
+    ollama_url: str = Field(default="http://127.0.0.1:11434", pattern=r"^https?://[^\s/]+/?$")
+    """Where the Ollama server is, as seen from this process. From inside a container,
+    ``127.0.0.1`` is the container itself: ``compose.yaml`` points at the host instead."""
 
     # --- Rate limits, written as `30/hour`: 30 at once, then one more every two minutes.
     # An address is the client's IPv4 address, or its IPv6 /64 network. Several people

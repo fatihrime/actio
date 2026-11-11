@@ -8,6 +8,7 @@ from fastapi import Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio.api.problems import Problem
+from actio.catalog import Catalog
 from actio.core.resources import Resources
 from actio.core.settings import Settings
 from actio.identity import sessions
@@ -44,6 +45,12 @@ def get_passwords(request: Request) -> Passwords:
     return passwords
 
 
+def get_catalog(request: Request) -> Catalog:
+    catalog: Catalog = request.app.state.catalog
+    return catalog
+
+
+Models = Annotated[Catalog, Depends(get_catalog)]
 Database = Annotated[AsyncSession, Depends(get_database)]
 Now = Annotated[datetime, Depends(get_now)]
 AppSettings = Annotated[Settings, Depends(get_settings)]

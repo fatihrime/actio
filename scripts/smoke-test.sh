@@ -27,12 +27,15 @@ check "API health" /api/healthz '"status":"ok"'
 check "API readiness" /api/readyz '"status":"ready"'
 check "API docs" /api/docs 'swagger-ui'
 
-# A guest session, through the proxy: start one, read it back with its cookie, end it.
+# A guest session, through the proxy: start one, read it back with its cookie, ask for
+# the models with it, end it. The models' answer is kept for the check after this one.
+models=""
 session_round_trip() {
   local jar started me
   jar="$(mktemp)"
   started="$(curl --silent --max-time 5 --cookie-jar "$jar" --request POST "$base/api/session/guest")"
   me="$(curl --silent --max-time 5 --cookie "$jar" "$base/api/me")"
+  models="$(curl --silent --max-time 10 --cookie "$jar" "$base/api/models")"
   curl --silent --max-time 5 --cookie "$jar" --request DELETE "$base/api/session" >/dev/null
   rm -f "$jar"
   [[ $started == *'"is_guest":true'* && $me == "$started" ]]
@@ -45,6 +48,20 @@ elif [[ "$(curl --silent --max-time 5 --request POST "$base/api/session/guest")"
   failures=$((failures + 1))
 else
   printf '  ✗ %s: starting a guest session and reading it back did not work\n' "guest session"
+  failures=$((failures + 1))
+fi
+
+# The API read its models file and can say what it offers. Whether a model can answer
+# right now is not checked here: that needs Ollama, which a build server doesn't have.
+if [[ $models == *'"default":"'*'"models":[{'* ]]; then
+  printf '  ✓ %s\n' "models on offer"
+  case $models in
+  *'"status":"ready"'*) ;;
+  *'"status":"missing"'*) echo "    note: a model isn't on its server yet. See /api/models, and docs/getting-started.md" ;;
+  *) echo "    note: no model's server answers. Is Ollama running? See docs/getting-started.md" ;;
+  esac
+else
+  printf '  ✗ %s: GET /api/models did not list any model\n' "models on offer"
   failures=$((failures + 1))
 fi
 

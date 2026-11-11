@@ -2,7 +2,7 @@
 
 Actio's own code is [MIT-licensed](LICENSE). Its dependencies are declared in the `pyproject.toml` files and `uv.lock` (Python), and in the `package.json` files and `pnpm-lock.yaml` (JavaScript). They are installed from the package registries: none of their code is copied into this repository.
 
-This file records what Actio's two container images ship. It was checked on 2026-11-10, from the installed packages' own metadata and from inside the built images.
+This file records what Actio's two container images ship. The API image was checked on 2026-11-11 and the web image on 2026-11-10, from the installed packages' own metadata and from inside the built images.
 
 ## Components under the LGPL
 
@@ -21,16 +21,16 @@ Actio allows LGPL libraries that are used unmodified, as separate libraries ([AD
 
 ## Everything else the images ship
 
-**The API image** (Python): MIT, BSD-3-Clause, Apache-2.0, ISC and PSF-2.0 licenses, and one public-domain dedication.
+**The API image** (Python, 38 packages besides Actio's own two): MIT, BSD-3-Clause, Apache-2.0, ISC and PSF-2.0 licenses, and one public-domain dedication.
 
 | License | Packages |
 |---|---|
-| MIT | alembic, annotated-doc, annotated-types, anyio, argon2-cffi, argon2-cffi-bindings, fastapi, h11, httptools, mako, pydantic, pydantic-core, pydantic-settings, pyyaml, sqlalchemy, typing-inspection, valkey, watchfiles |
+| MIT | alembic, annotated-doc, annotated-types, anyio, argon2-cffi, argon2-cffi-bindings, fastapi, h11, httptools, mako, pydantic, pydantic-core, pydantic-settings, pyyaml, sqlalchemy, truststore, typing-inspection, valkey, watchfiles |
 | MIT-0 | cffi |
 | MIT and PSF-2.0 | greenlet |
 | MIT or Apache-2.0 | uvloop |
-| BSD-3-Clause | click, idna, markupsafe, pycparser, python-dotenv, starlette, uvicorn, websockets |
-| Apache-2.0 | opentelemetry-api, tzdata |
+| BSD-3-Clause | click, httpcore2, httpx2, idna, markupsafe, pycparser, python-dotenv, starlette, uvicorn, websockets |
+| Apache-2.0 | opentelemetry-api |
 | ISC | dnspython |
 | PSF-2.0 | typing-extensions |
 | The Unlicense (public domain) | email-validator |
