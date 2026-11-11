@@ -39,6 +39,10 @@ session_round_trip() {
 }
 if session_round_trip; then
   printf '  ✓ %s\n' "guest session"
+elif [[ "$(curl --silent --max-time 5 --request POST "$base/api/session/guest")" == *'"status":429'* ]]; then
+  # Each run creates one guest, and they are limited per address (30 an hour by default).
+  printf '  ✗ %s: too many new guests from this address for now; wait, or raise ACTIO_LIMIT_GUESTS_PER_ADDRESS in .env\n' "guest session"
+  failures=$((failures + 1))
 else
   printf '  ✗ %s: starting a guest session and reading it back did not work\n' "guest session"
   failures=$((failures + 1))

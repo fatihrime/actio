@@ -4,7 +4,7 @@
 
 > A self-hostable, local-first AI platform: a ChatGPT/Claude-style assistant and an OpenAI- and Anthropic-compatible developer gateway, both governed by Claude-inspired usage limits whose correctness is tested.
 
-**Status:** early development, Phase 1 of 7. The foundation, the usage-limits engine and the client for local models are in place; the chat that uses them comes next. This README grows with each phase, and nothing below counts as done until it ships with tests.
+**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place; the chat that uses them comes next. This README grows with each phase, and nothing below counts as done until it ships with tests.
 
 **Documentation:** <https://fatihrime.github.io/actio/>: getting started, architecture, development and the decision records.
 

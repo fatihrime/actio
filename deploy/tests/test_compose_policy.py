@@ -130,6 +130,66 @@ def test_the_migration_job_cannot_be_reached_or_reach_out(stack: dict[str, Any])
     assert set(stack["services"]["migrate"]["networks"]) <= internal
 
 
+def test_a_client_cannot_choose_the_address_it_is_counted_under(stack: dict[str, Any]) -> None:
+    """Rate limits count per client address, which the API reads from `X-Forwarded-For`.
+
+    Here the API trusts that header from whoever reaches it, and takes the first address
+    in it. That is sound only because of two other facts, so all three are held together:
+
+    - only Caddy and the web app can reach the API: it publishes no port (checked above)
+      and shares a network with nothing else;
+    - Caddy writes the header itself. It keeps what a client sent only when
+      `trusted_proxies` tells it to, and then the first address is the client's to choose.
+
+    Behind another proxy or a CDN, set `trusted_proxies` in the Caddyfile and replace
+    `*` with the proxies' addresses in ACTIO_FORWARDED_ALLOW_IPS, both in one change.
+    See ADR 0011.
+    """
+    api = stack["services"]["api"]
+    caddyfile = (ROOT / "deploy/caddy/Caddyfile").read_text()
+    sharing_a_network = {
+        name
+        for name, svc in stack["services"].items()
+        if name not in ONE_SHOT_JOBS and set(svc["networks"]) & {"edge"}
+    }
+
+    assert api["environment"]["ACTIO_FORWARDED_ALLOW_IPS"] == "*"
+    assert "trusted_proxies" not in caddyfile
+    assert sharing_a_network == {"caddy", "web", "api"}
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [
+        "ACTIO_LIMIT_GUESTS_PER_ADDRESS",
+        "ACTIO_LIMIT_SIGNUPS_PER_ADDRESS",
+        "ACTIO_LIMIT_LOGINS_PER_ADDRESS",
+        "ACTIO_LIMIT_LOGINS_PER_EMAIL",
+    ],
+)
+def test_a_rate_limit_set_in_env_reaches_the_api(limit: str) -> None:
+    """compose.yaml names each setting it passes on, so a new one is easy to forget."""
+    env = os.environ | {"POSTGRES_PASSWORD": "placeholder", "VALKEY_PASSWORD": "placeholder"}
+    command = ["docker", "compose", "--env-file", ".env.example", "--file", "compose.yaml"]
+
+    def api_environment(**extra: str) -> dict[str, str | None]:
+        result = subprocess.run(  # noqa: S603 - the docker CLI, with arguments fixed here
+            [*command, "config", "--format", "json"],
+            cwd=ROOT,
+            env=env | extra,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        environment: dict[str, str | None] = json.loads(result.stdout)["services"]["api"][
+            "environment"
+        ]
+        return environment
+
+    assert api_environment(**{limit: "3/day"})[limit] == "3/day"
+    assert api_environment()[limit] is None  # left out: the API's own default applies
+
+
 def test_dev_overlay_publishes_ports_only_on_localhost() -> None:
     dev = resolved_config("compose.yaml", "compose.dev.yaml")
     host_ips = {

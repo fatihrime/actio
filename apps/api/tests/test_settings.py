@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from actio.core.rate_limit import Rate
 from actio.core.settings import Settings
 
 DATABASE = "postgresql://actio:s3cret-db@db.internal:5432/actio"
@@ -112,3 +113,67 @@ def test_rejects_urls_for_other_kinds_of_server(field: str, url: str) -> None:
         Settings(database_url=database, valkey_url=valkey)
 
     assert url not in str(failure.value)  # a rejected URL may hold a password too
+
+
+@pytest.mark.usefixtures("stores")
+def test_the_rate_limits_have_defaults() -> None:
+    settings = Settings()
+
+    assert str(settings.limit_guests_per_address) == "30/hour"
+    assert str(settings.limit_signups_per_address) == "10/hour"
+    assert str(settings.limit_logins_per_address) == "30/hour"
+    assert str(settings.limit_logins_per_email) == "10/hour"
+
+
+def test_every_rate_limit_can_be_set_for_the_container_stack() -> None:
+    """compose.yaml passes settings on by name, and .env.example is where people look
+    for them. A limit added to the settings must be added to both."""
+    root = Path(__file__).resolve().parents[3]
+    compose, example = (root / "compose.yaml").read_text(), (root / ".env.example").read_text()
+    limits = [name for name in Settings.model_fields if name.startswith("limit_")]
+
+    assert len(limits) == 4
+    for name in limits:
+        default = Settings.model_fields[name].default
+        assert f"ACTIO_{name.upper()}:" in compose
+        assert f"# ACTIO_{name.upper()}={default}\n" in example  # with its real default
+
+
+@pytest.mark.usefixtures("stores")
+def test_a_rate_limit_is_read_from_the_environment_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ACTIO_LIMIT_GUESTS_PER_ADDRESS", "3/day")
+
+    settings = Settings()
+
+    assert settings.limit_guests_per_address == Rate(count=3, period_ms=86_400_000)
+    assert settings.limit_guests_per_address.interval_ms == 8 * 3_600_000
+
+
+@pytest.mark.usefixtures("stores")
+@pytest.mark.parametrize("written", ["lots", "0/hour", "30 per hour", "30/fortnight", ""])
+def test_a_rate_limit_written_wrongly_stops_the_process_at_startup(
+    monkeypatch: pytest.MonkeyPatch, written: str
+) -> None:
+    monkeypatch.setenv("ACTIO_LIMIT_LOGINS_PER_EMAIL", written)
+
+    with pytest.raises(ValidationError, match="must look like 30/hour") as failure:
+        Settings()
+
+    assert [error["loc"] for error in failure.value.errors()] == [("limit_logins_per_email",)]
+
+
+@pytest.mark.usefixtures("stores")
+def test_valkey_keys_start_with_a_prefix_that_can_be_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().valkey_prefix == "actio"
+
+    monkeypatch.setenv("ACTIO_VALKEY_PREFIX", "actio-staging")
+    assert Settings().valkey_prefix == "actio-staging"
+
+
+@pytest.mark.usefixtures("stores")
+@pytest.mark.parametrize("prefix", ["", "Actio", "two words", "a:b", "{tag}", "x" * 33])
+def test_a_prefix_that_would_make_odd_keys_is_refused(prefix: str) -> None:
+    with pytest.raises(ValidationError, match="valkey_prefix"):
+        Settings(valkey_prefix=prefix)

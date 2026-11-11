@@ -98,6 +98,12 @@ services:
       # The address people open in their browser. Set ACTIO_PUBLIC_URL in .env when
       # Actio is served under another name, such as https://chat.example.com.
       ACTIO_PUBLIC_URL: ${ACTIO_PUBLIC_URL:-http://localhost:${ACTIO_HTTP_PORT:-8080}}
+      # Rate limits, such as 30/hour. Without a value, a variable is passed on from .env
+      # when it is set there, and otherwise left out: then the API's own default applies.
+      ACTIO_LIMIT_GUESTS_PER_ADDRESS:
+      ACTIO_LIMIT_SIGNUPS_PER_ADDRESS:
+      ACTIO_LIMIT_LOGINS_PER_ADDRESS:
+      ACTIO_LIMIT_LOGINS_PER_EMAIL:
     networks: [edge, backend]
     mem_limit: 512m
     depends_on:

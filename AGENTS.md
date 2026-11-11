@@ -27,7 +27,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 
 | Path | Purpose |
 |---|---|
-| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `identity/` holds accounts and sessions; `core/` holds settings, ids and the database; `migrations/` holds the schema's history |
+| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `identity/` holds accounts and sessions; `core/` holds settings, ids, the database and the rate limiter; `migrations/` holds the schema's history |
 | `apps/web` | Next.js web app |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
 | `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`); the router comes later |
@@ -76,6 +76,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - a change to a table model needs a migration in the same commit (`make migration name="..."`): a test fails when the models and the migrations disagree. Never edit a migration that is already on `main`; write the next one;
   - `apps/api/src/actio/core` imports nothing else from `actio`;
   - change the Lua in `packages/quota` only together with the Python reference model (`oracle.py`): the differential test requires both to behave identically;
+  - the same holds for the rate limiter's script, `apps/api/src/actio/core/rate_limit.lua`, and the plain token buckets in `apps/api/tests/test_rate_limit.py`;
   - new HTTP client code uses `httpx2`, the maintained continuation of httpx ([ADR 0007](docs/adr/0007-local-models-through-ollamas-native-api.md)). The older test fixtures that call an app in-process still use httpx;
   - the Ollama adapter's tests replay recorded exchanges (`packages/llm/tests/fixtures/`), and fail if the request it sends changes. After changing what it sends, run `ACTIO_RECORD_OLLAMA=1 make test-live` to record them again from a real server, and review the diff.
 - **TypeScript:**
@@ -97,5 +98,6 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - errors are RFC 9457 problem documents: raise `Problem(status, detail)`;
   - nothing below `actio.api` reads the clock. Time comes in as `now`, from the `Now` dependency, so tests can move it;
   - a route that needs to know who is asking takes `CurrentPrincipal`;
+  - a route that anyone can call, or that checks a password, counts the attempt before doing its work: it takes `Limits` and calls one, such as `await limits.log_in(email)` ([ADR 0011](docs/adr/0011-rate-limits-as-token-buckets-in-valkey.md)). A new limit is a method in `actio.api.rate_limits` and a `limit_*` setting, listed in `compose.yaml` and `.env.example` too, or a test fails;
   - a module that defines tables is named `models` and listed in `actio/tables.py`, or a test fails.
 - **Decisions:** anything hard to reverse gets an ADR. Copy [`docs/adr/0000-template.md`](docs/adr/0000-template.md).

@@ -44,6 +44,8 @@ async def toy() -> httpx.AsyncClient:
     async def item(number: int) -> dict[str, int]:
         if number == 13:
             raise Problem(409, "Item 13 is taken.", item=13)
+        if number == 99:
+            raise Problem(429, "Too fast.", headers={"Retry-After": "7"}, retry_after=7)
         return {"number": number}
 
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://toy")
@@ -74,4 +76,20 @@ async def test_a_problem_raised_in_a_route_keeps_its_extra_members(toy: httpx.As
         "status": 409,
         "detail": "Item 13 is taken.",
         "item": 13,
+    }
+
+
+async def test_a_problem_can_carry_response_headers(toy: httpx.AsyncClient) -> None:
+    async with toy:
+        response = await toy.get("/items/99")
+
+    assert response.status_code == 429
+    assert response.headers["content-type"] == PROBLEM
+    assert response.headers["retry-after"] == "7"
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Too Many Requests",
+        "status": 429,
+        "detail": "Too fast.",
+        "retry_after": 7,
     }

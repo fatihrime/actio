@@ -47,6 +47,7 @@ def get_passwords(request: Request) -> Passwords:
 Database = Annotated[AsyncSession, Depends(get_database)]
 Now = Annotated[datetime, Depends(get_now)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
+AppResources = Annotated[Resources, Depends(get_resources)]
 PasswordHashing = Annotated[Passwords, Depends(get_passwords)]
 
 

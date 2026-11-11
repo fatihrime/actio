@@ -29,6 +29,9 @@ ACCOUNT_IDLE_LIFETIME = timedelta(days=30)
 SEEN_RESOLUTION = timedelta(minutes=1)
 """A session's row is written at most this often, so reading a session isn't a write."""
 
+SWEEP_BATCH = 100
+"""How many expired guests, and how many expired sessions, one sweep deletes at most."""
+
 
 @dataclass(frozen=True, slots=True)
 class Principal:
@@ -105,6 +108,39 @@ async def end_all_sessions(db: AsyncSession, user_id: uuid.UUID) -> None:
     """Log an account out everywhere: every browser's token stops working."""
     await db.execute(delete(BrowserSession).where(BrowserSession.user_id == user_id))
     await db.execute(delete(User).where(User.id == user_id, User.is_guest))
+
+
+async def delete_expired(
+    db: AsyncSession, *, now: datetime, limit: int = SWEEP_BATCH
+) -> tuple[int, int]:
+    """Delete what nobody can use any more: guests whose day is over, with everything
+    they own, and sessions that have expired. Returns how many of each were deleted.
+
+    Expired rows already can't be used; this only frees their space. So it works in
+    batches of `limit`, oldest first, and skips rows another transaction holds instead
+    of waiting for them: any number of sweeps can run at once.
+    """
+    guests = (
+        select(User.id)
+        .where(User.is_guest, User.expires_at <= now)
+        .order_by(User.expires_at)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    deleted_guests = await db.scalars(delete(User).where(User.id.in_(guests)).returning(User.id))
+    # What is left after the guests' own sessions went with them: accounts' sessions
+    # that weren't used for too long.
+    expired = (
+        select(BrowserSession.id)
+        .where(BrowserSession.expires_at <= now)
+        .order_by(BrowserSession.expires_at)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    deleted_sessions = await db.scalars(
+        delete(BrowserSession).where(BrowserSession.id.in_(expired)).returning(BrowserSession.id)
+    )
+    return len(deleted_guests.all()), len(deleted_sessions.all())
 
 
 def _principal(user: User, session: BrowserSession) -> Principal:

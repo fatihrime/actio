@@ -79,6 +79,17 @@ ACTIO_PUBLIC_URL=https://chat.example.com
 
 The API accepts changes only from pages at that address, and over HTTPS it marks the session cookie `Secure`. See [ADR 0009](adr/0009-sessions-in-the-database.md).
 
+New guests, sign-ups and password attempts are rate-limited. A limit is written as a count per `second`, `minute`, `hour` or `day`: `30/hour` allows 30 at once, then one more every two minutes. These are the defaults:
+
+```sh
+ACTIO_LIMIT_GUESTS_PER_ADDRESS=30/hour   # new guests from one address
+ACTIO_LIMIT_SIGNUPS_PER_ADDRESS=10/hour  # sign-up attempts from one address
+ACTIO_LIMIT_LOGINS_PER_ADDRESS=30/hour   # login attempts from one address
+ACTIO_LIMIT_LOGINS_PER_EMAIL=10/hour     # password attempts for one account, from anywhere
+```
+
+Everyone behind one router shares an address. With Docker Desktop, every browser on your machine does. Raise the first limit for a classroom; lower it, to `3/day` say, for a public demo. See [ADR 0011](adr/0011-rate-limits-as-token-buckets-in-valkey.md).
+
 ## Troubleshooting
 
 **"Address already in use"**
@@ -86,6 +97,12 @@ The API accepts changes only from pages at that address, and over HTTPS it marks
 
 **`/api/readyz` says `migrations pending` or `unreachable`**
 :   The API is running but can't do its work yet. `migrations pending`: the database is older than the code; `make up` and `make dev` both apply the missing migrations when you run them again. `unreachable`: Postgres or Valkey isn't running or refuses the password; `docker compose ps` shows their state, and the API's log says more.
+
+**"Too many new guests from your network", or another 429**
+:   A rate limit was reached. The answer says how long to wait, and its `Retry-After` header says it in seconds. On your own machine, raise the limit in `.env` (see [Configuration](#configuration)) and run `make up` or `make dev` again.
+
+**Logging in answers 503, "This can't be done right now"**
+:   The API can't reach Valkey, so it can't count attempts, and refuses them instead of letting them through uncounted. `/api/readyz` and `docker compose ps` show what is down. People who are already logged in are not affected.
 
 **Postgres rejects its password after you recreated `.env`**
 :   Postgres keeps the password it was first started with. Delete the local data with `docker compose down --volumes`, then start again.

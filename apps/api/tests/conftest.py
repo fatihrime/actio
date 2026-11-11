@@ -5,9 +5,10 @@ The Postgres and Valkey servers come from the conftest.py at the repository's ro
 
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Iterator
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 import argon2.profiles
 import httpx
@@ -107,30 +108,45 @@ async def db(migrated: str) -> AsyncIterator[AsyncSession]:
 
 @pytest.fixture
 def settings(database_url: str, valkey_url: str) -> Settings:
-    """Settings that point at this test's own database and the session's Valkey."""
-    return Settings(database_url=SecretStr(database_url), valkey_url=SecretStr(valkey_url))
+    """Settings that point at this test's own database and the session's Valkey.
+
+    The Valkey server is shared by the whole run, so each test gets its own key prefix:
+    what one test counts against a rate limit, the next one doesn't inherit.
+    """
+    return Settings(
+        database_url=SecretStr(database_url),
+        valkey_url=SecretStr(valkey_url),
+        valkey_prefix=f"test-{uuid.uuid4().hex[:16]}",
+    )
 
 
-type StartApp = Callable[[Settings], Awaitable[httpx.AsyncClient]]
+class StartApp(Protocol):
+    def __call__(
+        self, settings: Settings, *, address: str = "127.0.0.1", passwords: Passwords | None = None
+    ) -> Awaitable[httpx.AsyncClient]: ...
 
 
 @pytest.fixture
 async def start_app(clock: Clock) -> AsyncIterator[StartApp]:
     """Call with settings to get an HTTP client wired straight to a started app.
 
-    No server and no network: requests go to the app in process. The client's address
-    is the app's public address, so it keeps cookies as a browser there would, and the
-    app reads the time from `clock`.
+    No server and no network: requests go to the app in process. The client's URL is
+    the app's public address, so it keeps cookies as a browser there would, and the app
+    reads the time from `clock`. `address` is the network address the app sees the
+    requests come from. `passwords` replaces the cheap password hasher, to watch it.
     """
     async with AsyncExitStack() as stack:
 
-        async def start(settings: Settings) -> httpx.AsyncClient:
-            app = create_app(settings, passwords=cheap_passwords())
+        async def start(
+            settings: Settings, *, address: str = "127.0.0.1", passwords: Passwords | None = None
+        ) -> httpx.AsyncClient:
+            app = create_app(settings, passwords=passwords or cheap_passwords())
             app.dependency_overrides[get_now] = lambda: clock.now
             await stack.enter_async_context(app.router.lifespan_context(app))
             return await stack.enter_async_context(
                 httpx.AsyncClient(
-                    transport=httpx.ASGITransport(app=app), base_url=settings.public_url
+                    transport=httpx.ASGITransport(app=app, client=(address, 50_000)),
+                    base_url=settings.public_url,
                 )
             )
 

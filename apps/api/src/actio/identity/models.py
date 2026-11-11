@@ -31,8 +31,9 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     is_guest: Mapped[bool]
     created_at: Mapped[datetime]
-    expires_at: Mapped[datetime | None]
-    """For a guest: when the account, and everything it owns, may be deleted."""
+    expires_at: Mapped[datetime | None] = mapped_column(index=True)
+    """For a guest: when the account, and everything it owns, may be deleted. Indexed
+    for the sweep that deletes them, oldest first."""
     email: Mapped[str | None] = mapped_column(unique=True)
     """In lower case, so that one address is one account however it was typed."""
     password_hash: Mapped[str | None]
@@ -53,4 +54,4 @@ class BrowserSession(Base):
     so a copy of this table can't be used to log in."""
     created_at: Mapped[datetime]
     last_seen_at: Mapped[datetime]
-    expires_at: Mapped[datetime]
+    expires_at: Mapped[datetime] = mapped_column(index=True)

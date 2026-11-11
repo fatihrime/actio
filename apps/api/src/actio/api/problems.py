@@ -24,10 +24,13 @@ MEDIA_TYPE = "application/problem+json"
 class Problem(Exception):  # noqa: N818 - "problem" is RFC 9457's own word for it
     """An error to send to the client as it is."""
 
-    def __init__(self, status: int, detail: str, **extra: Any) -> None:
+    def __init__(
+        self, status: int, detail: str, *, headers: dict[str, str] | None = None, **extra: Any
+    ) -> None:
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        self.headers = headers
         self.extra = extra
 
 
@@ -49,7 +52,9 @@ def install(app: FastAPI) -> None:
 
     @app.exception_handler(Problem)
     async def raised_here(_request: Request, problem: Problem) -> JSONResponse:
-        return problem_response(problem.status, problem.detail, **problem.extra)
+        return problem_response(
+            problem.status, problem.detail, headers=problem.headers, **problem.extra
+        )
 
     @app.exception_handler(HTTPException)
     async def raised_by_the_framework(_request: Request, error: HTTPException) -> JSONResponse:

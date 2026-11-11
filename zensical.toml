@@ -33,6 +33,7 @@ nav = [
     { "0008. Postgres through SQLAlchemy and psycopg 3" = "adr/0008-postgres-through-sqlalchemy-and-psycopg.md" },
     { "0009. Sessions in the database" = "adr/0009-sessions-in-the-database.md" },
     { "0010. Accounts with a password" = "adr/0010-accounts-with-a-password.md" },
+    { "0011. Rate limits in Valkey" = "adr/0011-rate-limits-as-token-buckets-in-valkey.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

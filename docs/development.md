@@ -42,7 +42,7 @@ A broken rule names the file, the line and the import, and says what to do inste
 
 | Suite | Runner | What it covers |
 |---|---|---|
-| `apps/api/tests` | pytest, Postgres, Valkey | Settings, the CLI, database migrations (also run by several processes at once), the health and readiness probes |
+| `apps/api/tests` | pytest, Hypothesis, Postgres, Valkey | Settings, the CLI, database migrations (also run by several processes at once), the health and readiness probes, sessions and accounts, the rate limiter's Lua script against a plain token bucket, the limits over HTTP |
 | `packages/fakellm/tests` | pytest | The wire format, checked with OpenAI's official Python SDK too; the directives that script reasoning, tool calls and failures |
 | `packages/llm/tests` | pytest | The Ollama adapter, against exchanges recorded from a real server; the OpenAI-compatible adapter, against fakellm. Streaming, tool calls, refused prompts, broken connections, timeouts |
 | `packages/quota/tests` | pytest, Hypothesis, Valkey | Credit math, reset windows across DST, the usage-limits rules under random event sequences, the Lua scripts against the Python reference model, and concurrency |
@@ -52,7 +52,7 @@ A broken rule names the file, the line and the import, and says what to do inste
 `make test` runs them all. Tests never read `.env`: they build their own settings.
 
 - **Coverage gate:** `make test` fails if the quota engine's test coverage drops below 90%.
-- **Docker:** the quota engine's tests need Valkey, and the API's tests need Postgres and Valkey. They start throwaway containers, from the images pinned in `compose.yaml`, once per run. Each API test gets its own empty database in that Postgres.
+- **Docker:** the quota engine's tests need Valkey, and the API's tests need Postgres and Valkey. They start throwaway containers, from the images pinned in `compose.yaml`, once per run. Each API test gets its own empty database in that Postgres, and its own key prefix in that Valkey, so what one test counts against a rate limit the next doesn't inherit.
   - Without Docker, `uv run pytest` skips those tests; `make test`, and so CI, sets `ACTIO_REQUIRE_DOCKER=1`, so there they fail with the reason instead.
   - Set `ACTIO_TEST_VALKEY_URL` or `ACTIO_TEST_POSTGRES_URL` to use a server you already run.
 - **Real models:** `make test-live` runs the model-client tests against a real Ollama server instead of the recordings. It needs Ollama 0.40 or newer with `granite4:micro` pulled, so it isn't part of `make check`. See the [model clients reference](reference/llm.md#tests).
