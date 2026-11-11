@@ -20,5 +20,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0008](0008-postgres-through-sqlalchemy-and-psycopg.md) | Postgres through SQLAlchemy and psycopg 3, with migrations as a job | Accepted |
 | [0009](0009-sessions-in-the-database.md) | Sessions in the database, in a cookie bound to the host | Accepted |
 | [0010](0010-accounts-with-a-password.md) | Lasting accounts with an email address and a password | Accepted |
+| [0011](0011-rate-limits-as-token-buckets-in-valkey.md) | Rate limits on the open routes, as token buckets in Valkey | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.

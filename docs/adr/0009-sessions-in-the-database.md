@@ -71,3 +71,10 @@ Email and password arrived with [ADR 0010](0010-accounts-with-a-password.md). Fo
 
 - **An account's session ends after 30 days without a request,** and each use renews it. A guest's session still ends with the guest, used or not.
 - **A new session starts whenever what its holder may do changes:** on signing up, logging in and changing the password. The old token stops working.
+
+### 2026-11-11: guests are limited and cleaned up
+
+"Not done yet" above listed limits on creating guests, and the cleanup of expired ones. Both arrived with [ADR 0011](0011-rate-limits-as-token-buckets-in-valkey.md):
+
+- **New guests are limited per client address,** 30 an hour by default. A browser that already has a session doesn't use the allowance up.
+- **Expired guests are deleted** with what they own, in batches, each time a new guest is created. A scheduled sweep, for installations where no new guest arrives, comes with the worker process.

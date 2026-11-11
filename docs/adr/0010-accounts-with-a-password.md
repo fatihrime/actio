@@ -64,3 +64,15 @@ We chose **an email address and a password, stored as an Argon2id hash.** The ot
   - **nothing slows repeated login attempts.** Each one costs the server 60 ms and 64 MiB, which also makes the login route a cheap way to load it. Rate limits are the next step;
   - a second factor, passkeys, and logging in through another provider.
 - **How to reverse it:** routes depend on a `Principal`, and every way of logging in ends in the same function that starts a session. Replacing passwords by another method changes `actio.identity.accounts` and its three routes.
+
+## Revisions
+
+### 2026-11-11: password attempts are limited
+
+"Not done yet" above said that nothing slowed repeated login attempts. [ADR 0011](0011-rate-limits-as-token-buckets-in-valkey.md) adds the limits:
+
+- **Password attempts for one email address are limited,** 10 an hour by default, wherever they come from. Changing the password counts too, because it asks for the current one.
+- **Login and sign-up attempts are limited per client address** as well.
+- **A refused attempt is never checked.** It costs 3 ms instead of 61 ms, and no memory for hashing. The price: while an account is being guessed at, the right password is refused too.
+
+Signing up still says whether an address is registered. The limit on sign-ups per address bounds how many addresses can be asked about.
