@@ -62,3 +62,12 @@ We chose option 1.
   - **email and password,** which come next and turn a guest into a lasting account;
   - **workspaces.** Every row belongs to the one deployment. Adding a workspace column later is one migration per table.
 - **How to reverse it:** routes depend on a `Principal`, not on how it was established. Replacing the session lookup with another scheme changes one dependency in `actio.api`.
+
+## Revisions
+
+### 2026-11-10: sessions of lasting accounts
+
+Email and password arrived with [ADR 0010](0010-accounts-with-a-password.md). For sessions, that adds two rules to the ones above:
+
+- **An account's session ends after 30 days without a request,** and each use renews it. A guest's session still ends with the guest, used or not.
+- **A new session starts whenever what its holder may do changes:** on signing up, logging in and changing the password. The old token stops working.
