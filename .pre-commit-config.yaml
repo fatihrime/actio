@@ -20,11 +20,15 @@ repos:
       - id: check-toml
       - id: check-yaml
         args: [--allow-multiple-documents] # pnpm-lock.yaml starts with a pnpm-pin document
+      # The recorded streams are kept byte for byte as the API sent them. A stream ends
+      # with an empty line, which these two hooks would tidy away.
       - id: end-of-file-fixer
+        exclude: ^apps/api/tests/fixtures/turns/.*\.sse$
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
+        exclude: ^apps/api/tests/fixtures/turns/.*\.sse$
 
   # Python, with the tool versions locked in uv.lock.
   - repo: local
