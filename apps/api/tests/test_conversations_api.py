@@ -297,6 +297,7 @@ async def test_a_conversation_comes_with_the_branch_that_is_shown(
                     "parent_id": None,
                     "created_at": "2026-11-10T12:01:00Z",
                     "versions": [str(question.id)],
+                    "turn": None,
                 },
             },
             {
@@ -310,9 +311,11 @@ async def test_a_conversation_comes_with_the_branch_that_is_shown(
                     "parent_id": str(question.id),
                     "created_at": "2026-11-10T12:02:00Z",
                     "versions": [str(answer.id)],
+                    "turn": None,  # written by this test, not by a model
                 },
             },
         ],
+        "unanswered": None,
     }
 
 

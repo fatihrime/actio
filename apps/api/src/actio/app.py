@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from actio import __version__
 from actio.api import catalog as catalog_routes
-from actio.api import conversations, health, identity, problems
+from actio.api import conversations, health, identity, problems, turns
 from actio.api.same_origin import SameOriginOnly
 from actio.catalog import Catalog, open_catalog
 from actio.core.resources import open_resources
@@ -53,5 +53,6 @@ def create_app(
     app.include_router(health.router)
     app.include_router(identity.router)
     app.include_router(conversations.router)
+    app.include_router(turns.router)
     app.include_router(catalog_routes.router)
     return app

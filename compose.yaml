@@ -104,6 +104,7 @@ services:
       ACTIO_LIMIT_SIGNUPS_PER_ADDRESS:
       ACTIO_LIMIT_LOGINS_PER_ADDRESS:
       ACTIO_LIMIT_LOGINS_PER_EMAIL:
+      ACTIO_LIMIT_TURNS_PER_USER:
       # Ollama runs on this machine itself, not in a container: there it can use the
       # graphics processor, which a container on macOS can't. From inside a container
       # the machine is called host.docker.internal.

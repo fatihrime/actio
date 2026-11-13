@@ -14,6 +14,7 @@ When Valkey doesn't answer, these routes answer 503 instead of going uncounted.
 import ipaddress
 import logging
 import math
+import uuid
 from datetime import datetime
 from typing import Annotated
 
@@ -92,6 +93,18 @@ class RateLimits:
         """Count an attempt at an account's current password. It shares the bucket of
         logins to that account: both are guesses at the same password."""
         await self._spend("Too many password attempts.", self._password_attempt(email))
+
+    async def turn(self, user_id: uuid.UUID) -> None:
+        """Count a question put to a model against the account that asks.
+
+        Per account, not per address: a guest is an account too, and new guests are
+        limited per address. What an answer may cost is for the usage limits to say;
+        this only keeps one account from asking faster than anyone could read.
+        """
+        await self._spend(
+            "Too many messages in a short time.",
+            Take("turns-user", str(user_id), self._settings.limit_turns_per_user),
+        )
 
     def _password_attempt(self, email: str) -> Take:
         return Take("logins-email", normalize_email(email), self._settings.limit_logins_per_email)

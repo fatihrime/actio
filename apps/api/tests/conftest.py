@@ -3,32 +3,35 @@
 The Postgres and Valkey servers come from the conftest.py at the repository's root.
 """
 
+import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Iterator
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 import argon2.profiles
 import httpx
 import httpx2
 import psycopg
 import pytest
+import uvicorn
 from argon2 import PasswordHasher
 from psycopg import sql
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio import catalog as catalogs
-from actio.api.dependencies import get_now
+from actio.api.dependencies import get_clock, get_new_id
 from actio.app import create_app
-from actio.catalog import Catalog, CatalogFile
+from actio.catalog import Catalog, CatalogFile, OfferedModel
 from actio.core import schema
 from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
 from actio.identity.passwords import Passwords
 from actio_fakellm.app import create_app as create_fake_llm
+from actio_llm import ChatProvider, ChatRequest, StreamEvent
 
 # For tests that never reach a database: nothing listens on port 1.
 NOWHERE_DATABASE = "postgresql://actio:unused@127.0.0.1:1/actio"
@@ -154,6 +157,100 @@ async def catalog() -> AsyncIterator[Catalog]:
         yield built
 
 
+class ScriptedModel:
+    """A model that says exactly what a test tells it to, and remembers what it was asked.
+
+    The script is a list of what to do in order: an event to yield, an error to raise,
+    or an `asyncio.Event` to wait for, which lets a test hold the answer half-way.
+    """
+
+    def __init__(self, *script: Any) -> None:
+        self.script = list(script)
+        self.requests: list[ChatRequest] = []
+        self.started = asyncio.Event()
+        """Set once the model has been asked: the turn is now running."""
+        self.closed = asyncio.Event()
+        """Set when the answer's stream ends, whoever ended it."""
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        self.requests.append(request)
+        self.started.set()
+        try:
+            for item in self.script:
+                if isinstance(item, BaseException):
+                    raise item
+                if isinstance(item, asyncio.Event):
+                    await item.wait()
+                else:
+                    yield item
+        finally:
+            self.closed.set()
+
+
+def catalog_of(model: ChatProvider, *, thinking: bool = True) -> Catalog:
+    """A catalog that offers one model, `standard`, which is `model`."""
+    offered = OfferedModel(
+        name="standard",
+        title="Scripted",
+        kind="openai-compatible",
+        model="scripted-1",
+        context_window=4096,
+        max_output_tokens=512,
+        chat=model,
+    )
+    return Catalog({"standard": offered}, default="standard", thinking={"standard": thinking})
+
+
+class ServerIds:
+    """The ids the app under test gives to what it creates itself: a turn, an answer.
+
+    Counted up from 1 instead of random, so a test can say beforehand what the next
+    one is, and a recorded stream is the same every time.
+    """
+
+    def __init__(self) -> None:
+        self.made: list[uuid.UUID] = []
+
+    def __call__(self) -> uuid.UUID:
+        self.made.append(self.number(len(self.made) + 1))
+        return self.made[-1]
+
+    @staticmethod
+    def number(n: int) -> uuid.UUID:
+        """The `n`th id: `01900000-0000-7000-8000-…`, ending in `n`. A valid version 7."""
+        return uuid.UUID(int=(0x0190 << 112) | (0x7 << 76) | (0b10 << 62) | n)
+
+
+@pytest.fixture
+def server_ids() -> ServerIds:
+    return ServerIds()
+
+
+@pytest.fixture
+async def catalog_without_its_model() -> AsyncIterator[Catalog]:
+    """Like `catalog`, but the server hasn't got the model the catalog names."""
+    fake = httpx2.ASGITransport(app=create_fake_llm(models=["some-other-model"]))
+    async with catalogs.build(
+        FAKE_MODELS, ollama_url="http://127.0.0.1:1", transports={"fake": fake}
+    ) as built:
+        yield built
+
+
+@pytest.fixture
+async def catalog_without_its_server() -> AsyncIterator[Catalog]:
+    """Like `catalog`, but nothing answers at the server's address."""
+
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection refused", request=request)
+
+    async with catalogs.build(
+        FAKE_MODELS,
+        ollama_url="http://127.0.0.1:1",
+        transports={"fake": httpx2.MockTransport(refuse)},
+    ) as built:
+        yield built
+
+
 class StartApp(Protocol):
     def __call__(
         self,
@@ -166,14 +263,17 @@ class StartApp(Protocol):
 
 
 @pytest.fixture
-async def start_app(clock: Clock, catalog: Catalog) -> AsyncIterator[StartApp]:
+async def start_app(
+    clock: Clock, catalog: Catalog, server_ids: ServerIds
+) -> AsyncIterator[StartApp]:
     """Call with settings to get an HTTP client wired straight to a started app.
 
     No server and no network: requests go to the app in process. The client's URL is
-    the app's public address, so it keeps cookies as a browser there would, and the app
-    reads the time from `clock`. `address` is the network address the app sees the
-    requests come from. `passwords` replaces the cheap password hasher, to watch it, and
-    `catalog` the fake models.
+    the app's public address, so it keeps cookies as a browser there would. The app
+    reads the time from `clock`, and takes the ids of the turns and answers it creates
+    from `server_ids`. `address` is the network address the app sees the requests come
+    from. `passwords` replaces the cheap password hasher, to watch it, and `catalog`
+    the fake models.
     """
     fake_models = catalog
     async with AsyncExitStack() as stack:
@@ -190,7 +290,8 @@ async def start_app(clock: Clock, catalog: Catalog) -> AsyncIterator[StartApp]:
                 passwords=passwords or cheap_passwords(),
                 catalog=catalog or fake_models,
             )
-            app.dependency_overrides[get_now] = lambda: clock.now
+            app.dependency_overrides[get_clock] = lambda: lambda: clock.now
+            app.dependency_overrides[get_new_id] = lambda: server_ids
             await stack.enter_async_context(app.router.lifespan_context(app))
             return await stack.enter_async_context(
                 httpx.AsyncClient(
@@ -221,3 +322,82 @@ async def api(start_app: StartApp, settings: Settings, migrated: str) -> httpx.A
     """The app on this test's migrated database and the session's Valkey."""
     assert migrated == settings.database_url.get_secret_value()
     return await start_app(settings)
+
+
+class Serve(Protocol):
+    def __call__(self, catalog: Catalog) -> Awaitable[str]: ...
+
+
+@pytest.fixture
+async def serve(
+    clock: Clock, server_ids: ServerIds, settings: Settings, migrated: str
+) -> AsyncIterator[Serve]:
+    """Call with a catalog to run the app on a real port of this machine, and get its
+    address.
+
+    `start_app` hands a test the whole response once the app has finished with it.
+    That can't show a response arriving piece by piece, or a reader leaving half-way:
+    for those, the app has to be served over a real connection, as uvicorn serves it.
+    """
+    assert migrated
+    running: list[tuple[uvicorn.Server, asyncio.Task[None]]] = []
+
+    async def start(catalog: Catalog) -> str:
+        app = create_app(settings, passwords=cheap_passwords(), catalog=catalog)
+        app.dependency_overrides[get_clock] = lambda: lambda: clock.now
+        app.dependency_overrides[get_new_id] = lambda: server_ids
+        server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="on")
+        )
+        task = asyncio.create_task(server.serve())
+        running.append((server, task))
+        while not server.started:
+            if task.done():
+                task.result()  # it failed to start: say why
+            await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        return f"http://127.0.0.1:{port}"
+
+    yield start
+    for server, task in running:
+        server.should_exit = True
+        await task
+
+
+class Served(Protocol):
+    def __call__(
+        self, *script: Any, thinking: bool = True
+    ) -> Awaitable[tuple[ScriptedModel, str]]: ...
+
+
+@pytest.fixture
+def served(serve: Serve) -> Served:
+    """Call with a script to get a model that follows it, and the address of a served
+    app that offers only that model."""
+
+    async def make(*script: Any, thinking: bool = True) -> tuple[ScriptedModel, str]:
+        model = ScriptedModel(*script)
+        return model, await serve(catalog_of(model, thinking=thinking))
+
+    return make
+
+
+class Scripted(Protocol):
+    def __call__(
+        self, *script: Any, thinking: bool = True
+    ) -> Awaitable[tuple[ScriptedModel, httpx.AsyncClient]]: ...
+
+
+@pytest.fixture
+def scripted(start_app: StartApp, settings: Settings, migrated: str) -> Scripted:
+    """Call with a script to get a model that follows it, and a guest's browser on an
+    app that offers only that model."""
+    assert migrated
+
+    async def make(*script: Any, thinking: bool = True) -> tuple[ScriptedModel, httpx.AsyncClient]:
+        model = ScriptedModel(*script)
+        browser = await start_app(settings, catalog=catalog_of(model, thinking=thinking))
+        await browser.post("/api/session/guest")
+        return model, browser
+
+    return make

@@ -27,7 +27,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 
 | Path | Purpose |
 |---|---|
-| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `chat/` holds conversations and their tree of messages; `catalog.py` holds the models on offer; `identity/` holds accounts and sessions; `core/` holds settings, ids, the database and the rate limiter; `migrations/` holds the schema's history |
+| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `chat/` holds conversations, their tree of messages and the turns in which a model answers; `catalog.py` holds the models on offer; `identity/` holds accounts and sessions; `core/` holds settings, ids, the database and the rate limiter; `migrations/` holds the schema's history |
 | `apps/web` | Next.js web app |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
 | `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`); the router comes later |
@@ -78,10 +78,12 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - change the Lua in `packages/quota` only together with the Python reference model (`oracle.py`): the differential test requires both to behave identically;
   - the same holds for the rate limiter's script, `apps/api/src/actio/core/rate_limit.lua`, and the plain token buckets in `apps/api/tests/test_rate_limit.py`;
   - new HTTP client code uses `httpx2`, the maintained continuation of httpx ([ADR 0007](docs/adr/0007-local-models-through-ollamas-native-api.md)). The older test fixtures that call an app in-process still use httpx;
-  - the Ollama adapter's tests replay recorded exchanges (`packages/llm/tests/fixtures/`), and fail if the request it sends changes. After changing what it sends, run `ACTIO_RECORD_OLLAMA=1 make test-live` to record them again from a real server, and review the diff.
+  - the Ollama adapter's tests replay recorded exchanges (`packages/llm/tests/fixtures/`), and fail if the request it sends changes. After changing what it sends, run `ACTIO_RECORD_OLLAMA=1 make test-live` to record them again from a real server, and review the diff;
+  - what a turn streams is recorded too, in `apps/api/tests/fixtures/turns/`, and the web app's tests read those files with the real `ai` package ([ADR 0014](docs/adr/0014-turns-streamed-in-the-ai-sdks-format.md)). After changing the stream on purpose, run `ACTIO_RECORD_TURNS=1 uv run pytest apps/api/tests/test_turn_fixtures.py`, review the diff, then `pnpm --dir apps/web run test`.
 - **TypeScript:**
   - `pnpm` 12; pnpm also installs the Node.js version pinned in the root `package.json` (26 LTS);
-  - add dependencies with `pnpm --dir apps/web add`, never `npm`;
+  - add dependencies with `pnpm --dir apps/web add`, never `npm`. pnpm refuses a version published less than a day ago: take the newest one that is older;
+  - the `ai` package is pinned to an exact version: the API writes the stream it reads ([ADR 0014](docs/adr/0014-turns-streamed-in-the-ai-sdks-format.md)), so an upgrade is a change to check, not to drift into;
   - strict mode, plus `noUncheckedIndexedAccess`;
   - formatted with Prettier; linted with ESLint and typescript-eslint's strict type-checked rules;
   - stay on TypeScript 6.0 and ESLint 9 until typescript-eslint and eslint-config-next support the next majors ([ADR 0003](docs/adr/0003-web-app-on-nextjs.md));
@@ -97,7 +99,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 - **API conventions:**
   - routes live in `actio.api`; rules and tables live in a domain module below it, which never commits: the route decides when the unit of work is done;
   - errors are RFC 9457 problem documents: raise `Problem(status, detail)`;
-  - nothing below `actio.api` reads the clock. Time comes in as `now`, from the `Now` dependency, so tests can move it;
+  - nothing below `actio.api` reads the clock. Time comes in as `now`, from the `Now` dependency, so tests can move it. A route that lasts, such as a streamed answer, takes `Clock` and reads it again at the end. Ids the server makes in a route come from `NewId`, so a test knows them beforehand;
+  - the format a browser reads is written in one place, `actio.api.ui_stream`. What a model's answer does is described without it, as steps, in `actio.chat.answering`, which also makes sure a turn never stays `running`: whatever ends a stream, its outcome is recorded;
   - a route that needs to know who is asking takes `CurrentPrincipal`;
   - what belongs to an account is looked up with the account's id, in the query itself. Someone else's row answers 404, like one that doesn't exist: see `OwnConversation` in `actio.api.conversations`;
   - a route that anyone can call, or that checks a password, counts the attempt before doing its work: it takes `Limits` and calls one, such as `await limits.log_in(email)` ([ADR 0011](docs/adr/0011-rate-limits-as-token-buckets-in-valkey.md)). A new limit is a method in `actio.api.rate_limits` and a `limit_*` setting, listed in `compose.yaml` and `.env.example` too, or a test fails;

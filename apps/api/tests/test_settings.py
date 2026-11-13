@@ -151,6 +151,7 @@ def test_the_rate_limits_have_defaults() -> None:
     assert str(settings.limit_signups_per_address) == "10/hour"
     assert str(settings.limit_logins_per_address) == "30/hour"
     assert str(settings.limit_logins_per_email) == "10/hour"
+    assert str(settings.limit_turns_per_user) == "120/hour"
 
 
 def test_every_rate_limit_can_be_set_for_the_container_stack() -> None:
@@ -160,7 +161,7 @@ def test_every_rate_limit_can_be_set_for_the_container_stack() -> None:
     compose, example = (root / "compose.yaml").read_text(), (root / ".env.example").read_text()
     limits = [name for name in Settings.model_fields if name.startswith("limit_")]
 
-    assert len(limits) == 4
+    assert len(limits) == 5
     for name in limits:
         default = Settings.model_fields[name].default
         assert f"ACTIO_{name.upper()}:" in compose

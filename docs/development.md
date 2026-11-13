@@ -42,12 +42,12 @@ A broken rule names the file, the line and the import, and says what to do inste
 
 | Suite | Runner | What it covers |
 |---|---|---|
-| `apps/api/tests` | pytest, Hypothesis, Postgres, Valkey | Settings, the CLI, database migrations (also run by several processes at once), the health and readiness probes, sessions and accounts, the rate limiter's Lua script against a plain token bucket, the limits over HTTP, conversations and the queries on their message tree against a plain tree, the models file and what each kind of model server says about a model |
+| `apps/api/tests` | pytest, Hypothesis, Postgres, Valkey | Settings, the CLI, database migrations (also run by several processes at once), the health and readiness probes, sessions and accounts, the rate limiter's Lua script against a plain token bucket, the limits over HTTP, conversations and the queries on their message tree against a plain tree, the models file and what each kind of model server says about a model, turns against fakellm and against a model a test can hold half-way, and over a real connection for readers who leave before the end |
 | `packages/fakellm/tests` | pytest | The wire format, checked with OpenAI's official Python SDK too; the directives that script reasoning, tool calls and failures |
 | `packages/llm/tests` | pytest | The Ollama adapter, against exchanges recorded from a real server; the OpenAI-compatible adapter, against fakellm. Streaming, tool calls, refused prompts, broken connections, timeouts |
 | `packages/quota/tests` | pytest, Hypothesis, Valkey | Credit math, reset windows across DST, the usage-limits rules under random event sequences, the Lua scripts against the Python reference model, and concurrency |
 | `deploy/tests` | pytest | The containers' security rules |
-| `apps/web` | Vitest | The page renders |
+| `apps/web` | Vitest | The page renders; the streams the API was recorded to produce, read by the real `ai` package |
 
 `make test` runs them all. Tests never read `.env`: they build their own settings.
 
@@ -55,6 +55,7 @@ A broken rule names the file, the line and the import, and says what to do inste
 - **Docker:** the quota engine's tests need Valkey, and the API's tests need Postgres and Valkey. They start throwaway containers, from the images pinned in `compose.yaml`, once per run. Each API test gets its own empty database in that Postgres, and its own key prefix in that Valkey, so what one test counts against a rate limit the next doesn't inherit.
   - Without Docker, `uv run pytest` skips those tests; `make test`, and so CI, sets `ACTIO_REQUIRE_DOCKER=1`, so there they fail with the reason instead.
   - Set `ACTIO_TEST_VALKEY_URL` or `ACTIO_TEST_POSTGRES_URL` to use a server you already run.
+- **One format, tested from both sides:** the API streams answers in the format of a JavaScript library, the AI SDK. The API's streams are recorded in `apps/api/tests/fixtures/turns/`: a Python test fails when the API stops producing exactly those files, and a test in `apps/web` reads the same files with the library itself. After changing the stream on purpose, record them again with `ACTIO_RECORD_TURNS=1 uv run pytest apps/api/tests/test_turn_fixtures.py`, review the difference, and run the web app's tests. See [ADR 0014](adr/0014-turns-streamed-in-the-ai-sdks-format.md).
 - **Real models:** `make test-live` runs the model-client tests against a real Ollama server instead of the recordings. It needs Ollama 0.40 or newer with `granite4:micro` pulled, so it isn't part of `make check`. See the [model clients reference](reference/llm.md#tests).
 - **Nightly:** a scheduled workflow runs the quota tests with 5,000 random examples each.
 - **Random tests:** Hypothesis tries 100 random examples per property on a laptop and 200 in CI. Set `HYPOTHESIS_PROFILE=nightly` for 5,000. When a test fails, Hypothesis shrinks it to a minimal sequence of steps and prints it.

@@ -165,6 +165,7 @@ def test_a_client_cannot_choose_the_address_it_is_counted_under(stack: dict[str,
         "ACTIO_LIMIT_SIGNUPS_PER_ADDRESS",
         "ACTIO_LIMIT_LOGINS_PER_ADDRESS",
         "ACTIO_LIMIT_LOGINS_PER_EMAIL",
+        "ACTIO_LIMIT_TURNS_PER_USER",
     ],
 )
 def test_a_rate_limit_set_in_env_reaches_the_api(limit: str) -> None:

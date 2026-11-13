@@ -41,14 +41,20 @@ async def create(
 
 
 async def get(
-    db: AsyncSession, conversation_id: uuid.UUID, *, user_id: uuid.UUID
+    db: AsyncSession, conversation_id: uuid.UUID, *, user_id: uuid.UUID, to_change: bool = False
 ) -> Conversation | None:
-    """The conversation, if it exists and belongs to `user_id`."""
-    found: Conversation | None = await db.scalar(
-        select(Conversation).where(
-            Conversation.id == conversation_id, Conversation.user_id == user_id
-        )
+    """The conversation, if it exists and belongs to `user_id`.
+
+    `to_change` also locks its row until the transaction ends. Whoever asks next waits,
+    then sees what this transaction did: two turns can't start in one conversation at
+    the same moment and both find it free.
+    """
+    query = select(Conversation).where(
+        Conversation.id == conversation_id, Conversation.user_id == user_id
     )
+    if to_change:
+        query = query.with_for_update()
+    found: Conversation | None = await db.scalar(query)
     return found
 
 

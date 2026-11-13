@@ -36,6 +36,18 @@ ollama pull qwen3.5:4b-q4_K_M
 
 `make smoke` then stops noting that no model's server answers. The API says the same in more detail: with a session, `GET /api/models` lists each model as `ready`, `missing` from its server, or its server as `unreachable`.
 
+There is no chat page yet, but the API behind it works. To ask the model something from the command line, and watch the answer arrive piece by piece:
+
+```sh
+jar=$(mktemp)
+curl --silent --cookie-jar "$jar" --request POST http://localhost:8080/api/session/guest
+curl --no-buffer --cookie "$jar" --header 'Content-Type: application/json' \
+  --data "{\"message\": {\"id\": \"$(uuidgen)\", \"parts\": [{\"type\": \"text\", \"text\": \"What is a derailleur?\"}]}}" \
+  "http://localhost:8080/api/conversations/$(uuidgen)/turns"
+```
+
+The first command starts a guest session. The second starts a conversation, under an id made on the spot, and streams the answer as events. See [ADR 0014](adr/0014-turns-streamed-in-the-ai-sdks-format.md) for what they mean.
+
 Which models are offered is in `config/models.toml`: the file explains itself. To offer another model, or one on LM Studio or any other server that speaks OpenAI's API, edit it and run `make up` or `make dev` again. A mistake in the file stops the API from starting, with a line that says what is wrong. See [ADR 0013](adr/0013-the-models-on-offer-are-a-file.md).
 
 !!! note "On Linux"

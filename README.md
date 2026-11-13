@@ -4,7 +4,7 @@
 
 > A self-hostable, local-first AI platform: a ChatGPT/Claude-style assistant and an OpenAI- and Anthropic-compatible developer gateway, both governed by Claude-inspired usage limits whose correctness is tested.
 
-**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place; the chat that uses them comes next. This README grows with each phase, and nothing below counts as done until it ships with tests.
+**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API now holds conversations and streams a local model's answers; the web chat on top of it comes next. This README grows with each phase, and nothing below counts as done until it ships with tests.
 
 **Documentation:** <https://fatihrime.github.io/actio/>: getting started, architecture, development and the decision records.
 
@@ -72,7 +72,7 @@ make dev         # starts the stack; open http://localhost:8080
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: repo, tooling, CI, docs | done |
-| 1 | Local chat + usage limits | in progress: the limits engine and the model client are done, the chat is next |
+| 1 | Local chat + usage limits | in progress: the limits engine, the model client and the chat's API are done; the web chat is next |
 | 2 | Model router + developer gateway | planned |
 | 3 | Core chat UX | planned |
 | 4 | Knowledge + web search | planned |

@@ -79,13 +79,22 @@ async def shown_branch(db: AsyncSession, conversation: Conversation) -> list[Mes
     """The messages of the branch that is shown, from the first one to the last."""
     if conversation.current_leaf_id is None:
         return []
+    return await branch_to(db, conversation, conversation.current_leaf_id)
+
+
+async def branch_to(
+    db: AsyncSession, conversation: Conversation, message_id: uuid.UUID
+) -> list[Message]:
+    """The branch that ends at `message_id`: from the first message down to it. Empty if
+    the conversation has no such message.
+
+    This is what a model is shown when it answers: what led to the question, and
+    nothing from the branches beside it.
+    """
     # Walk up from the last message, one parent at a time, inside the database.
     up = (
         select(Message.id, Message.parent_id, literal(0).label("height"))
-        .where(
-            Message.conversation_id == conversation.id,
-            Message.id == conversation.current_leaf_id,
-        )
+        .where(Message.conversation_id == conversation.id, Message.id == message_id)
         .cte("up", recursive=True)
     )
     up = up.union_all(

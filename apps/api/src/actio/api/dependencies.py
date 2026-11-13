@@ -1,6 +1,7 @@
 """What routes ask for: a database session, the time, and who is asking."""
 
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio.api.problems import Problem
 from actio.catalog import Catalog
+from actio.core.ids import new_id
 from actio.core.resources import Resources
 from actio.core.settings import Settings
 from actio.identity import sessions
@@ -35,9 +37,25 @@ async def get_database(
         yield db
 
 
-def get_now() -> datetime:
-    """The current time. A dependency, so tests can set it."""
+def get_clock() -> Callable[[], datetime]:
+    """Something to read the time from, as often as needed. A dependency, so tests can
+    set the time."""
+    return _utc_now
+
+
+def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def get_now(clock: Annotated[Callable[[], datetime], Depends(get_clock)]) -> datetime:
+    """The time the request arrived: one moment for everything the request does."""
+    return clock()
+
+
+def get_new_id() -> Callable[[], uuid.UUID]:
+    """Something that makes ids for new rows. A dependency, so tests can know them
+    beforehand."""
+    return new_id
 
 
 def get_passwords(request: Request) -> Passwords:
@@ -53,6 +71,9 @@ def get_catalog(request: Request) -> Catalog:
 Models = Annotated[Catalog, Depends(get_catalog)]
 Database = Annotated[AsyncSession, Depends(get_database)]
 Now = Annotated[datetime, Depends(get_now)]
+Clock = Annotated[Callable[[], datetime], Depends(get_clock)]
+"""For a route that lasts: a streamed answer ends later than it began."""
+NewId = Annotated[Callable[[], uuid.UUID], Depends(get_new_id)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
 AppResources = Annotated[Resources, Depends(get_resources)]
 PasswordHashing = Annotated[Passwords, Depends(get_passwords)]

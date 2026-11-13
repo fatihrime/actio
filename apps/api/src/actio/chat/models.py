@@ -1,4 +1,5 @@
-"""The tables behind conversations."""
+"""The tables behind conversations: the conversations, their messages, and the turns
+in which a model answered."""
 
 import uuid
 from datetime import datetime
@@ -11,6 +12,7 @@ from sqlalchemy import (
     Index,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -19,6 +21,7 @@ from actio.core.database import Base
 from actio.identity.models import User
 
 Role = Literal["user", "assistant"]
+TurnStatus = Literal["running", "completed", "stopped", "failed", "interrupted"]
 
 
 class Conversation(Base):
@@ -88,3 +91,72 @@ class Message(Base):
     parts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     """What the message is made of, in order: see `actio.chat.parts`."""
     created_at: Mapped[datetime]
+
+
+class Turn(Base):
+    """One attempt to answer a question: which model was asked, and how it ended.
+
+    A question can be answered more than once, so it can have several turns. A turn
+    that produced something points at the answer it wrote. One that failed before the
+    model said anything has no answer: the question stays, to be asked again.
+    """
+
+    __tablename__ = "turns"
+    __table_args__ = (
+        # The question and the answer are messages of the turn's own conversation.
+        ForeignKeyConstraint(
+            ["conversation_id", "question_id"],
+            ["messages.conversation_id", "messages.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["conversation_id", "answer_id"],
+            ["messages.conversation_id", "messages.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'completed', 'stopped', 'failed', 'interrupted')",
+            name="status_is_known",
+        ),
+        CheckConstraint("(status = 'running') = (finished_at IS NULL)", name="running_or_finished"),
+        # One answer is written at a time in a conversation, whatever code starts a turn.
+        Index(
+            "uq_turns_conversation_id_running",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
+        ),
+        Index(None, "conversation_id", "question_id"),
+        Index(None, "conversation_id", "answer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    question_id: Mapped[uuid.UUID]
+    answer_id: Mapped[uuid.UUID | None]
+    model: Mapped[str]
+    """The model's name in the catalog, such as `standard`, as it was asked for."""
+    thinking: Mapped[bool]
+    """Whether the model was asked to reason before answering."""
+    status: Mapped[TurnStatus] = mapped_column(String)
+    """`running` while the answer is written. Then how it ended: `completed`; `stopped`,
+    because whoever asked left; `failed`, because the model did; or `interrupted`,
+    because the process that was writing it is gone."""
+    finish_reason: Mapped[str | None]
+    """Why the model stopped writing, for a completed turn: `stop`, `length`, …"""
+    error: Mapped[str | None]
+    """What went wrong, for a failed turn, as a short code: see `actio.chat.answering`."""
+    input_tokens: Mapped[int | None]
+    cached_input_tokens: Mapped[int | None]
+    output_tokens: Mapped[int | None]
+    """Token counts as the provider reported them. Empty when it reported none: a turn
+    that was stopped, or failed, usually has none."""
+    load_ms: Mapped[int | None]
+    prompt_ms: Mapped[int | None]
+    generation_ms: Mapped[int | None]
+    """Where the time went, for providers that say: loading the model, reading the
+    prompt, writing the answer."""
+    created_at: Mapped[datetime]
+    finished_at: Mapped[datetime | None]

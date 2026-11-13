@@ -33,12 +33,13 @@ flowchart LR
     - `POST /api/session/guest` starts a session as a new guest and sets its cookie, `GET /api/me` says who the cookie belongs to, and `DELETE /api/session` ends it ([ADR 0009](adr/0009-sessions-in-the-database.md));
     - `POST /api/account` turns a guest into a lasting account with an email address and a password, `POST /api/session` logs in, `PUT /api/account/password` changes the password, and `DELETE /api/sessions` logs out of every browser ([ADR 0010](adr/0010-accounts-with-a-password.md));
     - new guests, sign-ups and password attempts are rate-limited. Past a limit, the answer is 429 with a `Retry-After` header ([ADR 0011](adr/0011-rate-limits-as-token-buckets-in-valkey.md));
-    - `GET /api/conversations` lists your conversations a page at a time, and `GET /api/conversations/{id}` returns one with its messages. `PATCH` renames it, `DELETE` deletes it, and `PUT …/branch` shows another version of a question or an answer ([ADR 0012](adr/0012-conversations-as-a-tree-of-messages.md)). Nothing adds messages yet: that is the next step;
+    - `GET /api/conversations` lists your conversations a page at a time, and `GET /api/conversations/{id}` returns one with its messages. `PATCH` renames it, `DELETE` deletes it, and `PUT …/branch` shows another version of a question or an answer ([ADR 0012](adr/0012-conversations-as-a-tree-of-messages.md));
+    - `POST /api/conversations/{id}/turns` puts a question to a model and streams the answer back, piece by piece, in the format the AI SDK reads. The first question creates the conversation. The same route rewords an earlier question, or asks for another answer. Each turn is recorded: which model, how it ended, what it cost in tokens and time ([ADR 0014](adr/0014-turns-streamed-in-the-ai-sdks-format.md));
     - `GET /api/models` lists the models on offer, from `config/models.toml`, and says whether each can answer right now: `ready`, `missing` from its server, or its server `unreachable` ([ADR 0013](adr/0013-the-models-on-offer-are-a-file.md)).
 - **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
 - **The web app** is a Next.js application. Today it is a placeholder page.
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
-    - Postgres holds four tables: accounts, their sessions, conversations, and the messages of each conversation, which form a tree.
+    - Postgres holds five tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, and the turns in which a model answered.
     - Valkey holds the rate limits' counters: one number per client address or email address that has made an attempt lately, under a hashed name.
 
 Inside the API, the code is split into layers that only import downward, and a tool enforces it:
@@ -46,7 +47,7 @@ Inside the API, the code is split into layers that only import downward, and a t
 | Layer | Holds |
 |---|---|
 | `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, which attempts are rate-limited, the error format. The only layer that knows the web framework |
-| `actio.chat` | Conversations and their tree of messages: tables and rules, with no HTTP |
+| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended. Tables and rules, with no HTTP |
 | `actio.catalog` | The models on offer: reading `config/models.toml`, and asking a model's server about it |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
 | `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter |
@@ -76,7 +77,8 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
-- **turns:** a message goes to a model and the answer streams back. The [clients](reference/llm.md) for Ollama and for OpenAI-compatible servers exist as a package ([ADR 0007](adr/0007-local-models-through-ollamas-native-api.md)), and the API knows which models it offers. It doesn't send them anything yet;
+- **the chat itself:** the web app's conversation page, on top of the API's turns. The API talks to models through the [clients](reference/llm.md) for Ollama and for OpenAI-compatible servers ([ADR 0007](adr/0007-local-models-through-ollamas-native-api.md));
+- **turns that outlive their request:** today an answer stops when its reader leaves. Later a turn runs on its own, and a reader who comes back picks the stream up again;
 - **more providers:** cloud models behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them;
 - **usage limits:** session and weekly windows, enforced atomically in Valkey and recorded in a Postgres ledger. The [engine](reference/quota.md) already exists as a package, tested against a real Valkey server ([ADR 0006](adr/0006-usage-limits-engine.md)). Connecting it to the API, with the ledger, is still to come.
 

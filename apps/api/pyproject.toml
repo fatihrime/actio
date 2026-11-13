@@ -17,6 +17,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.1.8",
     "uvicorn[standard]>=0.54.0",
     "valkey>=6.2.0",
+    "anyio>=4.16.0",
 ]
 
 [project.scripts]

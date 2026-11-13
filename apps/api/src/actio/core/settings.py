@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     """Password attempts for one email address, wherever they come from: logins, and
     changes of the password, which ask for the current one."""
 
+    limit_turns_per_user: RateSetting = Rate.parse("120/hour")
+    """Messages one account, a guest included, may send to a model."""
+
     @field_validator("database_url")
     @classmethod
     def _is_postgres(cls, value: SecretStr) -> SecretStr:

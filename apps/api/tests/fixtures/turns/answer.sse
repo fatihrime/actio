@@ -1,0 +1,26 @@
+data: {"type":"start","messageId":"01900000-0000-7000-8000-000000000002","messageMetadata":{"parent_id":"01900000-0000-7000-8000-0000000000a1","created_at":"2026-11-10T12:00:00Z","versions":["01900000-0000-7000-8000-000000000002"],"turn":{"id":"01900000-0000-7000-8000-000000000001","model":"standard","thinking":false,"status":"running","finish_reason":null,"error":null,"input_tokens":null,"cached_input_tokens":null,"output_tokens":null,"load_ms":null,"prompt_ms":null,"generation_ms":null,"started_at":"2026-11-10T12:00:00Z","finished_at":null}}}
+
+data: {"type":"start-step"}
+
+data: {"type":"text-start","id":"text-0"}
+
+data: {"type":"text-delta","id":"text-0","delta":"Echo: "}
+
+data: {"type":"text-delta","id":"text-0","delta":"Why "}
+
+data: {"type":"text-delta","id":"text-0","delta":"is "}
+
+data: {"type":"text-delta","id":"text-0","delta":"the "}
+
+data: {"type":"text-delta","id":"text-0","delta":"sky "}
+
+data: {"type":"text-delta","id":"text-0","delta":"blue?"}
+
+data: {"type":"text-end","id":"text-0"}
+
+data: {"type":"finish-step"}
+
+data: {"type":"finish","finishReason":"stop","messageMetadata":{"parent_id":"01900000-0000-7000-8000-0000000000a1","created_at":"2026-11-10T12:00:00Z","versions":["01900000-0000-7000-8000-000000000002"],"turn":{"id":"01900000-0000-7000-8000-000000000001","model":"standard","thinking":false,"status":"completed","finish_reason":"stop","error":null,"input_tokens":11,"cached_input_tokens":0,"output_tokens":6,"load_ms":null,"prompt_ms":null,"generation_ms":null,"started_at":"2026-11-10T12:00:00Z","finished_at":"2026-11-10T12:00:00Z"}}}
+
+data: [DONE]
+

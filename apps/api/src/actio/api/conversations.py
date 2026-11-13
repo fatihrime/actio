@@ -21,11 +21,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, StringConstraints
 
-from actio.api.dependencies import CurrentPrincipal, Database
+from actio.api.dependencies import CurrentPrincipal, Database, Now
 from actio.api.problems import Problem
-from actio.chat import conversations, tree
+from actio.chat import conversations, tree, turns
 from actio.chat.conversations import TITLE_MAX, Cursor
-from actio.chat.models import Conversation, Message, Role
+from actio.chat.models import Conversation, Message, Role, Turn, TurnStatus
 from actio.chat.parts import Part, from_stored
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -57,6 +57,54 @@ class ConversationList(BaseModel):
     """Pass it back as `cursor` for the next page. Empty on the last page."""
 
 
+class TurnOut(BaseModel):
+    """One attempt to answer a question: which model was asked, and how it ended."""
+
+    id: uuid.UUID
+    model: str
+    """The model's name in `GET /api/models`."""
+    thinking: bool
+    """Whether the model was asked to reason before answering."""
+    status: TurnStatus
+    """`running` while the answer is written. Then `completed`; `stopped`, because
+    whoever asked left; `failed`, because the model did; or `interrupted`, because the
+    server that was writing it is gone."""
+    finish_reason: str | None
+    """Why the model stopped, when it did by itself: `stop`, or `length` when it ran
+    into the limit on an answer's size."""
+    error: str | None
+    """For a failed turn, what went wrong, as a code: `model_unavailable`,
+    `model_missing`, `context_overflow`, `model_refused`, `answer_interrupted`,
+    `model_error`, `internal_error`."""
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    load_ms: int | None
+    prompt_ms: int | None
+    generation_ms: int | None
+    started_at: datetime
+    finished_at: datetime | None
+
+    @classmethod
+    def of(cls, turn: Turn) -> "TurnOut":
+        return cls(
+            id=turn.id,
+            model=turn.model,
+            thinking=turn.thinking,
+            status=turn.status,
+            finish_reason=turn.finish_reason,
+            error=turn.error,
+            input_tokens=turn.input_tokens,
+            cached_input_tokens=turn.cached_input_tokens,
+            output_tokens=turn.output_tokens,
+            load_ms=turn.load_ms,
+            prompt_ms=turn.prompt_ms,
+            generation_ms=turn.generation_ms,
+            started_at=turn.created_at,
+            finished_at=turn.finished_at,
+        )
+
+
 class MessageMetadata(BaseModel):
     parent_id: uuid.UUID | None
     """The message this one follows. Empty for a first message."""
@@ -64,6 +112,8 @@ class MessageMetadata(BaseModel):
     versions: list[uuid.UUID]
     """Every version of this message, oldest first, itself included: the messages
     that follow the same one. Show another with `PUT …/branch`."""
+    turn: TurnOut | None = None
+    """For an answer: the turn that wrote it."""
 
 
 class MessageOut(BaseModel):
@@ -81,6 +131,9 @@ class ConversationOut(ConversationSummary):
     """The last message of the branch that is shown."""
     messages: list[MessageOut]
     """That branch, from its first message to its last."""
+    unanswered: TurnOut | None
+    """When the branch ends with a question: the last turn that tried to answer it. It
+    says whether an answer is still being written, or why none came. Otherwise empty."""
 
 
 class Rename(BaseModel):
@@ -127,9 +180,11 @@ async def list_conversations(
 
 
 @router.get("/{conversation_id}")
-async def get_conversation(conversation: OwnConversation, db: Database) -> ConversationOut:
+async def get_conversation(
+    conversation: OwnConversation, db: Database, now: Now
+) -> ConversationOut:
     """One conversation, with the messages of the branch that is shown."""
-    return await _with_messages(db, conversation)
+    return await _with_messages(db, conversation, now)
 
 
 @router.patch("/{conversation_id}")
@@ -144,7 +199,7 @@ async def rename_conversation(
 
 @router.put("/{conversation_id}/branch")
 async def show_branch(
-    body: ShowBranch, conversation: OwnConversation, db: Database
+    body: ShowBranch, conversation: OwnConversation, db: Database, now: Now
 ) -> ConversationOut:
     """Show the branch that passes through a message: another version of a question,
     or of an answer, and what followed it. Where that branch forks again further down,
@@ -154,7 +209,7 @@ async def show_branch(
     except tree.NoSuchMessageError:
         raise Problem(404, "This conversation has no such message.") from None
     await db.commit()
-    return await _with_messages(db, conversation)
+    return await _with_messages(db, conversation, now)
 
 
 @router.delete("/{conversation_id}", status_code=204)
@@ -165,26 +220,42 @@ async def delete_conversation(conversation: OwnConversation, db: Database) -> No
     await db.commit()
 
 
-async def _with_messages(db: Database, conversation: Conversation) -> ConversationOut:
+async def _with_messages(
+    db: Database, conversation: Conversation, now: datetime
+) -> ConversationOut:
+    # A turn whose server died still says `running`. Looking is when that is noticed.
+    await turns.give_up_on_stale(db, conversation.id, now=now)
+    await db.commit()
     branch = await tree.shown_branch(db, conversation)
     versions = await tree.versions(db, conversation, branch)
+    answers = [message.id for message in branch if message.role == "assistant"]
+    wrote = await turns.that_wrote(db, conversation, answers)
+    unanswered = None
+    if branch and branch[-1].role == "user":
+        unanswered = await turns.latest_for(db, conversation, branch[-1].id)
     return ConversationOut(
         id=conversation.id,
         title=conversation.title,
         created_at=conversation.created_at,
         last_active_at=conversation.last_active_at,
         current_leaf_id=conversation.current_leaf_id,
-        messages=[_message(message, versions[message.id]) for message in branch],
+        messages=[
+            _message(message, versions[message.id], wrote.get(message.id)) for message in branch
+        ],
+        unanswered=TurnOut.of(unanswered) if unanswered else None,
     )
 
 
-def _message(message: Message, versions: list[uuid.UUID]) -> MessageOut:
+def _message(message: Message, versions: list[uuid.UUID], turn: Turn | None) -> MessageOut:
     return MessageOut(
         id=message.id,
         role=message.role,
         parts=from_stored(message.parts),
         metadata=MessageMetadata(
-            parent_id=message.parent_id, created_at=message.created_at, versions=versions
+            parent_id=message.parent_id,
+            created_at=message.created_at,
+            versions=versions,
+            turn=TurnOut.of(turn) if turn else None,
         ),
     )
 
