@@ -48,6 +48,10 @@ Then open <http://localhost:8080> and ask something. No account is needed: a fir
     - Opening another conversation while an answer is being written stops that answer, like **Stop** ([ADR 0018](adr/0018-the-list-of-conversations-is-the-servers.md)).
     - The button at the top left puts the list away. In a narrow window it brings the list up over the chat.
     - A guest's conversations last as long as the guest: a day.
+- **Sign up to keep them.** The account takes over what you did as a guest, and you are back where you were ([ADR 0019](adr/0019-accounts-in-the-one-screen.md)).
+    - An account is an email address and a password of at least 10 characters. No email is sent, so the address isn't checked, and a forgotten password can't be reset by its owner.
+    - **Log in** from another browser, or after logging out. What you started there as a guest comes along.
+    - Your address in the header leads to your account: change the password, which logs every other browser out, or log out of this one or of all.
 - **While the model is missing or Ollama isn't running, the page says so,** with the command above, and notices by itself when that changes.
 
 `make smoke` notes a model whose server doesn't answer too. The API says it in more detail: with a session, `GET /api/models` lists each model as `ready`, `missing` from its server, or its server as `unreachable`.
