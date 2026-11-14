@@ -130,3 +130,13 @@ The first item under "Not done yet" is done. How answers are shown, and what the
 
 - **The page no longer scrolls on each new message.** It now watches the size of what is shown, because formatted answers grow after their words have arrived.
 - **Why now, and not planned at the start:** following by message was enough for plain text, and what formatted answers need wasn't known until they were on the page.
+
+### 2026-11-14: a question sent before the page has read the conversation again
+
+A question typed right after an answer had failed could be refused with "This conversation has no such message", and went back into the box.
+
+- **The cause.** A failed answer's stream begins like any other, so the page holds an answer for it. The server stores no answer of which nothing arrived ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md)). The page finds that out when it reads the conversation again, as decided above, and until then it sent the next question as following the answer that doesn't exist.
+- **Why it surfaced only now.** The gap is as long as one request takes: a few milliseconds on one machine, more over a slow connection. The component tests always waited for what the server kept before they went on, because that is what they assert on, and nobody types that fast. The first tests in a real browser, against the real stack, do ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md)): one of them failed in three runs of four.
+- **The fix.** The page works out what a new question follows from what it holds, without waiting: an answer with nothing in it is left out, and then a question without an answer, which the new one replaces. A component test sends the second question while the server's reply about the first is still held back.
+
+The tests in a real browser, listed under "Not done yet", exist since the same day.

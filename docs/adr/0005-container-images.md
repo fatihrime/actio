@@ -63,3 +63,9 @@ We chose option 1 for both images.
   - a base image is one `FROM` line;
   - the images are standard OCI images, usable outside Compose;
   - a rule changes deliberately, by changing its test and saying why in an ADR.
+
+## Revisions
+
+### 2026-11-14: a third image, for tests only
+
+The end-to-end tests run this stack with a fake model as one more container ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md)). Its image, `packages/fakellm/Dockerfile`, is built like the API's, and its container follows every rule above: the same test checks the two compose files together. No installation ships it.

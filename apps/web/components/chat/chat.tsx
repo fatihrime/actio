@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Notice, NoticeButton } from "@/components/notice";
 import { ApiProblem, getConversation } from "@/lib/api/client";
 import type { Conversation, Model, Turn } from "@/lib/api/client";
-import { fromStored, turnOf } from "@/lib/chat/messages";
+import { fromStored, hasContent, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
 import {
   canRetry,
@@ -164,10 +164,24 @@ export function Chat({
     setText("");
     setProblem(null);
     setOpen(null);
-    // A question that got no answer is replaced by the new one: both follow the same
-    // message, and the server keeps the old one as an earlier version.
-    if (messages.at(-1)?.role === "user") {
-      setMessages(messages.slice(0, -1));
+    // The new question follows the last message the server has. Two kinds of message
+    // at the end of the page are left out on the way there:
+    //
+    // - an answer of which nothing arrived. Its stream began, so the page holds it,
+    //   but the server stores no empty answer. The page learns that when it reads the
+    //   conversation again, and a question can be sent before then;
+    // - a question that got no answer. The new one takes its place: both follow the
+    //   same message, and the server keeps the old one as an earlier version.
+    let before = messages;
+    const answer = before.at(-1);
+    if (answer?.role === "assistant" && !hasContent(answer)) {
+      before = before.slice(0, -1);
+    }
+    if (before.at(-1)?.role === "user") {
+      before = before.slice(0, -1);
+    }
+    if (before !== messages) {
+      setMessages(before);
     }
     void sendMessage(question, { body: options() });
   }

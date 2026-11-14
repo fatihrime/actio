@@ -53,5 +53,6 @@ Actio allows LGPL libraries that are used unmodified, as separate libraries ([AD
 
 ## Not covered here
 
-- **Development tools,** such as the test and lint tools, which no image ships.
+- **Development tools,** such as the test and lint tools, which no image ships. Among them is Playwright (Apache-2.0), which downloads a Chromium browser to the machine that runs the end-to-end tests.
+- **The fake model's image,** which only the end-to-end tests build and run (`packages/fakellm/Dockerfile`). Its packages are a subset of the API image's.
 - **Models.** Model weights are not part of this repository or of its images. You download them yourself, with Ollama, under each model's own license.

@@ -28,13 +28,14 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | Path | Purpose |
 |---|---|
 | `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `chat/` holds conversations, their tree of messages and the turns in which a model answers; `catalog.py` holds the models on offer; `identity/` holds accounts and sessions; `core/` holds settings, ids, the database and the rate limiter; `migrations/` holds the schema's history |
-| `apps/web` | Next.js web app: the chat. `app/` holds the pages, which only place components; `components/` the interface; `lib/` what it is built on: the calls to the API (`lib/api`, with types generated from the API's description), how a turn is requested and how an answer's markdown is read (`lib/chat`), ids and the address bar; `tests/` the fake API and the recorded answers the component tests run on |
+| `apps/web` | Next.js web app: the chat. `app/` holds the pages, which only place components; `components/` the interface; `lib/` what it is built on: the calls to the API (`lib/api`, with types generated from the API's description), how a turn is requested and how an answer's markdown is read (`lib/chat`), ids and the address bar; `tests/` the fake API and the recorded answers the component tests run on; `e2e/` the end-to-end tests, which Playwright runs against the stack of `make e2e` |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
 | `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`); the router comes later |
-| `packages/fakellm` | Deterministic fake LLM server for tests, scripted by directives in the prompt (`[[think: ...]]`, `[[call: ...]]`, `[[fail: 503]]`) |
+| `packages/fakellm` | Deterministic fake LLM server for tests, scripted by directives in the prompt (`[[think: ...]]`, `[[call: ...]]`, `[[fail: 503]]`, `[[pace: 0.1]]`). Its `Dockerfile` builds the image the end-to-end stack runs |
 | `config/` | What an installation changes without touching code. Today `models.toml`, the models on offer ([ADR 0013](docs/adr/0013-the-models-on-offer-are-a-file.md)); plans, assistant profiles and the demo knowledge base come later. TOML, which Python reads without a dependency |
 | `compose.yaml` | The production-shaped stack behind `make up`: Caddy, web, API, Postgres, Valkey, and the `migrate` job that runs before the API |
 | `compose.dev.yaml` | The overlay behind `make dev`: Caddy routes to the native processes; data ports open on 127.0.0.1 |
+| `compose.e2e.yaml` | The overlay behind `make e2e`: the same stack with the fake model as one more container, and the models file in `deploy/e2e/config/` that offers it ([ADR 0017](docs/adr/0017-end-to-end-tests-on-the-real-stack.md)) |
 | `deploy/caddy/` | Caddy config: one entry point routing `/api/*` and `/v1/*` to the API, the rest to the web app |
 | `deploy/tests/` | Policy tests for the containers: published ports, pinned images, networks, hardening |
 | `docs/` | The documentation site's pages (built by Zensical from `zensical.toml`), including the ADRs in `docs/adr/` |
@@ -56,11 +57,12 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `make openapi` | After a change to a route or a schema: record the API's description again (`apps/api/openapi.json`), and generate the web app's types from it (`apps/web/lib/api/schema.d.ts`). Review the difference |
 | `make docs` | Preview the documentation site at http://localhost:8001, reloading on edits |
 | `make down` | Stop all containers. Their data stays in Docker volumes |
-| `make check` | Run everything CI runs: every static check on all files, the tests, then the builds (web app and docs site) |
+| `make check` | Run what CI's main job runs: every static check on all files, the tests, then the builds (web app and docs site). The end-to-end tests are apart: `make e2e` |
 | `make test-live` | Run the model-client tests against a real Ollama server (0.40 or newer, with `granite4:micro` pulled). Not part of `make check` |
+| `make e2e` | Run the end-to-end tests: build and start a stack of its own (port 8090, its own data, a fake model), drive it in a real browser with Playwright, and remove it. Needs Docker; about a minute. Not part of `make check`: CI runs it as its own job. `make e2e args="--headed --workers 1"` passes arguments to Playwright, here to show the browser, one test at a time (the first such run downloads the whole of Chromium, about 200 MB), and `ACTIO_E2E_KEEP=1` leaves the stack running |
 | `make fmt` | Format code and apply safe lint fixes |
 
-`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. `uv run actio-llm chat <model> "<prompt>"` talks to a local model through the Ollama adapter. End-to-end tests in a real browser (`make e2e`) are not there yet: until then the web app's tests run in a simulated browser, and a change to the chat is also tried by hand at http://localhost:8080.
+`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. `uv run actio-llm chat <model> "<prompt>"` talks to a local model through the Ollama adapter. The web app is tested at two levels: its components in a simulated browser, against a fake API (`make test`), and the whole stack in a real browser, with a fake model (`make e2e`). A change to the chat should pass both, and be looked at once at http://localhost:8080.
 
 `make up` needs only Docker; it builds the images from `apps/api/Dockerfile` and `apps/web/Dockerfile`. `make dev` needs Docker Desktop: its containers reach the natively running API and web app through `host.docker.internal`. Changes to the containers must keep `deploy/tests/` passing; if a rule must change, change the test on purpose and record why in an ADR. `.env` holds the local passwords. It is created once from `.env.example`, git-ignored, and never read by tests. Postgres keeps the password it first started with, so if you recreate `.env`, also wipe the local data with `docker compose down --volumes`.
 
@@ -99,7 +101,12 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - formatted with Prettier; linted with ESLint and typescript-eslint's strict type-checked rules;
   - stay on TypeScript 6.0 and ESLint 9 until typescript-eslint and eslint-config-next support the next majors ([ADR 0003](docs/adr/0003-web-app-on-nextjs.md));
   - Next.js 16 changed many APIs: read the version-matched docs in `apps/web/node_modules/next/dist/docs/` before writing Next.js code;
-  - tests with Vitest, and Playwright for end-to-end tests.
+  - tests with Vitest, and Playwright for end-to-end tests;
+  - end-to-end tests live in `apps/web/e2e` and drive the real stack ([ADR 0017](docs/adr/0017-end-to-end-tests-on-the-real-stack.md)):
+    - import `test` and `expect` from `./chat`, never from `@playwright/test`. Then every test also fails when the page asks anything of another site, or a script on it breaks;
+    - the model is the fake one: a test says what it does by typing directives into the chat box, such as `[[pace: 0.1]]`, `[[think: ...]]` or `[[fail: 503]]`. A new behaviour is a new directive in `packages/fakellm`, never state in the fake;
+    - wait with Playwright's own assertions, which retry. No test is run again when it fails: one that fails now and then has found something, in itself or in the page;
+    - cover here what only the whole stack or a real browser shows. The variants of a flow belong in the component tests, which run in a second.
 - **Commits:** [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `test:`, `chore:` and so on.
 - **Architecture boundaries,** enforced by import-linter at every commit and in CI. The rules are in `pyproject.toml`, under `[tool.importlinter]`:
   - `packages/*` never import the application, or each other;

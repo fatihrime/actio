@@ -461,6 +461,63 @@ describe("an answer that doesn't arrive whole", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
     expect(api.to(CONVERSATION)).toHaveLength(2);
   });
+
+  it("sends the next question after a message the server has, however soon it is sent", async () => {
+    // A failed answer's stream begins like any other, so for a moment the page holds
+    // an answer that the server never stored. The page learns that when it reads the
+    // conversation again, and here that takes a while.
+    let tell: () => void = () => undefined;
+    const serverTold = new Promise<void>((resolve) => {
+      tell = resolve;
+    });
+    const api = fakeApi();
+    api
+      .on(
+        TURNS,
+        () => streamed("model_unavailable.sse"),
+        () => streamed("answer.sse"),
+      )
+      .on(CONVERSATION, async (call) => {
+        await serverTold;
+        return json(
+          200,
+          conversation(
+            conversationOf(call),
+            [question(sentQuestion(api), "Why is the sky blue?")],
+            turn({ status: "failed", error: "model_unavailable" }),
+          ),
+        );
+      });
+    const user = open();
+
+    await ask(user, "Why is the sky blue?");
+    await screen.findByText(/can't be reached, or is too busy/);
+    expect(api.to(CONVERSATION)).toHaveLength(1); // asked, and not yet told
+    await ask(user, "Why is grass green?");
+
+    await screen.findByText("Echo: Why is the sky blue?");
+    const second = posted(api.to(TURNS)[1]);
+    expect(second).toEqual({
+      message: {
+        id: second.message?.id,
+        parts: [{ type: "text", text: "Why is grass green?" }],
+      },
+      // The conversation's first question again: it takes the place of the one that
+      // got no answer. Not a question after an answer that doesn't exist.
+      parent_id: null,
+      thinking: false,
+    });
+    expect(screen.getAllByRole("article", { name: "You" })).toHaveLength(1);
+
+    // What the server says about the earlier state arrives late, and changes nothing.
+    tell();
+    await waitFor(() => {
+      expect(
+        screen.getByText("Echo: Why is the sky blue?"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/too busy/)).not.toBeInTheDocument();
+  });
 });
 
 describe("a question the API refuses", () => {

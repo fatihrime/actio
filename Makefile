@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live build
+.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live e2e build
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -63,7 +63,7 @@ openapi: ## Record the API's description again (apps/api/openapi.json), and the 
 docs: ## Preview the documentation site at http://localhost:8001, reloading on edits
 	uv run zensical serve --dev-addr 127.0.0.1:8001
 
-check: lint test build ## Run everything CI runs: static checks, tests, then the builds
+check: lint test build ## Run what CI's main job runs: static checks, tests, then the builds
 
 lint: ## Run every static check on all files; fixes what it safely can
 	uv run pre-commit run --all-files --show-diff-on-failure
@@ -83,6 +83,13 @@ test: ## Run the Python and web tests (needs Docker); fails below 90% coverage o
 # Not part of `make check`: CI has no Ollama. Pull the model first: ollama pull granite4:micro
 test-live: ## Run the model-client tests against a real Ollama server, with granite4:micro
 	ACTIO_TEST_OLLAMA_URL=$${ACTIO_TEST_OLLAMA_URL:-http://127.0.0.1:11434} uv run pytest packages/llm
+
+# Not part of `make check`: it builds the images and starts a stack of its own, on port
+# 8090, with its own data. CI runs it as a separate job. Arguments for Playwright go in
+# `args`, such as args="--headed --workers 1" to watch the browser, and ACTIO_E2E_KEEP=1
+# leaves the stack running: see scripts/e2e.sh.
+e2e: ## Run the end-to-end tests: the stack in containers with a fake model, driven in a real browser
+	@./scripts/e2e.sh $(args)
 
 build: ## Build the web app for production, and the documentation site (strict: warnings fail)
 	pnpm --dir apps/web run build

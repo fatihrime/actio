@@ -39,6 +39,7 @@ nav = [
     { "0014. Turns, streamed in the AI SDK's format" = "adr/0014-turns-streamed-in-the-ai-sdks-format.md" },
     { "0015. The web chat calls the API from the browser" = "adr/0015-the-web-chat-calls-the-api-from-the-browser.md" },
     { "0016. Answers are shown as markdown" = "adr/0016-answers-shown-as-markdown.md" },
+    { "0017. End-to-end tests on the real stack" = "adr/0017-end-to-end-tests-on-the-real-stack.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

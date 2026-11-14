@@ -94,7 +94,8 @@ The answer streams to your terminal, followed by its token counts and speed. `uv
 | `make dev` | Run the stack with the API and the web app native |
 | `make smoke` | Check a running stack: the web page, the API's health and its docs |
 | `make down` | Stop all containers; their data is kept |
-| `make check` | Run everything CI runs: static checks, tests and builds |
+| `make check` | Run what CI's main job runs: static checks, tests and builds |
+| `make e2e` | Run the end-to-end tests: a stack of its own with a fake model, driven in a real browser |
 | `make docs` | Preview this documentation site at <http://localhost:8001> |
 
 `make help` lists every command.
