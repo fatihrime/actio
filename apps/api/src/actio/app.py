@@ -14,6 +14,18 @@ from actio.core.resources import open_resources
 from actio.core.settings import Settings
 from actio.identity.passwords import Passwords
 
+DESCRIPTION = """\
+Actio's HTTP API, which its web app is built on.
+
+- **Sessions.** Everything but the health checks needs a session, a guest's included.
+  It lives in a cookie: start one with `POST /api/session/guest`. Without one the
+  answer is 401.
+- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):
+  see the `Problem` schema. A request that changes something, sent by a page on another
+  site, is answered 403.
+- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`.
+"""
+
 
 def create_app(
     settings: Settings | None = None,
@@ -39,6 +51,10 @@ def create_app(
     app = FastAPI(
         title="Actio",
         version=__version__,
+        description=DESCRIPTION,
+        # An operation is named after its route's function, such as `start_turn`:
+        # the names are part of the recorded description (apps/api/openapi.json).
+        generate_unique_id_function=lambda route: route.name,
         # The reverse proxy sends /api/* to this service and everything else to the
         # web app, so the API docs live under /api too.
         openapi_url="/api/openapi.json",

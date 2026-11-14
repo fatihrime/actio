@@ -20,6 +20,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from actio.api.dependencies import (
+    NO_SESSION,
     AppResources,
     AppSettings,
     CurrentPrincipal,
@@ -42,7 +43,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["identity"])
 
 TOO_MANY: dict[int | str, dict[str, Any]] = {
-    429: {"description": "Too many attempts. `Retry-After` says how long to wait."}
+    429: {"description": "Too many attempts. `Retry-After` says how long to wait."},
+    503: {"description": "Attempts can't be counted right now, so this one is refused."},
 }
 
 
@@ -121,7 +123,14 @@ async def _delete_expired(resources: Resources, now: datetime) -> None:
         logger.warning("deleting expired guests failed (%s)", type(error).__name__)
 
 
-@router.post("/api/account", status_code=201, responses=TOO_MANY)
+@router.post(
+    "/api/account",
+    status_code=201,
+    responses={
+        409: {"description": "The email address has an account, or you are logged in to one."},
+        **TOO_MANY,
+    },
+)
 async def sign_up(
     body: SignUp,
     response: Response,
@@ -152,7 +161,10 @@ async def sign_up(
     return Me.of(principal)
 
 
-@router.post("/api/session", responses=TOO_MANY)
+@router.post(
+    "/api/session",
+    responses={401: {"description": "Wrong email address or password."}, **TOO_MANY},
+)
 async def log_in(
     body: LogIn,
     response: Response,
@@ -191,7 +203,16 @@ async def log_in(
     return Me.of(principal)
 
 
-@router.put("/api/account/password", status_code=204, responses=TOO_MANY)
+@router.put(
+    "/api/account/password",
+    status_code=204,
+    responses={
+        **NO_SESSION,
+        403: {"description": "The current password is wrong."},
+        409: {"description": "A guest has no password to change."},
+        **TOO_MANY,
+    },
+)
 async def change_password(
     body: PasswordChange,
     response: Response,
@@ -225,7 +246,7 @@ async def change_password(
     set_session_cookie(response, settings, token, principal, now=now)
 
 
-@router.get("/api/me")
+@router.get("/api/me", responses=NO_SESSION)
 async def me(principal: CurrentPrincipal) -> Me:
     """Who you are, according to your session cookie. 401 without a live session."""
     return Me.of(principal)
@@ -245,7 +266,7 @@ async def end_session(
     clear_session_cookie(response, settings)
 
 
-@router.delete("/api/sessions", status_code=204)
+@router.delete("/api/sessions", status_code=204, responses=NO_SESSION)
 async def end_all_sessions(
     response: Response, current: CurrentPrincipal, db: Database, settings: AppSettings
 ) -> None:

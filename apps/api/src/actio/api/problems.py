@@ -8,6 +8,10 @@ Every error the API returns has the same shape, whoever raised it:
 - `title` names the kind of problem, and is the same every time it happens;
 - `detail` says what happened this time, in words a person can act on;
 - extra members carry what a program needs, such as `errors` for an invalid request.
+
+The API's description of itself (OpenAPI) says the same: :func:`install` gives every
+error response the `Problem` schema, where the framework would describe a body this API
+never sends.
 """
 
 from http import HTTPStatus
@@ -16,9 +20,27 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException
 
 MEDIA_TYPE = "application/problem+json"
+
+
+class ProblemDocument(BaseModel):
+    """An error, as RFC 9457 problem details. Every error this API answers looks like
+    this. Some carry more members: `errors` (422: what is wrong with the request, and
+    where), `retry_after` (429: seconds to wait), `model` and `model_status` (503: the
+    model that can't answer), `turn_id` and `turn_status` (409: the turn in the way)."""
+
+    model_config = ConfigDict(title="Problem", extra="allow")
+
+    type: str
+    """Always `about:blank`: the status says what kind of problem it is."""
+    title: str
+    """The status in words, such as `Not Found`."""
+    status: int
+    detail: str
+    """What happened this time, in words a person can act on."""
 
 
 class Problem(Exception):  # noqa: N818 - "problem" is RFC 9457's own word for it
@@ -47,8 +69,43 @@ def problem_response(
     return JSONResponse(body, status_code=status, media_type=MEDIA_TYPE, headers=headers)
 
 
+INVALID = "The request doesn't have the expected form. `errors` lists what is wrong, and where."
+
+
+def describe(document: dict[str, Any]) -> None:
+    """Make an OpenAPI `document` say what errors really look like, in place.
+
+    - Every 4xx and 5xx response that names no body of its own gets the `Problem` schema.
+    - The framework's description of a 422, a body this API never sends, is replaced.
+    """
+    schemas = document.setdefault("components", {}).setdefault("schemas", {})
+    schemas["Problem"] = ProblemDocument.model_json_schema()
+    content = {MEDIA_TYPE: {"schema": {"$ref": "#/components/schemas/Problem"}}}
+    for path in document.get("paths", {}).values():
+        for operation in path.values():
+            if not isinstance(operation, dict):
+                continue
+            for status, response in operation.get("responses", {}).items():
+                if status == "422" and "HTTPValidationError" in str(response.get("content")):
+                    response.update(description=INVALID, content=content)
+                elif status[0] in "45" and "content" not in response:
+                    response["content"] = content
+    schemas.pop("HTTPValidationError", None)
+    schemas.pop("ValidationError", None)
+
+
 def install(app: FastAPI) -> None:
-    """Make every error `app` returns a problem document."""
+    """Make every error `app` returns a problem document, and its description say so."""
+    describe_routes = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        described = app.openapi_schema is not None
+        document = describe_routes()  # builds the description once, then keeps it
+        if not described:
+            describe(document)
+        return document
+
+    app.openapi = openapi  # type: ignore[method-assign]
 
     @app.exception_handler(Problem)
     async def raised_here(_request: Request, problem: Problem) -> JSONResponse:

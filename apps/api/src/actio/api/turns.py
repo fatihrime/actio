@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from actio.api import ui_stream
 from actio.api.conversations import MessageMetadata, TurnOut
 from actio.api.dependencies import (
+    NO_SESSION,
     AppResources,
     Clock,
     CurrentPrincipal,
@@ -47,7 +48,7 @@ from actio.chat.parts import TextPart
 from actio.chat.turns import Begun, Ending
 from actio_llm import ChatRequest
 
-router = APIRouter(tags=["conversations"])
+router = APIRouter(tags=["conversations"], responses=NO_SESSION)
 
 MAX_QUESTION_CHARS = 100_000
 """The longest question accepted, in characters. Far more than a small model can read;
@@ -115,7 +116,10 @@ class TurnRequest(BaseModel):
         404: {"description": "No such conversation, or no such message in it."},
         409: {"description": "The message was sent before, or an answer is still being written."},
         429: {"description": "Too many messages. `Retry-After` says how long to wait."},
-        503: {"description": "The model can't answer right now."},
+        503: {
+            "description": "The model can't answer right now: `model_status` says why. "
+            "Or messages can't be counted right now."
+        },
     },
 )
 async def start_turn(

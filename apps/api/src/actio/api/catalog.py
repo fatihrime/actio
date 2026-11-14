@@ -13,9 +13,9 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from actio.api.dependencies import CurrentPrincipal, Models, Now
+from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Models, Now
 
-router = APIRouter(tags=["models"])
+router = APIRouter(tags=["models"], responses=NO_SESSION)
 
 
 class ModelOut(BaseModel):
