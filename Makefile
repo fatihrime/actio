@@ -86,8 +86,8 @@ test-live: ## Run the model-client tests against a real Ollama server, with gran
 
 # Not part of `make check`: it builds the images and starts a stack of its own, on port
 # 8090, with its own data. CI runs it as a separate job. Arguments for Playwright go in
-# `args`, such as args="--headed --workers 1" to watch the browser, and ACTIO_E2E_KEEP=1
-# leaves the stack running: see scripts/e2e.sh.
+# `args`, such as args="--headed --workers 1" to watch the browser. ACTIO_E2E_KEEP=1
+# leaves the stack running, and `make e2e args=down` stops it: see scripts/e2e.sh.
 e2e: ## Run the end-to-end tests: the stack in containers with a fake model, driven in a real browser
 	@./scripts/e2e.sh $(args)
 

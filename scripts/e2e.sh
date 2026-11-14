@@ -13,6 +13,8 @@
 #   ACTIO_E2E_KEEP=1      leave the stack running afterwards, to look at it. Then run
 #                         the tests again, without this script, with:
 #                         pnpm --dir apps/web exec playwright test
+#   down                  as the only argument: take down a stack that was left
+#                         running, with its data, and run nothing
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -31,11 +33,18 @@ export POSTGRES_PASSWORD VALKEY_PASSWORD
 take_down() {
   if [ "${ACTIO_E2E_KEEP:-}" = 1 ]; then
     echo "The stack is still running at http://localhost:$port. To stop it:"
-    echo "  ${compose[*]} down --volumes"
+    echo "  make e2e args=down"
   else
     "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1
   fi
 }
+
+# Compose reads the two passwords above even to stop a stack, so stopping one that was
+# left running goes through this script too.
+if [ "${1:-}" = down ]; then
+  "${compose[@]}" down --volumes --remove-orphans
+  exit
+fi
 
 # Data left by an earlier run was made with that run's passwords: start from nothing.
 "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1
