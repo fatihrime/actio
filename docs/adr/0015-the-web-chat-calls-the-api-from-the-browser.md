@@ -140,3 +140,16 @@ A question typed right after an answer had failed could be refused with "This co
 - **The fix.** The page works out what a new question follows from what it holds, without waiting: an answer with nothing in it is left out, and then a question without an answer, which the new one replaces. A component test sends the second question while the server's reply about the first is still held back.
 
 The tests in a real browser, listed under "Not done yet", exist since the same day.
+
+### 2026-11-14: a conversation that began on this page is read again once the page has left it
+
+Someone asks a first question, opens another conversation, and comes back to the first. The page showed it empty, under its own address. A question asked there would have become a second first question, beside the real one.
+
+- **The cause.** A conversation that began on this page isn't loaded from the server: its messages are already there. The page told "began here" by the id alone. But what the page holds of a conversation is gone the moment it shows another one, and the id stayed "began here" for as long as no new chat was started.
+- **Why it surfaced only now.** Until there was a list, the only way back to a conversation was the browser's Back and Forward. The tests went Back to a conversation that had been loaded, and to one from before a New chat, which gives the next conversation a new id and so hid the defect. Forward into one that began here was never tried. The list of conversations ([ADR 0018](0018-the-list-of-conversations-is-the-servers.md)) makes leaving and returning one click each. The defect was found while building it, by reading how the page decides what to load, and then shown by a test written for it, which failed.
+- **The fix.** The page gives the id up as soon as the address names another conversation. From then on that conversation is read from the server like any other. A component test goes Back and then Forward, and a test in a real browser leaves and returns through the list.
+
+Two more things changed with the list:
+
+- **The list of conversations,** under "Not done yet", exists: [ADR 0018](0018-the-list-of-conversations-is-the-servers.md).
+- **The notice for an answer that is being written elsewhere** no longer says "in another window". It can also be this page's own answer, for the moment between leaving a conversation and the server recording that this stopped it.

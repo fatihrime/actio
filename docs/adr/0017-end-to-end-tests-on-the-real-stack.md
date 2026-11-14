@@ -115,3 +115,22 @@ On a MacBook Pro (M1 Pro, 16 GB), 2026-11-14:
   - the model's server being away, and the limits being reached, are tested below this level only;
   - the time Actio adds before an answer's first word isn't measured here yet.
 - **How to reverse it:** the tests are plain Playwright, and know the stack only by its address (`ACTIO_E2E_URL`). They would run against any other way of starting it. The overlay, the image and the script are three files.
+
+## Revisions
+
+### 2026-11-14: the list of conversations, and stopping a stack that was kept
+
+**One more file of tests,** `sidebar.spec.ts`, for the list of conversations ([ADR 0018](0018-the-list-of-conversations-is-the-servers.md)):
+
+- a conversation is listed once it was asked, and the one continued last is on top;
+- a rename and a delete are still true after a reload, and a deleted conversation is gone at its address;
+- a list longer than a page is read in two pages, with 31 conversations made through the API;
+- leaving a conversation stops its answer;
+- **one test at a phone's width,** where the list lies over the chat. "Only at a desktop's size", under "Not done yet", is no longer quite true: this one test is what the list needs, not a set of tests for phones.
+
+That makes 19 tests, in about 16 seconds.
+
+**`make e2e args=down` stops a stack that `ACTIO_E2E_KEEP=1` left running.**
+
+- **What was wrong.** The script printed a `docker compose … down` command for that. It failed as printed: Compose reads the stack's two passwords even to stop it, and outside the script they aren't set.
+- **Why it surfaced only now.** The printed command was never run as printed. A kept stack was always followed by the next `make e2e`, which removes what it finds before it starts. It was run for the first time while measuring for this step.
