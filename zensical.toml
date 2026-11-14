@@ -37,6 +37,7 @@ nav = [
     { "0012. Conversations as a tree of messages" = "adr/0012-conversations-as-a-tree-of-messages.md" },
     { "0013. The models on offer are a file" = "adr/0013-the-models-on-offer-are-a-file.md" },
     { "0014. Turns, streamed in the AI SDK's format" = "adr/0014-turns-streamed-in-the-ai-sdks-format.md" },
+    { "0015. The web chat calls the API from the browser" = "adr/0015-the-web-chat-calls-the-api-from-the-browser.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

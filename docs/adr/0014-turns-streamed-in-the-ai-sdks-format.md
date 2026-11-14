@@ -123,3 +123,41 @@ A turn is one question put to a model, and its answer. The answer takes seconds 
   - nothing is sent while a model loads, which can take a minute. A proxy that closes silent connections would cut in;
   - tools, and what an answer costs in credits.
 - **How to reverse it:** following a model's answer (`actio.chat.answering`) produces steps that know nothing about the format. Another format is another small module beside `actio.api.ui_stream`, and the record of turns stays as it is.
+
+## Revisions
+
+### 2026-11-13: a conversation is read whole
+
+`GET /api/conversations/{id}` could answer with half of two states: the branch from before a turn ended, and the turn's outcome from after. A stopped answer then showed as a question with "stopped" under it and no text, until the page was loaded again.
+
+- **The cause.** Reading a conversation takes several questions to the database: its row, its branch, the turns behind it. A turn that was recorded between two of them was seen by the later ones only.
+- **Why it surfaced only now.** It takes a reader that asks at the very moment a turn is recorded. The API's tests read after a turn, or while one was held still; none read while one ended. The web chat does exactly that: after Stop it asks at once what the server kept ([ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md)). Driving the page in a browser showed it on the second try.
+- **The fix.** A turn already locks its conversation's row before it writes. A reader now holds that row shared until it has put its answer together (`conversations.hold_still`): turns wait for it, and other readers don't. A test plays the interleaving: the turn ends after the reader has found the conversation and before it reads the messages.
+
+### 2026-11-14: the date is no longer all a model is told
+
+The decision above says the model is shown the conversation "after one line that gives the date". With that line as its only instructions, the default model (`qwen3.5:4b-q4_K_M`) took the date for its subject. Asked for some Python, it answered "Hello! Today is November 14, 2026", and wrote code that printed the date.
+
+- **Why it surfaced only now.** The tests of turns run against a fake model, which echoes the question. They pin what is sent, and can't say what a real model makes of it. The first person to chat with the real model for a while noticed within minutes.
+- **The fix.** The instructions now say who the model is first, and say when the date is for:
+
+  > You are a helpful assistant.
+  >
+  > Today's date is Saturday, 14 November 2026. Use it when a question depends on the date. Otherwise, don't mention it.
+
+- **The day of the week is given too.** Left to work it out, the model got it wrong, and once bent the date to fit: told "14 November 2026", it answered "Friday, November 13".
+- **Measured,** against the real model, with seven questions that have nothing to do with the date ("Hello", "give me a basic code on python", "What can you do?" and four more), each asked several times:
+
+  | Instructions | Answers that brought up the date |
+  |---|---|
+  | The date alone (before) | 6 of 35; with reasoning on, 3 of 14 |
+  | Who the model is, then the date and when to use it, without the weekday | 0 of 35 |
+  | The same with the weekday (now) | 2 of 21 |
+  | No date at all | 1 of 35, and it can't say what day it is |
+
+  On the three questions that tempt it most, the wordings with and without the weekday were close: 1 to 3 answers in 18. The counts are small, so they show the size of the change, not which wording is best.
+- **What is left.**
+  - **It still happens now and then.** A model of this size can't be held to an instruction every time. The lasting fix is to give the date through a tool the model calls when it needs it, which comes with tools.
+  - **A conversation in which the date already came up keeps bringing it up,** because the model sees its own earlier answers. A new conversation starts clean.
+  - **The day is the server's, in UTC.** Around midnight it can differ from the reader's.
+  - **How good the instructions are is measured by hand.** It belongs in an evaluation that runs against real models, which this project doesn't have yet.
