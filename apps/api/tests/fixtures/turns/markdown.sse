@@ -1,0 +1,36 @@
+data: {"type":"start","messageId":"01900000-0000-7000-8000-000000000002","messageMetadata":{"parent_id":"01900000-0000-7000-8000-0000000000a1","created_at":"2026-11-10T12:00:00Z","versions":["01900000-0000-7000-8000-000000000002"],"turn":{"id":"01900000-0000-7000-8000-000000000001","model":"standard","thinking":true,"status":"running","finish_reason":null,"error":null,"input_tokens":null,"cached_input_tokens":null,"output_tokens":null,"load_ms":null,"prompt_ms":null,"generation_ms":null,"started_at":"2026-11-10T12:00:00Z","finished_at":null}}}
+
+data: {"type":"start-step"}
+
+data: {"type":"reasoning-start","id":"reasoning-0"}
+
+data: {"type":"reasoning-delta","id":"reasoning-0","delta":"A "}
+
+data: {"type":"reasoning-delta","id":"reasoning-0","delta":"*bike* "}
+
+data: {"type":"reasoning-delta","id":"reasoning-0","delta":"has "}
+
+data: {"type":"reasoning-delta","id":"reasoning-0","delta":"parts."}
+
+data: {"type":"reasoning-end","id":"reasoning-0"}
+
+data: {"type":"text-start","id":"text-1"}
+
+data: {"type":"text-delta","id":"text-1","delta":"Echo: "}
+
+data: {"type":"text-delta","id":"text-1","delta":"Name "}
+
+data: {"type":"text-delta","id":"text-1","delta":"**two "}
+
+data: {"type":"text-delta","id":"text-1","delta":"bike** "}
+
+data: {"type":"text-delta","id":"text-1","delta":"parts."}
+
+data: {"type":"text-end","id":"text-1"}
+
+data: {"type":"finish-step"}
+
+data: {"type":"finish","finishReason":"stop","messageMetadata":{"parent_id":"01900000-0000-7000-8000-0000000000a1","created_at":"2026-11-10T12:00:00Z","versions":["01900000-0000-7000-8000-000000000002"],"turn":{"id":"01900000-0000-7000-8000-000000000001","model":"standard","thinking":true,"status":"completed","finish_reason":"stop","error":null,"input_tokens":34,"cached_input_tokens":0,"output_tokens":9,"load_ms":null,"prompt_ms":null,"generation_ms":null,"started_at":"2026-11-10T12:00:00Z","finished_at":"2026-11-10T12:00:00Z"}}}
+
+data: [DONE]
+

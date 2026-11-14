@@ -74,6 +74,13 @@ async def turn(browser: httpx.AsyncClient, text: str, **more: Any) -> httpx.Resp
         ),
         ("model_unavailable", "[[fail: 503]] Hello?", {}),
         ("broke_off", "[[drop: 3]] one two three four five", {}),
+        # The API passes markdown on as it is. This one is for the web app, which shows
+        # it: here a piece ends in the middle of what is bold.
+        (
+            "markdown",
+            "[[think: A *bike* has parts.]] Name **two bike** parts.",
+            {"thinking": True},
+        ),
     ],
 )
 async def test_a_turn_streams_what_was_recorded(
