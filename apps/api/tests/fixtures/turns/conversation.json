@@ -49,7 +49,7 @@
           "status": "completed",
           "finish_reason": "stop",
           "error": null,
-          "input_tokens": 16,
+          "input_tokens": 35,
           "cached_input_tokens": 0,
           "output_tokens": 10,
           "load_ms": null,

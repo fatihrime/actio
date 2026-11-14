@@ -175,11 +175,37 @@ def test_a_model_is_told_the_day_and_shown_the_text_of_the_branch() -> None:
     shown = context.for_model(history, now=datetime(2026, 3, 5, 23, 59, tzinfo=UTC))
 
     assert shown == [
-        System("Today's date is 5 March 2026."),
+        System(
+            "You are a helpful assistant.\n\n"
+            "Today's date is Thursday, 5 March 2026. Use it when a question depends on the date. "
+            "Otherwise, don't mention it."
+        ),
         User("Name a bike part."),
         Assistant("The saddle."),  # without what it thought
         User("Why that one?"),
     ]
+
+
+def test_the_day_is_not_all_a_model_is_told() -> None:
+    """Told nothing but the date, a small model takes the date for its subject, and
+    opens its answers with it. So the date comes after who the model is, and with when
+    to use it."""
+    told = context.instructions(datetime(2026, 3, 5, 9, 0, tzinfo=UTC))
+
+    who, about_the_day = told.split("\n\n")
+    assert who == "You are a helpful assistant."
+    # With the day of the week: a small model that has to work it out gets it wrong.
+    assert about_the_day.startswith("Today's date is Thursday, 5 March 2026.")
+    assert "don't mention it" in about_the_day
+
+
+def test_a_model_is_told_the_same_all_day() -> None:
+    """The model's server reuses what it has already read, as long as it starts the same."""
+    morning = context.instructions(datetime(2026, 3, 5, 0, 0, tzinfo=UTC))
+    night = context.instructions(datetime(2026, 3, 5, 23, 59, tzinfo=UTC))
+
+    assert morning == night
+    assert context.instructions(datetime(2026, 3, 6, 0, 0, tzinfo=UTC)) != night
 
 
 def test_an_answer_with_no_text_is_not_sent_back() -> None:
