@@ -37,6 +37,10 @@ ollama pull qwen3.5:4b-q4_K_M
 Then open <http://localhost:8080> and ask something. No account is needed: a first visit starts a guest session, which lasts a day.
 
 - **The answer appears as it is written.** The first one takes a few seconds longer, while the model loads. **Stop** ends an answer early and keeps what was written.
+- **Answers are formatted:** headings, tables, code in colour with a button to copy it, formulas, and diagrams. Try "derive the quadratic formula", or "draw a mermaid flowchart of making tea".
+    - A link in an answer shows its address before it opens.
+    - A picture an answer points at is not fetched, and HTML in an answer is shown as text. A model's words can come from anywhere, so they can't make your browser do things ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
+- **The page stays at the newest words** while an answer is written. Scroll up to read, and it leaves you there; the arrow at the bottom takes you back.
 - **Think before answering** has the model reason first, and shows its reasoning above the answer, folded away.
 - **A conversation has an address,** `/c/…`, once its first question is sent: reload the page, or come back to it with the browser's Back button. **New chat** starts another. A list of your conversations isn't there yet.
 - **While the model is missing or Ollama isn't running, the page says so,** with the command above, and notices by itself when that changes.

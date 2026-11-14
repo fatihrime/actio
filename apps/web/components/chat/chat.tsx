@@ -20,6 +20,7 @@ import type { TurnOptions } from "@/lib/chat/turns";
 import { newId } from "@/lib/ids";
 
 import { Composer } from "./composer";
+import { useFollow } from "./follow";
 import { Message, Waiting } from "./message";
 
 const SETUP_GUIDE = "https://fatihrime.github.io/actio/getting-started/#models";
@@ -75,8 +76,7 @@ export function Chat({
   // Counts what the person did. Something the server said about an earlier state is
   // dropped when it arrives after the next action.
   const actions = useRef(0);
-  const scroller = useRef<HTMLDivElement>(null);
-  const following = useRef(true);
+  const { scroller, content, away, follow } = useFollow();
 
   const transport = useMemo(() => turnTransport(id), [id]);
   const { messages, setMessages, sendMessage, regenerate, stop, status } =
@@ -160,7 +160,7 @@ export function Chat({
     };
     sent.current = { id: question.id, text: words };
     actions.current++;
-    following.current = true;
+    follow();
     setText("");
     setProblem(null);
     setOpen(null);
@@ -174,7 +174,7 @@ export function Chat({
 
   function retry() {
     actions.current++;
-    following.current = true;
+    follow();
     setProblem(null);
     setOpen(null);
     void regenerate({ body: options() });
@@ -208,14 +208,6 @@ export function Chat({
     };
   }, [elsewhere, open, resync]);
 
-  // Keep the newest text in view, unless the person scrolled up to read.
-  useEffect(() => {
-    const element = scroller.current;
-    if (element !== null && following.current) {
-      element.scrollTop = element.scrollHeight;
-    }
-  }, [messages, answering, open, problem]);
-
   const last = messages.at(-1);
   const turn = last?.role === "assistant" ? turnOf(last) : open;
   const outcome = answering || turn === null ? null : outcomeOf(turn);
@@ -230,62 +222,67 @@ export function Chat({
 
   return (
     <>
-      <div
-        ref={scroller}
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          following.current =
-            element.scrollHeight - element.scrollTop - element.clientHeight <
-            64;
-        }}
-        className="min-h-0 flex-1 overflow-y-auto"
-      >
-        <div
-          role="log"
-          aria-label="Conversation"
-          aria-busy={answering}
-          className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6"
-        >
-          {messages.length === 0 && (
-            <div className="py-16 text-center">
-              <p className="text-2xl font-semibold tracking-tight">
-                What would you like to know?
-              </p>
-              {model !== null && (
-                <p className="mt-2 text-sm text-zinc-500">
-                  Answered by {model.title}, a model running on this
-                  installation.
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
+          <div
+            ref={content}
+            role="log"
+            aria-label="Conversation"
+            aria-busy={answering}
+            className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6"
+          >
+            {messages.length === 0 && (
+              <div className="py-16 text-center">
+                <p className="text-2xl font-semibold tracking-tight">
+                  What would you like to know?
                 </p>
-              )}
-            </div>
-          )}
-          {messages.map((message, index) => (
-            <Message
-              key={message.id}
-              message={message}
-              writing={answering && index === messages.length - 1}
-            />
-          ))}
-          {answering && last?.role === "user" && <Waiting />}
-          {elsewhere && (
-            <Notice>
-              An answer to this is being written in another window. It appears
-              here when it is done.
-            </Notice>
-          )}
-          {outcome !== null && turn !== null && (
-            <Notice
-              actions={
-                canRetry(turn) &&
-                blocked === null && (
-                  <NoticeButton onClick={retry}>Try again</NoticeButton>
-                )
-              }
-            >
-              {outcome}
-            </Notice>
-          )}
+                {model !== null && (
+                  <p className="mt-2 text-sm text-zinc-500">
+                    Answered by {model.title}, a model running on this
+                    installation.
+                  </p>
+                )}
+              </div>
+            )}
+            {messages.map((message, index) => (
+              <Message
+                key={message.id}
+                message={message}
+                writing={answering && index === messages.length - 1}
+              />
+            ))}
+            {answering && last?.role === "user" && <Waiting />}
+            {elsewhere && (
+              <Notice>
+                An answer to this is being written in another window. It appears
+                here when it is done.
+              </Notice>
+            )}
+            {outcome !== null && turn !== null && (
+              <Notice
+                actions={
+                  canRetry(turn) &&
+                  blocked === null && (
+                    <NoticeButton onClick={retry}>Try again</NoticeButton>
+                  )
+                }
+              >
+                {outcome}
+              </Notice>
+            )}
+          </div>
         </div>
+        {away && (
+          <button
+            type="button"
+            onClick={follow}
+            aria-label="Go to the newest message"
+            title="Go to the newest message"
+            className="absolute bottom-3 left-1/2 flex size-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-lg shadow-md hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500"
+          >
+            <span aria-hidden="true">↓</span>
+          </button>
+        )}
       </div>
       <div className="mx-auto w-full max-w-3xl space-y-3 px-4 pb-4">
         {problem !== null && (
