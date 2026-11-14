@@ -1,26 +1,37 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 
+import { PanelIcon, PlusIcon } from "@/components/icons";
 import { Notice, NoticeButton } from "@/components/notice";
-import { SessionGate } from "@/components/session-gate";
+import { SessionGate, useSession } from "@/components/session-gate";
+import { Sidebar } from "@/components/sidebar/sidebar";
 import { ApiProblem, getConversation, listModels } from "@/lib/api/client";
 import type { Conversation, Model, ModelList } from "@/lib/api/client";
+import { useConversations } from "@/lib/chat/list";
 import { explain } from "@/lib/chat/outcomes";
 import { newId } from "@/lib/ids";
 import { conversationIn, conversationPath, go, usePath } from "@/lib/location";
+import { useMedia, WIDE } from "@/lib/media";
+import { useStoredSwitch } from "@/lib/stored-switch";
 
 import { Chat } from "./chat";
 
 /** How often to ask again while the model can't answer, to notice when it can. */
 const UNREADY_POLL_MS = 5000;
+const LIST_HIDDEN_KEY = "actio.conversations.hidden";
 
-/** The chat: whichever conversation the address names, or a new one.
+const HEADER_BUTTON =
+  "flex items-center gap-1.5 rounded-lg border border-input px-2.5 py-1.5 text-sm font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
+
+/** The app's one screen: the list of conversations, and beside it whichever
+ * conversation the address names, or a new one.
  *
  * - At "/" it is a new conversation, under an id made here. Nothing is stored until
  *   its first question is sent; then the address becomes "/c/<id>".
- * - At "/c/<id>" the conversation is loaded from the API, unless this page started it.
+ * - At "/c/<id>" the conversation is loaded from the API, unless this page started it
+ *   and has shown it ever since.
  *
  * Both of the app's pages show this one component, so moving between conversations
  * never loads a page.
@@ -29,15 +40,38 @@ export function ChatApp() {
   const inAddress = conversationIn(usePath());
   // The id the next new conversation gets.
   const [fresh, setFresh] = useState(newId);
+  // A conversation that began here is on the page for as long as the page shows it.
+  // Once the address has named another one, what was held of it is gone, and coming
+  // back means reading it from the server like any other. So from then on a new
+  // conversation gets another id.
+  const [lastShown, setLastShown] = useState(inAddress);
+  if (lastShown !== inAddress) {
+    setLastShown(inAddress);
+    if (inAddress !== null && inAddress !== fresh) {
+      setFresh(newId());
+    }
+  }
   const id = inAddress ?? fresh;
+
+  const me = useSession().data;
+  const list = useConversations(me?.id ?? null);
+
+  // In a wide window the list stands beside the chat, unless it was put away. In a
+  // narrow one it lies over the chat while it is wanted, and is away otherwise.
+  const wide = useMedia(WIDE, true);
+  const [putAway, setPutAway] = useStoredSwitch(LIST_HIDDEN_KEY);
+  const [over, setOver] = useState(false);
+  const listShown = wide ? !putAway : over;
+  const listButton = useRef<HTMLButtonElement>(null);
 
   const onExists = useCallback(() => {
     go(conversationPath(id), { replace: true });
   }, [id]);
 
-  function startNew() {
+  function startNew({ replace = false } = {}) {
     setFresh(newId());
-    go("/");
+    setOver(false);
+    go("/", { replace });
   }
 
   // A guest whose session ended can't have it back, nor the conversations that went
@@ -49,26 +83,107 @@ export function ChatApp() {
   }
 
   return (
-    <div className="flex h-dvh flex-col">
-      <header className="flex shrink-0 items-center justify-between border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
+    <div
+      className="flex h-dvh flex-col"
+      onKeyDown={(event) => {
+        // Escape puts away the list that lies over the chat, wherever the keyboard
+        // is. Whatever has a use of its own for the key keeps it to itself: a title
+        // being typed, a question before deleting.
+        if (event.key === "Escape" && over && !wide) {
+          setOver(false);
+          listButton.current?.focus();
+        }
+      }}
+    >
+      <header className="flex shrink-0 items-center gap-3 border-b border-border px-3 py-2">
+        {me !== undefined && (
+          <button
+            ref={listButton}
+            type="button"
+            onClick={() => {
+              if (wide) {
+                setPutAway(!putAway);
+              } else {
+                setOver(!over);
+              }
+            }}
+            aria-expanded={listShown}
+            aria-label="Conversations"
+            title={
+              listShown ? "Hide the conversations" : "Show the conversations"
+            }
+            className={HEADER_BUTTON}
+          >
+            <PanelIcon />
+          </button>
+        )}
         <h1 className="text-lg font-semibold tracking-tight">Actio</h1>
-        <button
-          type="button"
-          onClick={startNew}
-          className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500 dark:border-zinc-700 dark:hover:bg-zinc-800"
-        >
-          New chat
-        </button>
+        {me !== undefined && (
+          <button
+            type="button"
+            onClick={() => {
+              startNew();
+            }}
+            className={`ml-auto ${HEADER_BUTTON}`}
+          >
+            <PlusIcon />
+            New chat
+          </button>
+        )}
       </header>
       <SessionGate>
-        <Current
-          id={id}
-          // A conversation this page started is already on it: nothing to load.
-          load={inAddress !== null && inAddress !== fresh}
-          onExists={onExists}
-          onStartNew={startNew}
-          onStartOver={startOver}
-        />
+        <div className="relative flex min-h-0 flex-1">
+          {listShown && !wide && (
+            // Over a narrow window's chat, the rest of the screen closes the list.
+            <button
+              type="button"
+              aria-label="Close the conversations"
+              tabIndex={-1}
+              onClick={() => {
+                setOver(false);
+              }}
+              className="absolute inset-0 z-10 cursor-default bg-black/40"
+            />
+          )}
+          {listShown && (
+            <aside
+              className={`flex w-72 shrink-0 flex-col border-r border-border bg-sidebar ${
+                wide
+                  ? ""
+                  : "absolute inset-y-0 left-0 z-20 max-w-[85%] shadow-xl"
+              }`}
+            >
+              <Sidebar
+                list={list}
+                current={inAddress}
+                // Over the chat it was just asked for: the keyboard goes there.
+                takesFocus={!wide}
+                onOpen={(conversation) => {
+                  setOver(false);
+                  go(conversationPath(conversation));
+                }}
+                onDeleted={(conversation) => {
+                  if (conversation === id) {
+                    // Nothing is left to show, or to go back to.
+                    startNew({ replace: true });
+                  }
+                }}
+              />
+            </aside>
+          )}
+          <main className="flex min-w-0 flex-1 flex-col">
+            <Current
+              id={id}
+              // A conversation this page started, and still shows, is already on it:
+              // nothing to load.
+              load={inAddress !== null && inAddress !== fresh}
+              onExists={onExists}
+              onActivity={list.refresh}
+              onStartNew={startNew}
+              onStartOver={startOver}
+            />
+          </main>
+        </div>
       </SessionGate>
     </div>
   );
@@ -79,17 +194,19 @@ function Current({
   id,
   load,
   onExists,
+  onActivity,
   onStartNew,
   onStartOver,
 }: {
   id: string;
   load: boolean;
   onExists: () => void;
+  onActivity: () => void;
   onStartNew: () => void;
   onStartOver: () => void;
 }) {
   const model = useDefaultModel();
-  const chat = { id, model, onExists, onStartOver };
+  const chat = { id, model, onExists, onActivity, onStartOver };
   // Keyed by the id: a conversation that is opened again is loaded again, and never
   // shown as it was the last time it was on the page.
   return load ? (
@@ -104,12 +221,14 @@ function StoredChat({
   id,
   model,
   onExists,
+  onActivity,
   onStartNew,
   onStartOver,
 }: {
   id: string;
   model: Model | null;
   onExists: () => void;
+  onActivity: () => void;
   onStartNew: () => void;
   onStartOver: () => void;
 }) {
@@ -117,7 +236,10 @@ function StoredChat({
 
   if (loaded.state === "loading") {
     return (
-      <p className="px-4 py-10 text-center text-sm text-zinc-500" role="status">
+      <p
+        className="px-4 py-10 text-center text-sm text-muted-foreground"
+        role="status"
+      >
         Loading the conversation…
       </p>
     );
@@ -148,6 +270,7 @@ function StoredChat({
       stored={loaded.conversation}
       model={model}
       onExists={onExists}
+      onActivity={onActivity}
       onStartOver={onStartOver}
     />
   );

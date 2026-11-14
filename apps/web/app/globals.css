@@ -41,4 +41,31 @@
     var(--color-zinc-900)
   );
   --color-sidebar: light-dark(var(--color-zinc-50), var(--color-zinc-900));
+
+  /* The app's own, beyond what Streamdown asks for. */
+  /* Something that stands out from the page: the box to write in. */
+  --color-card: light-dark(var(--color-white), var(--color-zinc-900));
+  /* The edge of something to type in or to press. */
+  --color-input: light-dark(var(--color-zinc-300), var(--color-zinc-700));
+  /* The outline around whatever the keyboard is on. */
+  --color-ring: light-dark(var(--color-zinc-500), var(--color-zinc-400));
+  /* A message that needs attention. */
+  --color-warning: light-dark(
+    var(--color-amber-50),
+    color-mix(in oklab, var(--color-amber-950) 40%, transparent)
+  );
+  --color-warning-foreground: light-dark(
+    var(--color-amber-950),
+    var(--color-amber-100)
+  );
+  --color-warning-border: light-dark(
+    var(--color-amber-300),
+    var(--color-amber-900)
+  );
+  /* What can't be undone. */
+  --color-destructive: light-dark(var(--color-red-700), var(--color-red-400));
+  --color-destructive-foreground: light-dark(
+    var(--color-white),
+    var(--color-zinc-950)
+  );
 }

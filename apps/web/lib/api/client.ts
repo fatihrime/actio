@@ -17,6 +17,8 @@ export type Me = Schemas["Me"];
 export type Model = Schemas["ModelOut"];
 export type ModelList = Schemas["ModelList"];
 export type Conversation = Schemas["ConversationOut"];
+export type ConversationSummary = Schemas["ConversationSummary"];
+export type ConversationList = Schemas["ConversationList"];
 export type StoredMessage = Schemas["MessageOut"];
 export type MessageMetadata = Schemas["MessageMetadata"];
 export type Turn = Schemas["TurnOut"];
@@ -119,6 +121,42 @@ export async function getConversation(id: string): Promise<Conversation> {
       params: { path: { conversation_id: id } },
     }),
   );
+}
+
+/** One page of the caller's conversations, most recently active first. Without a
+ * `cursor` it is the first page; each page's `next_cursor` asks for the one after. */
+export async function listConversations(
+  cursor: string | null = null,
+): Promise<ConversationList> {
+  return answered(
+    await api().GET("/api/conversations", {
+      params: { query: cursor === null ? {} : { cursor } },
+    }),
+  );
+}
+
+/** Give a conversation a title. Answers the conversation as it is listed now. */
+export async function renameConversation(
+  id: string,
+  title: string,
+): Promise<ConversationSummary> {
+  return answered(
+    await api().PATCH("/api/conversations/{conversation_id}", {
+      params: { path: { conversation_id: id } },
+      body: { title },
+    }),
+  );
+}
+
+/** Delete a conversation, with every message in it. There is no way back. */
+export async function deleteConversation(id: string): Promise<void> {
+  const { error, response } = await api().DELETE(
+    "/api/conversations/{conversation_id}",
+    { params: { path: { conversation_id: id } } },
+  );
+  if (!response.ok) {
+    throw new ApiProblem(asProblem(error, response.status));
+  }
 }
 
 /** `fetch` for a streamed answer: a refusal is thrown as the problem it is, instead

@@ -18,6 +18,7 @@ import {
 import { turnTransport } from "@/lib/chat/turns";
 import type { TurnOptions } from "@/lib/chat/turns";
 import { newId } from "@/lib/ids";
+import { useStoredSwitch } from "@/lib/stored-switch";
 
 import { Composer } from "./composer";
 import { useFollow } from "./follow";
@@ -45,6 +46,7 @@ export function Chat({
   stored,
   model,
   onExists,
+  onActivity,
   onStartOver,
 }: {
   /** The conversation's id. For a new one the page chose it, and the first question
@@ -56,6 +58,9 @@ export function Chat({
   model: Model | null;
   /** Called once the server has the conversation, so it has an address. */
   onExists: () => void;
+  /** Called when the server has taken a question, and when its turn has ended: the
+   * moments at which the conversation's place in the list changes. */
+  onActivity: () => void;
   /** Called when the session turned out to be gone, and the person wants a new one. */
   onStartOver: () => void;
 }) {
@@ -93,12 +98,22 @@ export function Chat({
         }
       },
       onFinish: ({ isAbort, isError }) => {
+        onActivity();
         if (isAbort || isError) {
           void resync({ settle: isAbort });
         }
       },
     });
   const answering = status === "submitted" || status === "streaming";
+
+  // The first piece of an answer says that the server has the question, and with a
+  // first question the conversation.
+  const arriving = status === "streaming";
+  useEffect(() => {
+    if (arriving) {
+      onActivity();
+    }
+  }, [arriving, onActivity]);
 
   /** Ask the server what it has of this conversation, and show that. */
   const resync = useCallback(
@@ -206,8 +221,10 @@ export function Chat({
     }
   }, [exists, answered, onExists]);
 
-  // An answer that another window started can't be followed from here yet. Look
-  // again until it is done.
+  // An answer that wasn't asked for from here can't be followed from here yet. Another
+  // window started it; or this page did, then showed another conversation, which
+  // stops an answer, and came back before the server had recorded that. Look again
+  // until it is over.
   const elsewhere = !answering && open?.status === "running";
   useEffect(() => {
     if (!elsewhere) {
@@ -251,7 +268,7 @@ export function Chat({
                   What would you like to know?
                 </p>
                 {model !== null && (
-                  <p className="mt-2 text-sm text-zinc-500">
+                  <p className="mt-2 text-sm text-muted-foreground">
                     Answered by {model.title}, a model running on this
                     installation.
                   </p>
@@ -268,8 +285,8 @@ export function Chat({
             {answering && last?.role === "user" && <Waiting />}
             {elsewhere && (
               <Notice>
-                An answer to this is being written in another window. It appears
-                here when it is done.
+                An answer to this is still being written. It appears here when
+                it is done.
               </Notice>
             )}
             {outcome !== null && turn !== null && (
@@ -292,7 +309,7 @@ export function Chat({
             onClick={follow}
             aria-label="Go to the newest message"
             title="Go to the newest message"
-            className="absolute bottom-3 left-1/2 flex size-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-lg shadow-md hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500"
+            className="absolute bottom-3 left-1/2 flex size-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-lg shadow-md hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >
             <span aria-hidden="true">↓</span>
           </button>
@@ -327,7 +344,7 @@ export function Chat({
             <p>
               {unready.advice}{" "}
               {unready.command !== null && (
-                <code className="rounded bg-black/10 px-1.5 py-0.5 dark:bg-white/10">
+                <code className="rounded bg-current/10 px-1.5 py-0.5">
                   {unready.command}
                 </code>
               )}
@@ -358,27 +375,4 @@ export function Chat({
       </div>
     </>
   );
-}
-
-/** A switch that is remembered in this browser. */
-function useStoredSwitch(key: string): [boolean, (on: boolean) => void] {
-  const [on, setOn] = useState(() => {
-    try {
-      return window.localStorage.getItem(key) === "on";
-    } catch {
-      return false; // storage is off limits, as in some private windows
-    }
-  });
-  const set = useCallback(
-    (next: boolean) => {
-      setOn(next);
-      try {
-        window.localStorage.setItem(key, next ? "on" : "off");
-      } catch {
-        // Not remembered, then.
-      }
-    },
-    [key],
-  );
-  return [on, set];
 }

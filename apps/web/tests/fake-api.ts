@@ -7,6 +7,8 @@ import { expect, onTestFinished, vi } from "vitest";
 
 import type {
   Conversation,
+  ConversationList,
+  ConversationSummary,
   Me,
   Model,
   ModelList,
@@ -21,6 +23,8 @@ import { recorded } from "./recorded";
 export interface Call {
   method: string;
   path: string;
+  /** What followed the path's question mark, such as a list's `cursor`. */
+  query: Record<string, string>;
   /** The JSON it sent, if any. */
   body: unknown;
   /** Aborted when the page gave up on the request. */
@@ -72,6 +76,7 @@ export class FakeApi {
     const call: Call = {
       method: (request?.method ?? init?.method ?? "GET").toUpperCase(),
       path: url.pathname,
+      query: Object.fromEntries(url.searchParams),
       body: text === "" ? undefined : (JSON.parse(text) as unknown),
       signal: request?.signal ?? init?.signal ?? undefined,
     };
@@ -107,12 +112,14 @@ function matches(route: string, call: Call): boolean {
 }
 
 /** Replace `fetch` with a fake API for the running test. It starts with a guest
- * session and one model that is ready and can reason: what a working installation
- * answers. A request the test didn't set up fails the test. */
+ * session, one model that is ready and can reason, and no conversations: what a
+ * working installation answers a first visit. A request the test didn't set up fails
+ * the test. */
 export function fakeApi(): FakeApi {
   const api = new FakeApi()
     .on("POST /api/session/guest", () => json(201, GUEST))
-    .on("GET /api/models", () => json(200, models()));
+    .on("GET /api/models", () => json(200, models()))
+    .on("GET /api/conversations", () => json(200, listed([])));
   vi.stubGlobal("fetch", api.fetch);
   onTestFinished(() => {
     expect(api.unexpected, "requests the test set up no answer for").toEqual(
@@ -261,6 +268,29 @@ export function answer(
       turn: by,
     },
   };
+}
+
+/** A conversation as the list has it. */
+export function summary(
+  id: string,
+  title: string | null,
+  changes: Partial<ConversationSummary> = {},
+): ConversationSummary {
+  return {
+    id,
+    title,
+    created_at: MOMENT,
+    last_active_at: MOMENT,
+    ...changes,
+  };
+}
+
+/** One page of the list. `nextCursor` says that there is a page after it. */
+export function listed(
+  items: ConversationSummary[],
+  nextCursor: string | null = null,
+): ConversationList {
+  return { items, next_cursor: nextCursor };
 }
 
 /** A stored conversation. `unanswered` is for one that ends with a question. */

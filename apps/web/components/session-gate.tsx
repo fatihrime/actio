@@ -2,10 +2,24 @@
 
 import type { ReactNode } from "react";
 import useSWR from "swr";
+import type { SWRResponse } from "swr";
 
 import { Notice, NoticeButton } from "@/components/notice";
 import { startSession } from "@/lib/api/client";
+import type { Me } from "@/lib/api/client";
 import { explain } from "@/lib/chat/outcomes";
+
+/** Whose session this browser has, starting one as a guest on a first visit. Every
+ * component that asks shares the one answer. */
+export function useSession(): SWRResponse<Me, unknown> {
+  return useSWR<Me, unknown>("session", startSession, {
+    // Asked once per page load. Each failure is shown, not retried behind the
+    // person's back: a retry would count against the same limit.
+    revalidateOnFocus: false,
+    revalidateOnReconnect: false,
+    shouldRetryOnError: false,
+  });
+}
 
 /** Shows its children once this browser has a session.
  *
@@ -15,13 +29,7 @@ import { explain } from "@/lib/chat/outcomes";
  * answer is shown as it is, with a button to try again.
  */
 export function SessionGate({ children }: { children: ReactNode }) {
-  const session = useSWR("session", startSession, {
-    // Asked once per page load. Each failure is shown, not retried behind the
-    // person's back: a retry would count against the same limit.
-    revalidateOnFocus: false,
-    revalidateOnReconnect: false,
-    shouldRetryOnError: false,
-  });
+  const session = useSession();
 
   if (session.data !== undefined) {
     return children;
@@ -44,7 +52,10 @@ export function SessionGate({ children }: { children: ReactNode }) {
     );
   }
   return (
-    <p className="px-4 py-10 text-center text-sm text-zinc-500" role="status">
+    <p
+      className="px-4 py-10 text-center text-sm text-muted-foreground"
+      role="status"
+    >
       Starting…
     </p>
   );

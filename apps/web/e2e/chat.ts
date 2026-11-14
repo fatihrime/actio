@@ -34,6 +34,24 @@ export class Chat {
   get scroller(): Locator {
     return this.page.getByRole("log").locator("xpath=..");
   }
+  /** The list of conversations beside the chat. */
+  get list(): Locator {
+    return this.page.getByRole("navigation", { name: "Conversations" });
+  }
+  /** The conversations in the list, from the top. */
+  get listed(): Locator {
+    return this.list.getByRole("link");
+  }
+  /** The button that shows the list, and puts it away. */
+  get listButton(): Locator {
+    return this.page.getByRole("button", {
+      name: "Conversations",
+      exact: true,
+    });
+  }
+  get newChat(): Locator {
+    return this.page.getByRole("button", { name: "New chat" });
+  }
 
   async open(path = "/"): Promise<void> {
     await this.page.goto(path);
@@ -49,6 +67,15 @@ export class Chat {
   async answered(): Promise<void> {
     await expect(this.send).toBeVisible();
     await expect(this.stop).toBeHidden();
+  }
+
+  /** Ask a question in a new conversation, and wait for its answer. */
+  async converse(question: string): Promise<void> {
+    await this.newChat.click();
+    await expect(this.questions).toHaveCount(0);
+    await this.ask(question);
+    await expect(this.answers).toHaveText(`Echo: ${question}`);
+    await this.answered();
   }
 
   /** How far the reader is from the end of the conversation, in pixels. */

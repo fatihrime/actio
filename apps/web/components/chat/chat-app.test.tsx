@@ -1,9 +1,6 @@
 // The chat, driven as a person would: through the page, against a fake API that
 // answers with the API's recorded streams (tests/fake-api.ts).
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import type { UserEvent } from "@testing-library/user-event";
-import { SWRConfig } from "swr";
+import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { isId } from "@/lib/ids";
@@ -21,30 +18,12 @@ import {
   turn,
 } from "@/tests/fake-api";
 import type { Call, FakeApi } from "@/tests/fake-api";
+import { ask, open } from "@/tests/open";
 import { recorded, RECORDED } from "@/tests/recorded";
-
-import { ChatApp } from "./chat-app";
 
 const TURNS = "POST /api/conversations/*/turns";
 const CONVERSATION = "GET /api/conversations/*";
 const SECOND_ANSWER = "01900000-0000-7000-8000-000000000004";
-
-/** Open the app at `path`, as a browser with nothing remembered. */
-function open(path = "/"): UserEvent {
-  window.history.replaceState(null, "", path);
-  render(
-    // Its own cache, so one test's session isn't the next one's.
-    <SWRConfig value={{ provider: () => new Map() }}>
-      <ChatApp />
-    </SWRConfig>,
-  );
-  return userEvent.setup();
-}
-
-async function ask(user: UserEvent, text: string): Promise<void> {
-  await user.type(await screen.findByLabelText("Message"), text);
-  await user.click(screen.getByRole("button", { name: "Send" }));
-}
 
 /** What the page posted to start a turn. */
 interface Posted {
@@ -754,7 +733,7 @@ describe("a conversation's address", () => {
     const user = open(`/c/${RECORDED.conversation}`);
 
     expect(
-      await screen.findByText(/being written in another window/),
+      await screen.findByText(/An answer to this is still being written/),
     ).toBeInTheDocument();
     await user.type(screen.getByLabelText("Message"), "And at sunset?");
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
@@ -762,9 +741,7 @@ describe("a conversation's address", () => {
     expect(
       await screen.findByText("Because of scattering.", {}, { timeout: 4000 }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/being written in another window/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
     expect(api.to(CONVERSATION)).toHaveLength(2);
   });
@@ -897,5 +874,45 @@ describe("moving between conversations", () => {
     expect(window.location.pathname).toBe(address);
     // This time it came from the server.
     expect(api.to(CONVERSATION)).toHaveLength(1);
+  });
+
+  it("loads a conversation that was started here, once the page has left it", async () => {
+    const api = fakeApi();
+    api
+      .on(TURNS, () => streamed("cut_off.sse", SECOND_ANSWER))
+      .on(CONVERSATION, (call) =>
+        conversationOf(call) === RECORDED.conversation
+          ? new Response(recorded("conversation.json"), {
+              headers: { "content-type": "application/json" },
+            })
+          : json(
+              200,
+              conversation(conversationOf(call), [
+                question(sentQuestion(api), "Count to five."),
+                answer(SECOND_ANSWER, "One, two, three", sentQuestion(api)),
+              ]),
+            ),
+      );
+    const user = open(`/c/${RECORDED.conversation}`);
+    await screen.findByText("Echo: Why is the sky blue?");
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+    await ask(user, "Count to five.");
+    await screen.findByText("One, two, three");
+    const started = window.location.pathname;
+
+    window.history.back();
+    await screen.findByText("Echo: Why is the sky blue?");
+    window.history.forward();
+
+    // The page let go of it when it showed the other one. It is read again, not
+    // shown as an empty conversation under its address.
+    expect(await screen.findByText("One, two, three")).toBeInTheDocument();
+    expect(window.location.pathname).toBe(started);
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(api.to(CONVERSATION).map((call) => conversationOf(call))).toEqual([
+      RECORDED.conversation,
+      RECORDED.conversation,
+      started.slice(3),
+    ]);
   });
 });
