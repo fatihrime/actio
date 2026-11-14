@@ -153,3 +153,11 @@ Two more things changed with the list:
 
 - **The list of conversations,** under "Not done yet", exists: [ADR 0018](0018-the-list-of-conversations-is-the-servers.md).
 - **The notice for an answer that is being written elsewhere** no longer says "in another window". It can also be this page's own answer, for the moment between leaving a conversation and the server recording that this stopped it.
+
+### 2026-11-14: the one screen shows more than the chat
+
+"No pages for signing up and logging in", under "Not done yet", is done: [ADR 0019](0019-accounts-in-the-one-screen.md). They are not pages but places in the same component, for the reason given above for conversations: nothing loads between them.
+
+- **`ChatApp` now reads from the address what to show:** a conversation, or one of `/login`, `/signup` and `/account`.
+- **A conversation that began on the page is read from the server again after any of these was shown,** not only after another conversation. The rule of the revision above is the same; what can take a conversation's place on the page is more.
+- **"A first visit starts a guest session" still holds,** for every address. What is new is that the session can change during a page's life, and that the page then forgets what it had read.

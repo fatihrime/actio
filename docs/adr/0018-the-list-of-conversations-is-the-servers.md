@@ -126,3 +126,18 @@ On a MacBook Pro (M1 Pro, 16 GB), in a headless Chromium against the stack of `m
 - **How to reverse it:**
   - **showing a change at once** is a change inside `lib/chat/list.ts`: its `rename` and `remove` would update what is held before asking the server, and put it back on a failure. Nothing outside that file would notice;
   - **a menu and a dialog** would replace `components/sidebar/row.tsx` alone.
+
+## Revisions
+
+### 2026-11-14: the list is held under the session, not under the account
+
+The decision said that the list is "held under the account's id, so a list never outlasts its owner's session". With logging in and out ([ADR 0019](0019-accounts-in-the-one-screen.md)) that was no longer true.
+
+- **What was wrong.** An account logged out and, in the same page, back in. Its id is the same both times, so the page showed the list it had read during the first session. A conversation that a guest had brought along meanwhile was missing from it.
+- **Why it surfaced only now.** When the list was built, a page had one session for its whole life: everyone was a guest, and the only change was "start a new session", which makes a new guest with a new id. The account's id stood for the session without being it. The first test in a real browser that logs out and in again failed on the difference.
+- **The fix.** The list is held under the session it was read in: whose it is, and which of the page's sessions it is. What was held for a session is dropped when it ends.
+
+Two smaller things:
+
+- **A guest's list being gone after a day,** under "Not done yet": the list says so underneath, with a link to sign up, which keeps it.
+- **"The defect below",** among the mistakes that were planted, points at nothing in this record. It is the one in [ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md)'s revision of the same day: a conversation that began on the page, shown empty when it was returned to.

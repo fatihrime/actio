@@ -83,3 +83,10 @@ Logging in from a browser that holds a guest session ends that session, which de
 
 - **The guest's conversations move to the account** they log in to, before the guest is deleted.
 - Logging in from one account to another moves nothing: each account keeps its own.
+
+### 2026-11-14: the forms
+
+Until now accounts could only be used through the API. The web app's forms for signing up, logging in, changing the password and logging out are their own decision: [ADR 0019](0019-accounts-in-the-one-screen.md). Nothing above changed for them.
+
+- **The login form asks nothing about the form of an address or a password,** so that it gives away no more than the API does.
+- **The sign-up form says that no email is sent,** next to the password: a forgotten one can't be reset by its owner.

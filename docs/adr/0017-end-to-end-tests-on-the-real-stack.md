@@ -134,3 +134,20 @@ That makes 19 tests, in about 16 seconds.
 
 - **What was wrong.** The script printed a `docker compose … down` command for that. It failed as printed: Compose reads the stack's two passwords even to stop it, and outside the script they aren't set.
 - **Why it surfaced only now.** The printed command was never run as printed. A kept stack was always followed by the next `make e2e`, which removes what it finds before it starts. It was run for the first time while measuring for this step.
+
+### 2026-11-14: accounts, and two more limits raised
+
+**One more file of tests,** `account.spec.ts`, for signing up and logging in ([ADR 0019](0019-accounts-in-the-one-screen.md)). These need the whole stack more than most: a real cookie, a real password check, and the database moving a guest's conversations.
+
+- a guest who signs up keeps their conversation, and is still logged in after a reload;
+- logging out leaves nothing of the account on the page, and logging in brings it back;
+- what a guest started goes along into the account they log in to;
+- a wrong password is refused, and an address signs up only once, however it is typed;
+- changing the password logs another browser out, and only the new password works there;
+- each of the three places opens by its address, and one test runs at a phone's width.
+
+That makes 26 tests, in about 18 seconds. Each test signs up under an address made up for it.
+
+**The overlay raises two more limits:** sign-ups and logins per network address. The decision above raised two "because every test is a new guest, and all of them come from one address"; the same holds for accounts.
+
+- **Not raised: password attempts per email address.** Every test has an address of its own, so it has that limit to itself, as a person would. A test of the containers' rules holds the overlay to exactly this.

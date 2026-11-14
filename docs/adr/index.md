@@ -28,5 +28,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0016](0016-answers-shown-as-markdown.md) | Answers are shown as markdown, which can't act on the page or its reader | Accepted |
 | [0017](0017-end-to-end-tests-on-the-real-stack.md) | End-to-end tests drive the real stack in a real browser, with a fake model | Accepted |
 | [0018](0018-the-list-of-conversations-is-the-servers.md) | The list of conversations is the server's: read again, never rearranged | Accepted |
+| [0019](0019-accounts-in-the-one-screen.md) | Signing up and logging in happen in the one screen, and the page forgets a session that has ended | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.
