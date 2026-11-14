@@ -3,7 +3,7 @@
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -150,3 +150,9 @@ async def get_principal(
 
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
 PrincipalIfAny = Annotated[Principal | None, Depends(get_principal_if_any)]
+
+NO_SESSION: dict[int | str, dict[str, Any]] = {
+    401: {"description": "No session, or it has ended. Start one with `POST /api/session/guest`."}
+}
+"""For the description of a route that takes `CurrentPrincipal`: pass it as the route's
+`responses`, or its router's. A test fails when such a route doesn't say so."""

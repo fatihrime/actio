@@ -12,6 +12,7 @@ the middle is in `test_turns_live.py`, which runs a real server.
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -19,7 +20,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from actio.chat import turns
+from actio.chat import context, turns
 from actio.chat.models import Conversation, Message, Turn
 from actio.chat.parts import TextPart
 from actio.core.ids import new_id
@@ -34,7 +35,6 @@ from actio_llm import (
     ProviderError,
     ReasoningDelta,
     RequestRejectedError,
-    System,
     TextDelta,
     ToolCall,
     Usage,
@@ -44,7 +44,9 @@ from actio_llm import (
 pytestmark = pytest.mark.anyio
 
 PROBLEM = "application/problem+json"
-TODAY = System("Today's date is 10 November 2026.")  # the test clock's day
+# What a model is told before the conversation, on the test clock's day. Its wording is
+# pinned in test_answering.py; here it only has to come first.
+TODAY = context.for_model([], now=datetime(2026, 11, 10, 12, tzinfo=UTC))[0]
 
 
 # --- Helpers --------------------------------------------------------------------------
@@ -160,7 +162,8 @@ async def test_a_question_is_answered_as_a_stream(chat: Chat, server_ids: Any) -
         "status": "completed",
         "finish_reason": "stop",
         "error": None,
-        "input_tokens": 8,  # six for the line that gives the date, two for the question
+        # The fake model counts words: the instructions', and the question's two.
+        "input_tokens": len(TODAY.content.split()) + 2,
         "cached_input_tokens": 0,
         "output_tokens": 3,
         "load_ms": None,
@@ -779,6 +782,38 @@ async def test_a_conversation_is_answered_one_question_at_a_time(scripted: Any) 
     assert (await in_another_conversation).status_code == 200  # other conversations go on
     assert await chat.texts() == ["A long question", "Half an answer."]
     assert (await chat.ask("Another, now", after=answered)).status_code == 200
+
+
+async def test_a_conversation_read_while_its_answer_is_recorded_is_shown_whole(
+    scripted: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading a conversation takes several questions to the database. An answer that
+    is recorded between two of them must not show as half of each state: the branch
+    from before, with the outcome from after. A browser asks at just that moment, right
+    after it stopped an answer."""
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("An answer."), hold, Finish(FinishReason.STOP, None))
+    chat = Chat(browser)
+    asked = asyncio.create_task(chat.ask("A question"))
+    await model.started.wait()
+
+    # The reader has found the conversation, its turn still running. Just then, before
+    # the reader looks at the messages, the turn ends and is recorded.
+    look_for_a_stale_turn = turns.give_up_on_stale
+
+    async def while_the_turn_ends(*args: Any, **kwargs: Any) -> None:
+        if not hold.is_set():
+            hold.set()
+            await asked
+        await look_for_a_stale_turn(*args, **kwargs)
+
+    monkeypatch.setattr(turns, "give_up_on_stale", while_the_turn_ends)
+
+    seen = await chat.read()
+
+    assert [message["role"] for message in seen["messages"]] == ["user", "assistant"]
+    assert seen["unanswered"] is None
+    assert seen["current_leaf_id"] == seen["messages"][-1]["id"]
 
 
 async def test_a_turn_whose_server_died_is_given_up_on_after_ten_minutes(

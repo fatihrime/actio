@@ -7,6 +7,7 @@ Python, and requires both to show the same branch after every step.
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,7 +15,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 from sqlalchemy import func, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from actio.chat import conversations, tree
@@ -252,6 +253,70 @@ async def test_deleting_an_account_deletes_its_conversations(db: AsyncSession, t
     await db.commit()
 
     assert (await count(db, Conversation), await count(db, Message)) == (0, 0)
+
+
+@pytest.fixture
+async def elsewhere(migrated: str) -> AsyncIterator[AsyncSession]:
+    """A second session on the same database: someone else, at the same time."""
+    engine = create_engine(migrated)
+    async with create_session_factory(engine)() as session:
+        yield session
+    await engine.dispose()
+
+
+async def test_a_conversation_held_still_is_brought_up_to_date(
+    db: AsyncSession, elsewhere: AsyncSession, talk: Talk
+) -> None:
+    await db.commit()
+    theirs = await conversations.get(
+        elsewhere, talk.conversation.id, user_id=talk.conversation.user_id
+    )
+    assert theirs is not None
+    conversations.rename(theirs, "Flat tyres")
+    await elsewhere.commit()
+    assert talk.conversation.title is None  # what this session read earlier
+
+    assert await conversations.hold_still(db, talk.conversation)
+
+    assert talk.conversation.title == "Flat tyres"
+
+
+async def test_a_conversation_held_still_keeps_writers_out_until_the_reader_is_done(
+    db: AsyncSession, elsewhere: AsyncSession, talk: Talk
+) -> None:
+    """A turn locks the conversation's row before it writes. While someone is reading
+    the conversation whole, that lock isn't given."""
+    await db.commit()
+    owner = talk.conversation.user_id
+    await elsewhere.execute(text("SET lock_timeout = '200ms'"))
+
+    assert await conversations.hold_still(db, talk.conversation)
+    with pytest.raises(OperationalError, match="lock timeout"):
+        await conversations.get(elsewhere, talk.conversation.id, user_id=owner, to_change=True)
+    await elsewhere.rollback()
+    # Another reader isn't kept out.
+    seen = await conversations.get(elsewhere, talk.conversation.id, user_id=owner)
+    assert seen is not None
+    assert await conversations.hold_still(elsewhere, seen)
+    await elsewhere.rollback()
+
+    await db.commit()  # the reader is done
+
+    assert await conversations.get(elsewhere, talk.conversation.id, user_id=owner, to_change=True)
+
+
+async def test_a_conversation_deleted_meanwhile_cannot_be_held_still(
+    db: AsyncSession, elsewhere: AsyncSession, talk: Talk
+) -> None:
+    await db.commit()
+    theirs = await conversations.get(
+        elsewhere, talk.conversation.id, user_id=talk.conversation.user_id
+    )
+    assert theirs is not None
+    await conversations.delete(elsewhere, theirs)
+    await elsewhere.commit()
+
+    assert not await conversations.hold_still(db, talk.conversation)
 
 
 async def test_a_guests_conversations_can_be_handed_to_an_account(db: AsyncSession) -> None:

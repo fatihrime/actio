@@ -58,6 +58,25 @@ async def get(
     return found
 
 
+async def hold_still(db: AsyncSession, conversation: Conversation) -> bool:
+    """Bring `conversation` up to date, and keep it from changing until the transaction
+    ends. False if it was deleted meanwhile.
+
+    For reading a conversation whole. That takes several questions to the database: its
+    row, its branch, the turns behind it. A turn that ended between two of them would be
+    shown as half of each state. Every turn locks the conversation's row before it
+    writes (`to_change` above), so holding the row shared here keeps turns out until the
+    reader is done, and lets other readers in.
+    """
+    query = (
+        select(Conversation)
+        .where(Conversation.id == conversation.id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)  # overwrite what this session holds
+    )
+    return await db.scalar(query) is not None
+
+
 async def list_page(
     db: AsyncSession, *, user_id: uuid.UUID, limit: int, after: Cursor | None = None
 ) -> tuple[list[Conversation], Cursor | None]:

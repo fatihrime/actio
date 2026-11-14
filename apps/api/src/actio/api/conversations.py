@@ -16,21 +16,28 @@ Messages are added by turns, which have their own routes.
 import base64
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, StringConstraints
 
-from actio.api.dependencies import CurrentPrincipal, Database, Now
+from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now
 from actio.api.problems import Problem
 from actio.chat import conversations, tree, turns
 from actio.chat.conversations import TITLE_MAX, Cursor
 from actio.chat.models import Conversation, Message, Role, Turn, TurnStatus
 from actio.chat.parts import Part, from_stored
 
-router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+router = APIRouter(prefix="/api/conversations", tags=["conversations"], responses=NO_SESSION)
 
 PAGE_DEFAULT, PAGE_MAX = 30, 100
+
+NOT_YOURS: dict[int | str, dict[str, Any]] = {
+    404: {"description": "No such conversation, or it isn't yours."}
+}
+NO_SUCH: dict[int | str, dict[str, Any]] = {
+    404: {"description": "No such conversation, or no such message in it."}
+}
 
 
 class ConversationSummary(BaseModel):
@@ -179,7 +186,7 @@ async def list_conversations(
     )
 
 
-@router.get("/{conversation_id}")
+@router.get("/{conversation_id}", responses=NOT_YOURS)
 async def get_conversation(
     conversation: OwnConversation, db: Database, now: Now
 ) -> ConversationOut:
@@ -187,7 +194,7 @@ async def get_conversation(
     return await _with_messages(db, conversation, now)
 
 
-@router.patch("/{conversation_id}")
+@router.patch("/{conversation_id}", responses=NOT_YOURS)
 async def rename_conversation(
     body: Rename, conversation: OwnConversation, db: Database
 ) -> ConversationSummary:
@@ -197,7 +204,7 @@ async def rename_conversation(
     return ConversationSummary.of(conversation)
 
 
-@router.put("/{conversation_id}/branch")
+@router.put("/{conversation_id}/branch", responses=NO_SUCH)
 async def show_branch(
     body: ShowBranch, conversation: OwnConversation, db: Database, now: Now
 ) -> ConversationOut:
@@ -212,7 +219,7 @@ async def show_branch(
     return await _with_messages(db, conversation, now)
 
 
-@router.delete("/{conversation_id}", status_code=204)
+@router.delete("/{conversation_id}", status_code=204, responses=NOT_YOURS)
 async def delete_conversation(conversation: OwnConversation, db: Database) -> None:
     """Delete the conversation and every message in it, on every branch. There is no
     way back."""
@@ -226,6 +233,9 @@ async def _with_messages(
     # A turn whose server died still says `running`. Looking is when that is noticed.
     await turns.give_up_on_stale(db, conversation.id, now=now)
     await db.commit()
+    # From here to the end nothing may change underneath: see `hold_still`.
+    if not await conversations.hold_still(db, conversation):
+        raise Problem(404, "No such conversation.")
     branch = await tree.shown_branch(db, conversation)
     versions = await tree.versions(db, conversation, branch)
     answers = [message.id for message in branch if message.role == "assistant"]
