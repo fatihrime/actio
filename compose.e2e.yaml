@@ -35,7 +35,11 @@ services:
       # Every test is a new visitor, and all of them come from one address. The limits
       # themselves are tested where a clock can be moved: apps/api/tests.
       ACTIO_LIMIT_GUESTS_PER_ADDRESS: 100000/hour
+      ACTIO_LIMIT_SIGNUPS_PER_ADDRESS: 100000/hour
+      ACTIO_LIMIT_LOGINS_PER_ADDRESS: 100000/hour
       ACTIO_LIMIT_TURNS_PER_USER: 100000/hour
+      # Not raised: password attempts per email address. Each test makes up its own
+      # address, and the few attempts it makes are what a person would make.
     volumes:
       # In place of ./config: a models file that offers the fake, under the same name.
       - ./deploy/e2e/config:/app/config:ro

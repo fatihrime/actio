@@ -316,8 +316,14 @@ def test_the_e2e_stack_reads_its_own_models_file_where_the_api_expects_one(
 
 
 def test_no_test_meets_a_rate_limit_made_for_people(e2e: dict[str, Any]) -> None:
-    """Every end-to-end test is a new guest, and all of them come from one address."""
+    """Every end-to-end test is a new guest, and all of them come from one address.
+    Some sign up and log in, from that address too."""
     environment = e2e["services"]["api"]["environment"]
 
     assert environment["ACTIO_LIMIT_GUESTS_PER_ADDRESS"] == "100000/hour"
+    assert environment["ACTIO_LIMIT_SIGNUPS_PER_ADDRESS"] == "100000/hour"
+    assert environment["ACTIO_LIMIT_LOGINS_PER_ADDRESS"] == "100000/hour"
     assert environment["ACTIO_LIMIT_TURNS_PER_USER"] == "100000/hour"
+    # The one limit that guards an account's password is the one people get. A test
+    # makes up its own address, so it has that address's attempts to itself.
+    assert environment["ACTIO_LIMIT_LOGINS_PER_EMAIL"] is None
