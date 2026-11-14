@@ -19,7 +19,7 @@ make up
 
 The first run builds the images, which takes a few minutes; later runs take seconds. When `make up` returns, every container reports healthy. Then open:
 
-- <http://localhost:8080>: the web app;
+- <http://localhost:8080>: the chat. It needs a model to answer: see [Models](#models);
 - <http://localhost:8080/api/docs>: the API's interactive documentation;
 - <http://localhost:8080/api/healthz>: the API's health check;
 - <http://localhost:8080/api/readyz>: whether the API can do its work. It says `ready` when the database is reachable and migrated and Valkey answers, and otherwise names what is missing.
@@ -34,9 +34,16 @@ Actio runs its models on [Ollama](https://ollama.com), version 0.40 or newer, in
 ollama pull qwen3.5:4b-q4_K_M
 ```
 
-`make smoke` then stops noting that no model's server answers. The API says the same in more detail: with a session, `GET /api/models` lists each model as `ready`, `missing` from its server, or its server as `unreachable`.
+Then open <http://localhost:8080> and ask something. No account is needed: a first visit starts a guest session, which lasts a day.
 
-There is no chat page yet, but the API behind it works. To ask the model something from the command line, and watch the answer arrive piece by piece:
+- **The answer appears as it is written.** The first one takes a few seconds longer, while the model loads. **Stop** ends an answer early and keeps what was written.
+- **Think before answering** has the model reason first, and shows its reasoning above the answer, folded away.
+- **A conversation has an address,** `/c/…`, once its first question is sent: reload the page, or come back to it with the browser's Back button. **New chat** starts another. A list of your conversations isn't there yet.
+- **While the model is missing or Ollama isn't running, the page says so,** with the command above, and notices by itself when that changes.
+
+`make smoke` notes a model whose server doesn't answer too. The API says it in more detail: with a session, `GET /api/models` lists each model as `ready`, `missing` from its server, or its server as `unreachable`.
+
+The page is built on the API, which you can also use directly. To ask the model something from the command line, and watch the answer arrive piece by piece:
 
 ```sh
 jar=$(mktemp)
@@ -64,9 +71,9 @@ make dev         # starts the stack; Ctrl-C stops the API and the web app
 
 In this mode, saving a Python file restarts the API, and the browser picks up changes to the web app by itself. `make dev` first stops any containers that `make up` started, so you can switch between the two modes freely. Postgres and Valkey keep their data in Docker volumes in both modes, so it survives restarts.
 
-## Talk to a local model
+## Talk to a local model from the terminal
 
-The chat interface isn't built yet, but the client it will use is. With the development setup above and [Ollama](https://ollama.com/download) 0.40 or newer running:
+The client the chat reaches models with also works on its own. With the development setup above and [Ollama](https://ollama.com/download) 0.40 or newer running:
 
 ```sh
 ollama pull granite4:micro     # 2.1 GB
@@ -126,10 +133,13 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 :   The API is running but can't do its work yet. `migrations pending`: the database is older than the code; `make up` and `make dev` both apply the missing migrations when you run them again. `unreachable`: Postgres or Valkey isn't running or refuses the password; `docker compose ps` shows their state, and the API's log says more.
 
 **"Too many new guests from your network", or another 429**
-:   A rate limit was reached. The answer says how long to wait, and its `Retry-After` header says it in seconds. On your own machine, raise the limit in `.env` (see [Configuration](#configuration)) and run `make up` or `make dev` again.
+:   A rate limit was reached. The page shows the answer, which says how long to wait; its `Retry-After` header says it in seconds. On your own machine, raise the limit in `.env` (see [Configuration](#configuration)) and run `make up` or `make dev` again.
+
+**The chat says a conversation "doesn't exist, or belongs to another session"**
+:   A guest's conversations go with the guest's session, which lasts a day and lives in one browser. The address of a guest's conversation opens nowhere else, and not after that day.
 
 **A model is `missing` or `unreachable`**
-:   `GET /api/models` says so, and `make smoke` notes it. `missing`: Ollama runs but hasn't got the model; `ollama pull` it, by the name in `config/models.toml`. `unreachable`: Ollama isn't running, or isn't where the API looks. If it runs on another machine, set `ACTIO_OLLAMA_URL` in `.env`. It takes up to 15 seconds for a change to show.
+:   The chat says so above the message box, `GET /api/models` says so, and `make smoke` notes it. `missing`: Ollama runs but hasn't got the model; `ollama pull` it, by the name in `config/models.toml`. `unreachable`: Ollama isn't running, or isn't where the API looks. If it runs on another machine, set `ACTIO_OLLAMA_URL` in `.env`. It takes up to 15 seconds for a change to show.
 
 **The API doesn't start, and says `actio: … models.toml: …`**
 :   `config/models.toml` has a mistake, and the line says which. Fix it and start again.

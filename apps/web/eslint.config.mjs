@@ -5,7 +5,8 @@ import nextTs from "eslint-config-next/typescript";
 import tseslint from "typescript-eslint";
 
 export default defineConfig([
-  globalIgnores([".next/**", "next-env.d.ts"]),
+  // Generated files: Next.js's own, and the API's types (`make openapi`).
+  globalIgnores([".next/**", "next-env.d.ts", "lib/api/schema.d.ts"]),
   js.configs.recommended,
   nextVitals,
   nextTs,

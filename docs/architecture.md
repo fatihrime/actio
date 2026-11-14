@@ -26,7 +26,7 @@ flowchart LR
     api -->|"host.docker.internal"| ollama
 ```
 
-- **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies will need.
+- **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies need.
 - **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, and `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). Today the API serves its interactive docs, two probes, guest sessions and accounts:
     - `/api/healthz` answers whenever the process is alive;
     - `/api/readyz` answers 200 only when the database is reachable and migrated and Valkey answers. Otherwise it answers 503 and names what is missing;
@@ -37,7 +37,12 @@ flowchart LR
     - `POST /api/conversations/{id}/turns` puts a question to a model and streams the answer back, piece by piece, in the format the AI SDK reads. The first question creates the conversation. The same route rewords an earlier question, or asks for another answer. Each turn is recorded: which model, how it ended, what it cost in tokens and time ([ADR 0014](adr/0014-turns-streamed-in-the-ai-sdks-format.md));
     - `GET /api/models` lists the models on offer, from `config/models.toml`, and says whether each can answer right now: `ready`, `missing` from its server, or its server `unreachable` ([ADR 0013](adr/0013-the-models-on-offer-are-a-file.md)).
 - **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
-- **The web app** is a Next.js application. Today it is a placeholder page.
+- **The web app** is a Next.js application: the chat ([ADR 0015](adr/0015-the-web-chat-calls-the-api-from-the-browser.md)).
+    - **Its server sends only the frame of the page.** Everything of yours is fetched by the browser, straight from the API, with the session cookie. Nothing but the API handles a session.
+    - **A first visit starts a guest session,** so you can ask at once. `/` is a new conversation, and `/c/<id>` a stored one.
+    - **An answer streams into the page** through the AI SDK's `useChat`. You can stop it, try a failed one again, reword a question that got no answer, and have the model show its reasoning.
+    - **The server is the truth.** When an answer ends any other way than well, the page reads the conversation again and shows what is stored.
+    - **Its types for the API are generated** from the API's recorded description, `apps/api/openapi.json`, so a change to the API that the page doesn't follow fails to compile.
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
     - Postgres holds five tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, and the turns in which a model answered.
     - Valkey holds the rate limits' counters: one number per client address or email address that has made an attempt lately, under a hashed name.
@@ -77,7 +82,7 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
-- **the chat itself:** the web app's conversation page, on top of the API's turns. The API talks to models through the [clients](reference/llm.md) for Ollama and for OpenAI-compatible servers ([ADR 0007](adr/0007-local-models-through-ollamas-native-api.md));
+- **more of the chat:** answers shown as formatted text with code and formulas, a list of your conversations, and pages to sign up and log in. Today the page shows answers as plain text, and an earlier conversation is reached by its address;
 - **turns that outlive their request:** today an answer stops when its reader leaves. Later a turn runs on its own, and a reader who comes back picks the stream up again;
 - **more providers:** cloud models behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them;
 - **usage limits:** session and weekly windows, enforced atomically in Valkey and recorded in a Postgres ledger. The [engine](reference/quota.md) already exists as a package, tested against a real Valkey server ([ADR 0006](adr/0006-usage-limits-engine.md)). Connecting it to the API, with the ledger, is still to come.
@@ -87,7 +92,7 @@ The next phases add:
 | Path | Contents |
 |---|---|
 | `apps/api` | The Python application: the API today, plus the worker later |
-| `apps/web` | The Next.js web app |
+| `apps/web` | The Next.js web app: the chat's pages and components, its calls to the API, and their tests |
 | `packages/fakellm` | A fake LLM server for tests, scripted by directives in the prompt |
 | `packages/llm` | Model clients: a neutral chat format, adapters for Ollama and for OpenAI-compatible servers, and the `actio-llm` command |
 | `packages/quota` | The usage-limits engine: Lua scripts for Valkey, and the Python reference model they're tested against |

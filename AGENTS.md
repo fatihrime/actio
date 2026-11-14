@@ -28,7 +28,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | Path | Purpose |
 |---|---|
 | `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `chat/` holds conversations, their tree of messages and the turns in which a model answers; `catalog.py` holds the models on offer; `identity/` holds accounts and sessions; `core/` holds settings, ids, the database and the rate limiter; `migrations/` holds the schema's history |
-| `apps/web` | Next.js web app |
+| `apps/web` | Next.js web app: the chat. `app/` holds the pages, which only place components; `components/` the interface; `lib/` what it is built on: the calls to the API (`lib/api`, with types generated from the API's description), how a turn is requested (`lib/chat`), ids and the address bar; `tests/` the fake API and the recorded answers the component tests run on |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
 | `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`); the router comes later |
 | `packages/fakellm` | Deterministic fake LLM server for tests, scripted by directives in the prompt (`[[think: ...]]`, `[[call: ...]]`, `[[fail: 503]]`) |
@@ -53,13 +53,14 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `make dev` | Run the stack at http://localhost:8080 with the API and web app native, with hot reload |
 | `make smoke` | Check a running stack through Caddy: the web page, and that the API is healthy, ready (database migrated, Valkey answering), serves its docs, starts a guest session and lists its models |
 | `make migration name="..."` | Write a new database migration from the table models, as a numbered draft to read and edit |
+| `make openapi` | After a change to a route or a schema: record the API's description again (`apps/api/openapi.json`), and generate the web app's types from it (`apps/web/lib/api/schema.d.ts`). Review the difference |
 | `make docs` | Preview the documentation site at http://localhost:8001, reloading on edits |
 | `make down` | Stop all containers. Their data stays in Docker volumes |
 | `make check` | Run everything CI runs: every static check on all files, the tests, then the builds (web app and docs site) |
 | `make test-live` | Run the model-client tests against a real Ollama server (0.40 or newer, with `granite4:micro` pulled). Not part of `make check` |
 | `make fmt` | Format code and apply safe lint fixes |
 
-`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. `uv run actio-llm chat <model> "<prompt>"` talks to a local model through the Ollama adapter. End-to-end tests (`make e2e`) arrive with the chat interface.
+`make lint`, `make test` and `make build` run the parts of `make check` on their own. The static checks are defined once, in `.pre-commit-config.yaml`, and run at every commit, in `make check` and in CI. Processes can also run alone: `uv run actio --role api --reload`, `pnpm --dir apps/web dev`, or the fake LLM server with `uv run fakellm`. `uv run actio-llm chat <model> "<prompt>"` talks to a local model through the Ollama adapter. End-to-end tests in a real browser (`make e2e`) are not there yet: until then the web app's tests run in a simulated browser, and a change to the chat is also tried by hand at http://localhost:8080.
 
 `make up` needs only Docker; it builds the images from `apps/api/Dockerfile` and `apps/web/Dockerfile`. `make dev` needs Docker Desktop: its containers reach the natively running API and web app through `host.docker.internal`. Changes to the containers must keep `deploy/tests/` passing; if a rule must change, change the test on purpose and record why in an ADR. `.env` holds the local passwords. It is created once from `.env.example`, git-ignored, and never read by tests. Postgres keeps the password it first started with, so if you recreate `.env`, also wipe the local data with `docker compose down --volumes`.
 
@@ -83,7 +84,13 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 - **TypeScript:**
   - `pnpm` 12; pnpm also installs the Node.js version pinned in the root `package.json` (26 LTS);
   - add dependencies with `pnpm --dir apps/web add`, never `npm`. pnpm refuses a version published less than a day ago: take the newest one that is older;
-  - the `ai` package is pinned to an exact version: the API writes the stream it reads ([ADR 0014](docs/adr/0014-turns-streamed-in-the-ai-sdks-format.md)), so an upgrade is a change to check, not to drift into;
+  - the `ai` package is pinned to an exact version: the API writes the stream it reads ([ADR 0014](docs/adr/0014-turns-streamed-in-the-ai-sdks-format.md)), so an upgrade is a change to check, not to drift into. `@ai-sdk/react` is pinned with it: each of its versions depends on exactly one version of `ai`, so the two move together;
+  - only the browser calls the API, through `lib/api/client.ts`. No server component, route handler or server action does: the session is the browser's cookie, and the API counts requests by the client's address ([ADR 0015](docs/adr/0015-the-web-chat-calls-the-api-from-the-browser.md));
+  - `lib/api/schema.d.ts` is generated from `apps/api/openapi.json`. Never edit it: run `make openapi`. A test fails when it is out of date;
+  - the server is the truth about a conversation. The chat library's state is what is shown while an answer streams; when a turn ends any other way than well, the page reads the conversation again instead of working out what happened (`resync` in `components/chat/chat.tsx`);
+  - the page moves between conversations through `lib/location.ts` (the browser's history), not with `next/link` or the router: a navigation would end an answer that is streaming;
+  - components are written here. Third-party interface code comes in as a declared dependency, never as source copied in, which rules out shadcn/ui-style generators ([ADR 0015](docs/adr/0015-the-web-chat-calls-the-api-from-the-browser.md));
+  - component tests drive the page as a person would, against `tests/fake-api.ts`. It answers with the API's recorded streams, and with bodies typed by the generated types. A request the test set up no answer for fails the test;
   - strict mode, plus `noUncheckedIndexedAccess`;
   - formatted with Prettier; linted with ESLint and typescript-eslint's strict type-checked rules;
   - stay on TypeScript 6.0 and ESLint 9 until typescript-eslint and eslint-config-next support the next majors ([ADR 0003](docs/adr/0003-web-app-on-nextjs.md));
@@ -98,7 +105,10 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - a table that points at another module's table names its class, such as `ForeignKey(User.id)`, never the text `"users.id"`. Then loading one table module loads what it needs, and a process that loads only that one still works. A test loads each alone.
 - **API conventions:**
   - routes live in `actio.api`; rules and tables live in a domain module below it, which never commits: the route decides when the unit of work is done;
-  - errors are RFC 9457 problem documents: raise `Problem(status, detail)`;
+  - errors are RFC 9457 problem documents: raise `Problem(status, detail)`. `detail` is shown to people as it is, so write it for them;
+  - a route lists the errors it answers in its `responses`, with a description each. The `Problem` schema is filled in for them. A route that takes `CurrentPrincipal` passes `NO_SESSION`, or its router does: a test fails otherwise;
+  - the API's description is recorded in `apps/api/openapi.json`, and the web app's types are generated from it. After changing a route or a schema, run `make openapi` and review the difference: tests on both sides fail until then;
+  - reading a conversation whole takes several queries. Call `conversations.hold_still` first, so a turn that ends meanwhile isn't seen half ([ADR 0014](docs/adr/0014-turns-streamed-in-the-ai-sdks-format.md), revision of 2026-11-13);
   - nothing below `actio.api` reads the clock. Time comes in as `now`, from the `Now` dependency, so tests can move it. A route that lasts, such as a streamed answer, takes `Clock` and reads it again at the end. Ids the server makes in a route come from `NewId`, so a test knows them beforehand;
   - the format a browser reads is written in one place, `actio.api.ui_stream`. What a model's answer does is described without it, as steps, in `actio.chat.answering`, which also makes sure a turn never stays `running`: whatever ends a stream, its outcome is recorded;
   - a route that needs to know who is asking takes `CurrentPrincipal`;

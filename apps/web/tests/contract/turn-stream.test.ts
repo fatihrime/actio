@@ -5,8 +5,6 @@
 // reads the same files, the way `useChat` would: through its transport, which parses
 // the events and checks every chunk, and its reader, which builds the message to show.
 // So a chunk the library wouldn't accept, or would understand differently, fails here.
-import { readFileSync } from "node:fs";
-
 import {
   DefaultChatTransport,
   readUIMessageStream,
@@ -15,11 +13,7 @@ import {
 import type { UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
 
-const fixtures = new URL("../../../api/tests/fixtures/turns/", import.meta.url);
-
-function recorded(name: string): string {
-  return readFileSync(new URL(name, fixtures), "utf8");
-}
+import { recorded, RECORDED, streamed } from "../recorded";
 
 /** The part of a message's metadata these tests look at. */
 interface Metadata {
@@ -42,15 +36,7 @@ async function replay(
 ): Promise<{ states: Message[]; errors: string[] }> {
   const transport = new DefaultChatTransport<Message>({
     api: "http://actio.test/api/conversations/c1/turns",
-    fetch: () =>
-      Promise.resolve(
-        new Response(recorded(name), {
-          headers: {
-            "content-type": "text/event-stream; charset=utf-8",
-            "x-vercel-ai-ui-message-stream": "v1",
-          },
-        }),
-      ),
+    fetch: () => Promise.resolve(streamed(name)),
   });
   const stream = await transport.sendMessages({
     trigger: "submit-message",
@@ -80,8 +66,8 @@ function last(states: Message[]): Message {
   return message;
 }
 
-const ANSWER_ID = "01900000-0000-7000-8000-000000000002";
-const QUESTION_ID = "01900000-0000-7000-8000-0000000000a1";
+const ANSWER_ID = RECORDED.answer;
+const QUESTION_ID = RECORDED.question;
 
 describe("a recorded turn, read by the ai package", () => {
   it("becomes the assistant's message, growing piece by piece", async () => {

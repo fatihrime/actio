@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke migration docs check lint fmt test test-live build
+.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live build
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -53,6 +53,12 @@ migration: .env ## Write a new database migration from the table models: make mi
 	./scripts/with-dev-env.sh uv run alembic --config apps/api/alembic.ini revision --autogenerate \
 	    --rev-id "$$(printf '%04d' $$(( $$(ls apps/api/src/actio/migrations/versions/*.py | wc -l) + 1 )))" \
 	    --message "$(name)"
+
+# The API's description of itself is kept as a file, and the web app's types are
+# generated from it. Tests on both sides fail when either is out of date (ADR 0015).
+openapi: ## Record the API's description again (apps/api/openapi.json), and the web app's types from it
+	ACTIO_RECORD_OPENAPI=1 uv run pytest --quiet --no-cov apps/api/tests/test_api_description.py
+	pnpm --dir apps/web run api-types
 
 docs: ## Preview the documentation site at http://localhost:8001, reloading on edits
 	uv run zensical serve --dev-addr 127.0.0.1:8001
