@@ -35,6 +35,7 @@ Put directives in the last user message to change what the fake does. They are l
 | `[[fail: 400 context_length_exceeded]]` | The same, with this error code |
 | `[[drop: 2]]` | Stream 2 tokens, then end the stream without a finish reason or `[DONE]` |
 | `[[delay: 0.5]]` | Wait this many seconds before answering (30 at most) |
+| `[[pace: 0.05]]` | Wait this many seconds between the pieces of a streamed reply (5 at most), as a real model takes its time. For tests that stop an answer half-way, or watch a page follow it |
 
 ```sh
 curl -s http://127.0.0.1:8100/v1/chat/completions -H 'content-type: application/json' -d '{

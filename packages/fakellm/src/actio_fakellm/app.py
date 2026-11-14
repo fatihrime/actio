@@ -12,6 +12,7 @@ A test can also script the reply, with directives in the last user message:
     [[fail: 400 some_code]]   the same, with this error code in the body
     [[drop: 2]]               stream 2 tokens, then end the stream without finishing it
     [[delay: 0.5]]            wait this many seconds before answering
+    [[pace: 0.05]]            wait this many seconds between the pieces of a streamed reply
 
 Directives are left out of the echoed text. They live in the message, not in a control
 API, so the fake keeps no state between requests, and a test that drives the whole stack
@@ -58,6 +59,7 @@ from actio_fakellm.schemas import (
 
 DEFAULT_MODELS = ("fake-chat",)
 MAX_DELAY_S = 30.0
+MAX_PACE_S = 5.0
 
 # One token: a word plus the whitespace after it. Joining the tokens restores the text.
 _TOKEN = re.compile(r"\S+\s*")
@@ -81,6 +83,9 @@ class Script:
     fail: tuple[int, str | None] | None = None
     drop_after: int | None = None
     delay_s: float = 0.0
+    pace_s: float = 0.0
+    """The wait between two pieces of a streamed reply. A reply that isn't streamed has
+    no pieces, and comes at once."""
 
 
 def create_app(
@@ -179,13 +184,13 @@ def create_app(
         if script.drop_after is not None:
             # The connection "drops": no finish reason, no usage, no [DONE].
             chunks = chunks[: 1 + script.drop_after]
-            return _stream(chunks, script.delay_s, finished=False)
+            return _stream(chunks, script, finished=False)
         for index, call in enumerate(calls):
             chunks += [chunk(delta) for delta in _tool_call_deltas(index, call)]
         chunks.append(chunk(Delta(), last=True))
         if request.stream_options is not None and request.stream_options.include_usage:
             chunks.append(chunk())
-        return _stream(chunks, script.delay_s, finished=True)
+        return _stream(chunks, script, finished=True)
 
     return app
 
@@ -237,6 +242,10 @@ def _apply(script: Script, name: str, value: str) -> None:
             script.delay_s = float(value)
             if not 0 <= script.delay_s <= MAX_DELAY_S:
                 raise ValueError(value)
+        case "pace":
+            script.pace_s = float(value)
+            if not 0 <= script.pace_s <= MAX_PACE_S:
+                raise ValueError(value)
         case _:
             raise ScriptError(f"unknown directive [[{name}: ...]]")
 
@@ -279,19 +288,21 @@ def _count_tokens(text: str) -> int:
 
 
 def _stream(
-    chunks: list[ChatCompletionChunk], delay_s: float, *, finished: bool
+    chunks: list[ChatCompletionChunk], script: Script, *, finished: bool
 ) -> EventSourceResponse:
     return EventSourceResponse(
-        _sse(chunks, delay_s, finished=finished), headers={"Cache-Control": "no-cache"}
+        _sse(chunks, script, finished=finished), headers={"Cache-Control": "no-cache"}
     )
 
 
 async def _sse(
-    chunks: list[ChatCompletionChunk], delay_s: float, *, finished: bool
+    chunks: list[ChatCompletionChunk], script: Script, *, finished: bool
 ) -> AsyncIterator[str]:
     """OpenAI's stream format: one `data:` event per chunk, then `data: [DONE]`."""
-    await asyncio.sleep(delay_s)
-    for chunk in chunks:
+    await asyncio.sleep(script.delay_s)
+    for position, chunk in enumerate(chunks):
+        if position > 0:
+            await asyncio.sleep(script.pace_s)
         yield f"data: {chunk.model_dump_json()}\n\n"
     if finished:
         yield "data: [DONE]\n\n"

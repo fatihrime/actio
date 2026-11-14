@@ -305,6 +305,28 @@ async def test_delay_waits_before_answering(client: httpx.AsyncClient, stream: b
     assert time.monotonic() - started >= 0.2
 
 
+async def test_pace_waits_between_the_pieces_of_a_stream(client: httpx.AsyncClient) -> None:
+    """A real model takes its time over an answer. A test that stops one half-way, or
+    watches a page follow it, needs the fake to take some too."""
+    started = time.monotonic()
+    events = await stream_events(client, asking("[[pace: 0.05]] one two three"))
+
+    # The role, four tokens and the finish: five waits between six pieces.
+    contents = [json.loads(event)["choices"][0]["delta"].get("content") for event in events[:-1]]
+    assert contents == ["", "Echo: ", "one ", "two ", "three", None]
+    assert time.monotonic() - started >= 5 * 0.05
+
+
+async def test_pace_changes_nothing_in_a_reply_that_is_not_streamed(
+    client: httpx.AsyncClient,
+) -> None:
+    started = time.monotonic()
+    response = await client.post(URL, json=asking("[[pace: 1]] one two three", stream=False))
+
+    assert response.json()["choices"][0]["message"]["content"] == "Echo: one two three"
+    assert time.monotonic() - started < 1
+
+
 @pytest.mark.parametrize(
     "directive",
     [
@@ -315,6 +337,9 @@ async def test_delay_waits_before_answering(client: httpx.AsyncClient, stream: b
         "[[call: f [1, 2]]]",
         "[[drop: -1]]",
         "[[delay: 3600]]",
+        "[[pace: -0.1]]",
+        "[[pace: 60]]",
+        "[[pace: slowly]]",
     ],
 )
 async def test_a_directive_that_cannot_be_read_is_a_400(
