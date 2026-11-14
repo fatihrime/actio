@@ -2,11 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { InAppLink } from "@/components/in-app-link";
 import { Notice, NoticeButton } from "@/components/notice";
 import { ApiProblem } from "@/lib/api/client";
 import type { Conversations } from "@/lib/chat/list";
 import { explain } from "@/lib/chat/outcomes";
-import { conversationPath } from "@/lib/location";
+import { conversationPath, SIGNUP } from "@/lib/location";
 
 import { Row } from "./row";
 
@@ -20,7 +21,8 @@ export function Sidebar({
   list,
   current,
   takesFocus = false,
-  onOpen,
+  guest,
+  onChosen,
   onDeleted,
 }: {
   list: Conversations;
@@ -29,7 +31,10 @@ export function Sidebar({
   /** Whether the keyboard goes to the list when it appears: when it was just asked
    * for, and lies over everything else. */
   takesFocus?: boolean;
-  onOpen: (id: string) => void;
+  /** Whether the list is a guest's, and goes with the guest after a day. */
+  guest: boolean;
+  /** Called when a link in the list has taken the page somewhere else. */
+  onChosen: () => void;
   /** Called after a conversation was deleted, with its id. */
   onDeleted: (id: string) => void;
 }) {
@@ -83,86 +88,100 @@ export function Sidebar({
   }
 
   return (
-    <nav
-      ref={region}
-      aria-labelledby="conversations-heading"
-      tabIndex={-1}
-      className="flex min-h-0 flex-1 flex-col outline-none"
-    >
-      <h2
-        id="conversations-heading"
-        className="shrink-0 px-5 pt-4 pb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase"
+    <>
+      <nav
+        ref={region}
+        aria-labelledby="conversations-heading"
+        tabIndex={-1}
+        className="flex min-h-0 flex-1 flex-col outline-none"
       >
-        Conversations
-      </h2>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-2 pb-3">
-        {problem !== null && (
-          <Notice
-            tone="warning"
-            actions={
-              <NoticeButton
-                onClick={() => {
-                  setProblem(null);
-                }}
-              >
-                Dismiss
-              </NoticeButton>
-            }
-          >
-            {explain(problem)}
-          </Notice>
-        )}
-        {list.error !== null && (
-          <Notice
-            tone="warning"
-            actions={
-              <NoticeButton onClick={list.refresh}>Try again</NoticeButton>
-            }
-          >
-            <p className="font-medium">The list couldn’t be read.</p>
-            <p>{explain(list.error)}</p>
-          </Notice>
-        )}
-        {items === null ? (
-          list.error === null && (
-            <p
-              role="status"
-              className="px-3 py-2 text-sm text-muted-foreground"
+        <h2
+          id="conversations-heading"
+          className="shrink-0 px-5 pt-4 pb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase"
+        >
+          Conversations
+        </h2>
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-2 pb-3">
+          {problem !== null && (
+            <Notice
+              tone="warning"
+              actions={
+                <NoticeButton
+                  onClick={() => {
+                    setProblem(null);
+                  }}
+                >
+                  Dismiss
+                </NoticeButton>
+              }
             >
-              Loading…
+              {explain(problem)}
+            </Notice>
+          )}
+          {list.error !== null && (
+            <Notice
+              tone="warning"
+              actions={
+                <NoticeButton onClick={list.refresh}>Try again</NoticeButton>
+              }
+            >
+              <p className="font-medium">The list couldn’t be read.</p>
+              <p>{explain(list.error)}</p>
+            </Notice>
+          )}
+          {items === null ? (
+            list.error === null && (
+              <p
+                role="status"
+                className="px-3 py-2 text-sm text-muted-foreground"
+              >
+                Loading…
+              </p>
+            )
+          ) : items.length === 0 ? (
+            <p className="px-3 py-2 text-sm text-muted-foreground">
+              No conversations yet. What you ask is kept here.
             </p>
-          )
-        ) : items.length === 0 ? (
-          <p className="px-3 py-2 text-sm text-muted-foreground">
-            No conversations yet. What you ask is kept here.
-          </p>
-        ) : (
-          <ul className="space-y-0.5">
-            {items.map((item) => (
-              <Row
-                key={item.id}
-                conversation={item}
-                current={item.id === current}
-                onOpen={() => {
-                  onOpen(item.id);
-                }}
-                onRename={(title) => rename(item.id, title)}
-                onDelete={() => remove(item.id)}
-              />
-            ))}
-          </ul>
-        )}
-        {list.more && (
-          <button
-            type="button"
-            onClick={list.showMore}
-            disabled={list.readingMore}
-            className="w-full rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
+          ) : (
+            <ul className="space-y-0.5">
+              {items.map((item) => (
+                <Row
+                  key={item.id}
+                  conversation={item}
+                  current={item.id === current}
+                  onOpen={onChosen}
+                  onRename={(title) => rename(item.id, title)}
+                  onDelete={() => remove(item.id)}
+                />
+              ))}
+            </ul>
+          )}
+          {list.more && (
+            <button
+              type="button"
+              onClick={list.showMore}
+              disabled={list.readingMore}
+              className="w-full rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
+            >
+              {list.readingMore ? "Loading…" : "Show older conversations"}
+            </button>
+          )}
+        </div>
+      </nav>
+      {/* Under the list, not in it: the list holds conversations and nothing else. */}
+      {guest && (
+        <p className="shrink-0 border-t border-border px-5 py-3 text-xs text-muted-foreground">
+          You are a guest: these conversations are kept for a day.{" "}
+          <InAppLink
+            href={SIGNUP}
+            onFollow={onChosen}
+            className="font-medium text-foreground underline underline-offset-2"
           >
-            {list.readingMore ? "Loading…" : "Show older conversations"}
-          </button>
-        )}
-      </div>
-    </nav>
+            Sign up
+          </InAppLink>{" "}
+          to keep them.
+        </p>
+      )}
+    </>
   );
 }

@@ -43,6 +43,22 @@ export class ApiProblem extends Error {
     return typeof seconds === "number" ? seconds : undefined;
   }
 
+  /** For a 422: the fields of the request the API found wrong, such as `email`. */
+  get invalid(): string[] {
+    const errors: unknown = this.problem.errors;
+    if (!Array.isArray(errors)) {
+      return [];
+    }
+    return errors.flatMap((error: unknown) =>
+      typeof error === "object" &&
+      error !== null &&
+      "where" in error &&
+      typeof error.where === "string"
+        ? [error.where.replace(/^body\./, "")]
+        : [],
+    );
+  }
+
   /** What a refused response says. Every error of the API is a problem document; a
    * proxy in front of it may answer with something else, such as an empty 502. */
   static async from(response: Response): Promise<ApiProblem> {
@@ -103,10 +119,55 @@ function answered<Data>(result: {
   return result.data;
 }
 
+/** For a call that answers with nothing: the problem it was refused with, thrown. */
+function done(result: { error?: unknown; response: Response }): void {
+  if (!result.response.ok) {
+    throw new ApiProblem(asProblem(result.error, result.response.status));
+  }
+}
+
 /** Whose session this browser has, starting one as a new guest when it has none.
  * Opening the page twice doesn't make two guests: a live session is kept. */
 export async function startSession(): Promise<Me> {
   return answered(await api().POST("/api/session/guest"));
+}
+
+/** Create a lasting account and log in to it. A guest becomes the account, and keeps
+ * everything: it is the same account, with an email address and a password now. */
+export async function signUp(email: string, password: string): Promise<Me> {
+  return answered(
+    await api().POST("/api/account", { body: { email, password } }),
+  );
+}
+
+/** Log in to an account. The session this browser had ends; what a guest had started
+ * goes to the account. */
+export async function logIn(email: string, password: string): Promise<Me> {
+  return answered(
+    await api().POST("/api/session", { body: { email, password } }),
+  );
+}
+
+/** Replace the account's password. Every other browser is logged out by it. */
+export async function changePassword(
+  current: string,
+  next: string,
+): Promise<void> {
+  done(
+    await api().PUT("/api/account/password", {
+      body: { current_password: current, new_password: next },
+    }),
+  );
+}
+
+/** End this browser's session. */
+export async function logOut(): Promise<void> {
+  done(await api().DELETE("/api/session"));
+}
+
+/** End the account's sessions in every browser, this one included. */
+export async function logOutEverywhere(): Promise<void> {
+  done(await api().DELETE("/api/sessions"));
 }
 
 /** The models on offer, and whether each can answer right now. */
@@ -150,13 +211,11 @@ export async function renameConversation(
 
 /** Delete a conversation, with every message in it. There is no way back. */
 export async function deleteConversation(id: string): Promise<void> {
-  const { error, response } = await api().DELETE(
-    "/api/conversations/{conversation_id}",
-    { params: { path: { conversation_id: id } } },
+  done(
+    await api().DELETE("/api/conversations/{conversation_id}", {
+      params: { path: { conversation_id: id } },
+    }),
   );
-  if (!response.ok) {
-    throw new ApiProblem(asProblem(error, response.status));
-  }
 }
 
 /** `fetch` for a streamed answer: a refusal is thrown as the problem it is, instead

@@ -30,6 +30,28 @@ describe("ApiProblem", () => {
     expect(refused.retryAfter).toBeUndefined();
   });
 
+  it("names the fields a request had wrong", async () => {
+    const refused = await ApiProblem.from(
+      problem(422, "The request doesn't have the expected form.", {
+        errors: [
+          {
+            where: "body.email",
+            problem: "value is not a valid email address",
+          },
+          { where: "body.password", problem: "String should have at least 10" },
+        ],
+      }),
+    );
+
+    expect(refused.invalid).toEqual(["email", "password"]);
+  });
+
+  it("names no fields for a refusal that isn't about any", async () => {
+    const refused = await ApiProblem.from(problem(409, "Taken."));
+
+    expect(refused.invalid).toEqual([]);
+  });
+
   it("goes by the status of the response, not by what its body claims", async () => {
     const refused = await ApiProblem.from(
       new Response(JSON.stringify({ detail: "Gone wrong.", status: 200 }), {

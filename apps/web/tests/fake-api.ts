@@ -200,6 +200,18 @@ export const GUEST: Me = {
   session_expires_at: "2026-11-17T12:00:00Z",
 };
 
+/** Someone with a lasting account. `changes` says how they differ: a guest who signs
+ * up keeps the guest's id. */
+export function account(changes: Partial<Me> = {}): Me {
+  return {
+    id: "01900000-0000-7000-8000-0000000000e2",
+    is_guest: false,
+    email: "ada@example.com",
+    session_expires_at: "2026-12-10T12:00:00Z",
+    ...changes,
+  };
+}
+
 export function model(changes: Partial<Model> = {}): Model {
   return {
     id: "standard",

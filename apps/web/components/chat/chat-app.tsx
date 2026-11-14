@@ -1,19 +1,31 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import useSWR, { useSWRConfig } from "swr";
+import useSWR from "swr";
 
-import { PanelIcon, PlusIcon } from "@/components/icons";
+import { SessionPlace } from "@/components/account/session-place";
+import { PanelIcon, PersonIcon, PlusIcon } from "@/components/icons";
+import { InAppLink } from "@/components/in-app-link";
 import { Notice, NoticeButton } from "@/components/notice";
-import { SessionGate, useSession } from "@/components/session-gate";
+import { SessionStatus } from "@/components/session-status";
 import { Sidebar } from "@/components/sidebar/sidebar";
 import { ApiProblem, getConversation, listModels } from "@/lib/api/client";
-import type { Conversation, Model, ModelList } from "@/lib/api/client";
+import type { Conversation, Me, Model, ModelList } from "@/lib/api/client";
 import { useConversations } from "@/lib/chat/list";
 import { explain } from "@/lib/chat/outcomes";
 import { newId } from "@/lib/ids";
-import { conversationIn, conversationPath, go, usePath } from "@/lib/location";
+import {
+  ACCOUNT,
+  conversationPath,
+  go,
+  LOGIN,
+  placeIn,
+  SIGNUP,
+  usePath,
+} from "@/lib/location";
+import type { Place } from "@/lib/location";
 import { useMedia, WIDE } from "@/lib/media";
+import { useSession } from "@/lib/session";
 import { useStoredSwitch } from "@/lib/stored-switch";
 
 import { Chat } from "./chat";
@@ -25,36 +37,59 @@ const LIST_HIDDEN_KEY = "actio.conversations.hidden";
 const HEADER_BUTTON =
   "flex items-center gap-1.5 rounded-lg border border-input px-2.5 py-1.5 text-sm font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
 
-/** The app's one screen: the list of conversations, and beside it whichever
- * conversation the address names, or a new one.
+/** What the browser's tab says at each place. */
+const TITLES: Record<Place["kind"], string> = {
+  chat: "Actio",
+  login: "Log in · Actio",
+  signup: "Sign up · Actio",
+  account: "Your account · Actio",
+};
+
+/** The app's one screen: the list of conversations, and beside it what the address
+ * names.
  *
- * - At "/" it is a new conversation, under an id made here. Nothing is stored until
+ * - At "/" that is a new conversation, under an id made here. Nothing is stored until
  *   its first question is sent; then the address becomes "/c/<id>".
  * - At "/c/<id>" the conversation is loaded from the API, unless this page started it
  *   and has shown it ever since.
+ * - At "/login", "/signup" and "/account" it is the form for that (ADR 0019).
  *
- * Both of the app's pages show this one component, so moving between conversations
- * never loads a page.
+ * Every page of the app shows this one component, so moving between them never loads
+ * a page.
  */
 export function ChatApp() {
-  const inAddress = conversationIn(usePath());
+  const path = usePath();
+  const place = placeIn(path);
+  const inAddress = place.kind === "chat" ? place.conversation : null;
   // The id the next new conversation gets.
   const [fresh, setFresh] = useState(newId);
   // A conversation that began here is on the page for as long as the page shows it.
-  // Once the address has named another one, what was held of it is gone, and coming
-  // back means reading it from the server like any other. So from then on a new
-  // conversation gets another id.
-  const [lastShown, setLastShown] = useState(inAddress);
-  if (lastShown !== inAddress) {
-    setLastShown(inAddress);
-    if (inAddress !== null && inAddress !== fresh) {
+  // Once the address has named anything else, another conversation or a form, what
+  // was held of it is gone, and coming back means reading it from the server like
+  // any other. So from then on a new conversation gets another id.
+  const showsItsOwn =
+    place.kind === "chat" && (inAddress === null || inAddress === fresh);
+  const [lastPath, setLastPath] = useState(path);
+  // Where the chat was left for one of the forms: where to go back to afterwards.
+  const [leftAt, setLeftAt] = useState<string | null>(null);
+  if (lastPath !== path) {
+    setLastPath(path);
+    if (!showsItsOwn) {
       setFresh(newId());
+    }
+    if (place.kind !== "chat" && placeIn(lastPath).kind === "chat") {
+      setLeftAt(lastPath);
     }
   }
   const id = inAddress ?? fresh;
 
-  const me = useSession().data;
-  const list = useConversations(me?.id ?? null);
+  const session = useSession();
+  const { me } = session;
+  const list = useConversations(session.holder);
+
+  useEffect(() => {
+    document.title = TITLES[place.kind];
+  }, [place.kind]);
 
   // In a wide window the list stands beside the chat, unless it was put away. In a
   // narrow one it lies over the chat while it is wanted, and is away otherwise.
@@ -74,12 +109,19 @@ export function ChatApp() {
     go("/", { replace });
   }
 
-  // A guest whose session ended can't have it back, nor the conversations that went
-  // with it. A new session starts with a new conversation.
-  const { mutate } = useSWRConfig();
+  // A session that has ended can't be had back: a guest's is gone with the guest, and
+  // an account's needs its password again. A new session starts as a guest, with a
+  // new conversation, and nothing of the one before.
   function startOver() {
-    void mutate("session");
-    startNew();
+    session.startOver();
+    startNew({ replace: true });
+  }
+
+  // After signing up or logging in: back to where the chat was left. A guest's
+  // conversations went with them, so the one that was on the page is still theirs.
+  function enter(as: Me) {
+    session.become(as);
+    go(leftAt ?? "/", { replace: true });
   }
 
   return (
@@ -118,60 +160,85 @@ export function ChatApp() {
           </button>
         )}
         <h1 className="text-lg font-semibold tracking-tight">Actio</h1>
-        {me !== undefined && (
-          <button
-            type="button"
-            onClick={() => {
-              startNew();
+        <div className="ml-auto flex items-center gap-2">
+          <Who
+            me={me}
+            // Someone whose guest session couldn't be started may have an account.
+            canLogIn={session.error !== null}
+            at={place.kind}
+            onFollow={() => {
+              setOver(false);
             }}
-            className={`ml-auto ${HEADER_BUTTON}`}
-          >
-            <PlusIcon />
-            New chat
-          </button>
-        )}
-      </header>
-      <SessionGate>
-        <div className="relative flex min-h-0 flex-1">
-          {listShown && !wide && (
-            // Over a narrow window's chat, the rest of the screen closes the list.
+          />
+          {me !== undefined && (
             <button
               type="button"
-              aria-label="Close the conversations"
-              tabIndex={-1}
               onClick={() => {
-                setOver(false);
+                startNew();
               }}
-              className="absolute inset-0 z-10 cursor-default bg-black/40"
-            />
-          )}
-          {listShown && (
-            <aside
-              className={`flex w-72 shrink-0 flex-col border-r border-border bg-sidebar ${
-                wide
-                  ? ""
-                  : "absolute inset-y-0 left-0 z-20 max-w-[85%] shadow-xl"
-              }`}
+              className={HEADER_BUTTON}
             >
-              <Sidebar
-                list={list}
-                current={inAddress}
-                // Over the chat it was just asked for: the keyboard goes there.
-                takesFocus={!wide}
-                onOpen={(conversation) => {
-                  setOver(false);
-                  go(conversationPath(conversation));
-                }}
-                onDeleted={(conversation) => {
-                  if (conversation === id) {
-                    // Nothing is left to show, or to go back to.
-                    startNew({ replace: true });
-                  }
-                }}
-              />
-            </aside>
+              <PlusIcon />
+              New chat
+            </button>
           )}
-          <main className="flex min-w-0 flex-1 flex-col">
+        </div>
+      </header>
+      <div className="relative flex min-h-0 flex-1">
+        {me !== undefined && (
+          <>
+            {listShown && !wide && (
+              // Over a narrow window's chat, the rest of the screen closes the list.
+              <button
+                type="button"
+                aria-label="Close the conversations"
+                tabIndex={-1}
+                onClick={() => {
+                  setOver(false);
+                }}
+                className="absolute inset-0 z-10 cursor-default bg-black/40"
+              />
+            )}
+            {listShown && (
+              <aside
+                className={`flex w-72 shrink-0 flex-col border-r border-border bg-sidebar ${
+                  wide
+                    ? ""
+                    : "absolute inset-y-0 left-0 z-20 max-w-[85%] shadow-xl"
+                }`}
+              >
+                <Sidebar
+                  list={list}
+                  current={inAddress}
+                  // Over the chat it was just asked for: the keyboard goes there.
+                  takesFocus={!wide}
+                  guest={me.is_guest}
+                  onChosen={() => {
+                    setOver(false);
+                  }}
+                  onDeleted={(conversation) => {
+                    if (conversation === id && place.kind === "chat") {
+                      // Nothing is left to show, or to go back to.
+                      startNew({ replace: true });
+                    }
+                  }}
+                />
+              </aside>
+            )}
+          </>
+        )}
+        <main className="flex min-w-0 flex-1 flex-col">
+          {place.kind !== "chat" ? (
+            <SessionPlace
+              place={place.kind}
+              session={session}
+              hasConversations={(list.items?.length ?? 0) > 0}
+              onEntered={enter}
+              onLoggedOut={startOver}
+            />
+          ) : me === undefined ? (
+            <SessionStatus session={session} />
+          ) : (
             <Current
               id={id}
               // A conversation this page started, and still shows, is already on it:
@@ -182,10 +249,67 @@ export function ChatApp() {
               onStartNew={startNew}
               onStartOver={startOver}
             />
-          </main>
-        </div>
-      </SessionGate>
+          )}
+        </main>
+      </div>
     </div>
+  );
+}
+
+/** Whose session it is, in the header: where a guest logs in or signs up, and where
+ * an account sees to itself. */
+function Who({
+  me,
+  canLogIn,
+  at,
+  onFollow,
+}: {
+  me: Me | undefined;
+  /** Whether to offer logging in although nobody has a session. */
+  canLogIn: boolean;
+  /** The place on the page: no link leads to where one already is. */
+  at: Place["kind"];
+  onFollow: () => void;
+}) {
+  if (me === undefined) {
+    return canLogIn && at !== "login" ? (
+      <InAppLink href={LOGIN} className={HEADER_BUTTON}>
+        Log in
+      </InAppLink>
+    ) : null;
+  }
+  if (me.is_guest) {
+    return (
+      <>
+        {at !== "signup" && (
+          <InAppLink
+            href={SIGNUP}
+            onFollow={onFollow}
+            // In a narrow window it gives way: the list and the login form lead to it.
+            className={`max-sm:hidden ${HEADER_BUTTON}`}
+          >
+            Sign up
+          </InAppLink>
+        )}
+        {at !== "login" && (
+          <InAppLink href={LOGIN} onFollow={onFollow} className={HEADER_BUTTON}>
+            Log in
+          </InAppLink>
+        )}
+      </>
+    );
+  }
+  return (
+    <InAppLink
+      href={ACCOUNT}
+      onFollow={onFollow}
+      aria-label={`Account: ${me.email ?? ""}`}
+      title="Your account"
+      className={HEADER_BUTTON}
+    >
+      <PersonIcon />
+      <span className="max-w-48 truncate max-sm:hidden">{me.email}</span>
+    </InAppLink>
   );
 }
 

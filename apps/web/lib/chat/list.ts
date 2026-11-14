@@ -15,12 +15,13 @@ import {
 } from "@/lib/api/client";
 import type { ConversationList, ConversationSummary } from "@/lib/api/client";
 
-/** A page of the list is held under whose list it is, and where the page before it
- * ended. So a list never outlives its owner's session, and the pages follow from each
- * other: when the first one changes, the ones after it are read from its new end. */
+/** A page of the list is held under the session it was read in, and where the page
+ * before it ended. So a list never outlives its session, and the pages follow from
+ * each other: when the first one changes, the ones after it are read from its new
+ * end. */
 type Page = readonly [
   what: "conversations",
-  owner: string,
+  holder: string,
   after: string | null,
 ];
 
@@ -44,22 +45,24 @@ export interface Conversations {
   remove: (id: string) => Promise<void>;
 }
 
-/** The conversations of `owner`, an account's id. Nothing is read while there is no
- * owner: before the session is known. */
-export function useConversations(owner: string | null): Conversations {
+/** The conversations of whoever has the session. `holder` is what the session's data
+ * is held under (`Session.holder`): it changes with every session the page has, even
+ * when the same account logs in again, so nothing read earlier is shown as today's.
+ * Nothing is read while there is no session. */
+export function useConversations(holder: string | null): Conversations {
   const { data, error, size, setSize, mutate, isValidating } = useSWRInfinite<
     ConversationList,
     unknown
   >(
     (index: number, before: ConversationList | null): Page | null => {
-      if (owner === null) {
+      if (holder === null) {
         return null;
       }
       if (index === 0) {
-        return ["conversations", owner, null];
+        return ["conversations", holder, null];
       }
       const after = before?.next_cursor ?? null;
-      return after === null ? null : ["conversations", owner, after];
+      return after === null ? null : ["conversations", holder, after];
     },
     ([, , after]: Page) => listConversations(after),
     // A failure is shown, with a button. The list is also read again whenever the

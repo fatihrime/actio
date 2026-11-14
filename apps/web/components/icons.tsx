@@ -39,6 +39,16 @@ export function PlusIcon() {
   );
 }
 
+/** A head and shoulders: the account. */
+export function PersonIcon() {
+  return (
+    <Icon>
+      <circle cx="8" cy="5.5" r="2.75" />
+      <path d="M2.75 13.5c.6-2.6 2.6-4 5.25-4s4.65 1.4 5.25 4" />
+    </Icon>
+  );
+}
+
 /** A pencil: rename. */
 export function PencilIcon() {
   return (

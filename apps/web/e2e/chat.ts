@@ -52,9 +52,59 @@ export class Chat {
   get newChat(): Locator {
     return this.page.getByRole("button", { name: "New chat" });
   }
+  /** The top of the page, where it says whose session this is. */
+  get header(): Locator {
+    return this.page.getByRole("banner");
+  }
+  /** The middle of the page: the chat, or one of the forms for the session. */
+  get main(): Locator {
+    return this.page.getByRole("main");
+  }
+  /** The header's link to log in: there for a guest. */
+  get logInLink(): Locator {
+    return this.header.getByRole("link", { name: "Log in" });
+  }
+  get email(): Locator {
+    return this.page.getByLabel("Email address");
+  }
+  /** The one password box of the forms that log in and sign up. */
+  get password(): Locator {
+    return this.page.getByLabel("Password", { exact: true });
+  }
+
+  /** The header's link to an account's own page: there once its owner is logged in. */
+  accountLink(email: string): Locator {
+    return this.header.getByRole("link", { name: `Account: ${email}` });
+  }
 
   async open(path = "/"): Promise<void> {
     await this.page.goto(path);
+  }
+
+  /** Make the guest of this browser an account, through the form. */
+  async signUp(email: string, password: string): Promise<void> {
+    await this.header.getByRole("link", { name: "Sign up" }).click();
+    await this.email.fill(email);
+    await this.password.fill(password);
+    await this.main.getByRole("button", { name: "Sign up" }).click();
+    await expect(this.accountLink(email)).toBeVisible();
+  }
+
+  /** Fill in the login form and send it. Does not wait for what comes of it. */
+  async logIn(email: string, password: string): Promise<void> {
+    await this.logInLink.click();
+    await this.email.fill(email);
+    await this.password.fill(password);
+    await this.main.getByRole("button", { name: "Log in" }).click();
+  }
+
+  /** Log out of this browser, from the account's page. */
+  async logOut(email: string): Promise<void> {
+    await this.accountLink(email).click();
+    await this.page
+      .getByRole("button", { name: "Log out", exact: true })
+      .click();
+    await expect(this.logInLink).toBeVisible();
   }
 
   /** Type a question and send it. Does not wait for the answer. */

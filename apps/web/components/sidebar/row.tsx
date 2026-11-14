@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { MouseEvent } from "react";
 
 import { BinIcon, PencilIcon } from "@/components/icons";
+import { InAppLink } from "@/components/in-app-link";
 import type { ConversationSummary } from "@/lib/api/client";
 import { conversationPath } from "@/lib/location";
 
@@ -36,6 +36,7 @@ export function Row({
   conversation: ConversationSummary;
   /** Whether this is the conversation on the page. */
   current: boolean;
+  /** Called when the link has opened it. */
   onOpen: () => void;
   /** Both say whether it was done. What went wrong is shown by whoever does it. */
   onRename: (title: string) => Promise<boolean>;
@@ -59,22 +60,6 @@ export function Row({
       goBackTo.current = null;
     }
   }, [mode]);
-
-  function open(event: MouseEvent) {
-    // A click with a modifier key, or with another button, is the browser's: it opens
-    // the conversation in a new tab or window, by the link's own address.
-    if (
-      event.button !== 0 ||
-      event.metaKey ||
-      event.ctrlKey ||
-      event.shiftKey ||
-      event.altKey
-    ) {
-      return;
-    }
-    event.preventDefault();
-    onOpen();
-  }
 
   async function save(typed: string) {
     const title = typed.trim();
@@ -136,16 +121,16 @@ export function Row({
   }
   return (
     <li className="group relative">
-      <a
+      <InAppLink
         href={conversationPath(conversation.id)}
-        onClick={open}
+        onFollow={onOpen}
         aria-current={current ? "page" : undefined}
         title={label}
         // Room for the two buttons, when they show.
         className="peer block truncate rounded-lg px-3 py-2 text-sm group-focus-within:pr-16 group-hover:bg-muted group-hover:pr-16 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring aria-[current=page]:bg-muted aria-[current=page]:pr-16 aria-[current=page]:font-medium"
       >
         {label}
-      </a>
+      </InAppLink>
       {/* Shown for the row the pointer or the keyboard is on, and for the conversation
           on the page: a finger has no pointer to hover with. Always there for the
           keyboard and for screen readers. */}

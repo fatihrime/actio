@@ -1,8 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import { conversationIn, conversationPath, go } from "./location";
+import { conversationIn, conversationPath, go, placeIn } from "./location";
 
 const ID = "01900000-0000-7000-8000-0000000000c1";
+
+describe("placeIn", () => {
+  it("knows the three places for the session", () => {
+    expect(placeIn("/login")).toEqual({ kind: "login" });
+    expect(placeIn("/signup")).toEqual({ kind: "signup" });
+    expect(placeIn("/account")).toEqual({ kind: "account" });
+    expect(placeIn("/login/")).toEqual({ kind: "login" });
+  });
+
+  it("takes everything else for the chat, with the conversation it names", () => {
+    expect(placeIn("/")).toEqual({ kind: "chat", conversation: null });
+    expect(placeIn(`/c/${ID}`)).toEqual({ kind: "chat", conversation: ID });
+    expect(placeIn("/login/more")).toEqual({
+      kind: "chat",
+      conversation: null,
+    });
+  });
+});
 
 describe("conversationIn", () => {
   it("reads the conversation a path names", () => {
