@@ -16,6 +16,7 @@ import pytest
 
 from actio import catalog as catalogs
 from actio.catalog import CatalogError, CatalogFile, ModelStatus, UnknownModelError, read_file
+from actio_fakellm.app import DEFAULT_MODELS as FAKE_MODELS
 from actio_fakellm.app import create_app as create_fake_llm
 from actio_llm import Ollama, OpenAICompatible
 
@@ -105,6 +106,20 @@ def test_the_file_in_the_repository_is_valid() -> None:
     standard = file.models["standard"]
     assert file.providers[standard.provider].kind == "ollama"
     assert standard.model == "qwen3.5:4b-q4_K_M"
+
+
+def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() -> None:
+    """What `make e2e` starts with. The web app asks for the default model, and must get
+    one there too: the fake, which the tests script."""
+    file = read_file(ROOT / "deploy" / "e2e" / "config" / "models.toml")
+
+    assert file.default == read_file(ROOT / "config" / "models.toml").default
+    standard = file.models[file.default]
+    provider = file.providers[standard.provider]
+    assert provider.kind == "openai-compatible"
+    assert provider.url == "http://fakellm:8100/v1"  # the container's name and port
+    assert standard.model in FAKE_MODELS
+    assert standard.thinking is True  # so a test can ask for reasoning
 
 
 def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:

@@ -3,7 +3,9 @@
 compose.yaml is the production-shaped stack behind `make up`, and must follow every
 rule. compose.dev.yaml, the overlay behind `make dev`, publishes the data services'
 ports for the native processes, so it is held to the rule that matters there: those
-ports listen on 127.0.0.1 only.
+ports listen on 127.0.0.1 only. compose.e2e.yaml, the overlay behind `make e2e`, adds a
+fake model as one more container: the stack it makes is held to every rule again, so
+what the end-to-end tests drive is locked down like what people run.
 """
 
 import json
@@ -16,7 +18,7 @@ from typing import Any
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-DOCKERFILES = ["apps/api/Dockerfile", "apps/web/Dockerfile"]
+DOCKERFILES = ["apps/api/Dockerfile", "apps/web/Dockerfile", "packages/fakellm/Dockerfile"]
 DATA_SERVICES = ["postgres", "valkey"]
 # Containers that do one thing and exit. Listed by name on purpose: adding one here is
 # a decision, because a job is exempt from the health check rule.
@@ -240,3 +242,82 @@ def test_dev_overlay_publishes_ports_only_on_localhost() -> None:
     }
 
     assert host_ips == {"127.0.0.1"}
+
+
+# --- The stack the end-to-end tests drive: compose.yaml with compose.e2e.yaml ---------
+
+
+@pytest.fixture(scope="module")
+def e2e() -> dict[str, Any]:
+    return resolved_config("compose.yaml", "compose.e2e.yaml")
+
+
+def test_the_e2e_stack_is_the_real_one_with_a_fake_model_added(
+    stack: dict[str, Any], e2e: dict[str, Any]
+) -> None:
+    """Tests that pass on another stack than the one people run would prove little."""
+    assert set(e2e["services"]) == set(stack["services"]) | {"fakellm"}
+    for name in ("caddy", "web", "migrate", "postgres", "valkey"):
+        assert e2e["services"][name] == stack["services"][name]
+
+
+def test_the_e2e_stack_follows_the_same_rules(e2e: dict[str, Any]) -> None:
+    published = {name: svc["ports"] for name, svc in e2e["services"].items() if svc.get("ports")}
+    unpinned = [
+        name
+        for name, svc in e2e["services"].items()
+        if "build" not in svc and "@sha256:" not in svc["image"]
+    ]
+    problems = [
+        f"{name}: {problem}"
+        for name, svc in e2e["services"].items()
+        for problem in hardening_problems(svc, is_job=name in ONE_SHOT_JOBS)
+    ]
+    on_the_edge = {
+        name
+        for name, svc in e2e["services"].items()
+        if name not in ONE_SHOT_JOBS and set(svc["networks"]) & {"edge"}
+    }
+
+    assert list(published) == ["caddy"]
+    assert {port["host_ip"] for port in published["caddy"]} == {"127.0.0.1"}
+    assert unpinned == []
+    assert problems == []
+    # The API still trusts the address that only Caddy can have written (see above).
+    assert on_the_edge == {"caddy", "web", "api"}
+
+
+def test_the_fake_model_is_reached_by_the_api_alone_and_has_no_way_out(
+    e2e: dict[str, Any],
+) -> None:
+    internal = {name for name, network in e2e["networks"].items() if network.get("internal")}
+    its_networks = set(e2e["services"]["fakellm"]["networks"])
+    sharing_one = {
+        name for name, svc in e2e["services"].items() if set(svc["networks"]) & its_networks
+    }
+
+    assert its_networks <= internal
+    assert sharing_one == {"api", "fakellm"}
+    assert e2e["services"]["api"]["depends_on"]["fakellm"]["condition"] == "service_healthy"
+
+
+def test_the_e2e_stack_reads_its_own_models_file_where_the_api_expects_one(
+    stack: dict[str, Any], e2e: dict[str, Any]
+) -> None:
+    """The overlay swaps the folder that is mounted, not the place it is mounted at.
+    What the file says is checked by the API's own tests, which can read it."""
+    [usual] = stack["services"]["api"]["volumes"]
+    [mount] = e2e["services"]["api"]["volumes"]
+
+    assert Path(mount["source"]) == ROOT / "deploy" / "e2e" / "config"
+    assert (Path(mount["source"]) / "models.toml").is_file()
+    assert mount["target"] == usual["target"]
+    assert mount["read_only"] is True
+
+
+def test_no_test_meets_a_rate_limit_made_for_people(e2e: dict[str, Any]) -> None:
+    """Every end-to-end test is a new guest, and all of them come from one address."""
+    environment = e2e["services"]["api"]["environment"]
+
+    assert environment["ACTIO_LIMIT_GUESTS_PER_ADDRESS"] == "100000/hour"
+    assert environment["ACTIO_LIMIT_TURNS_PER_USER"] == "100000/hour"

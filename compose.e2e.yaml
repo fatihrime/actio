@@ -1,0 +1,50 @@
+# Overlay for `make e2e`, on top of compose.yaml: the stack as `make up` runs it, with a
+# fake model in Ollama's place. The end-to-end tests (apps/web/e2e) drive it in a real
+# browser. See docs/adr/0017-end-to-end-tests-on-the-real-stack.md.
+#
+# scripts/e2e.sh starts it under its own project name and port, so it has its own
+# containers, network and data, beside whatever `make up` or `make dev` is running.
+#
+# The rules of compose.yaml hold here too, and deploy/tests/test_compose_policy.py
+# checks them on the two files together.
+services:
+  # Answers "Echo: <the question>", and does what a question's directives say: reason
+  # first, fail, break off, take its time. So a test scripts the model by typing.
+  fakellm:
+    build:
+      context: .
+      dockerfile: packages/fakellm/Dockerfile
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: fakellm
+    networks: [models]
+    mem_limit: 128m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    environment:
+      # Every test is a new visitor, and all of them come from one address. The limits
+      # themselves are tested where a clock can be moved: apps/api/tests.
+      ACTIO_LIMIT_GUESTS_PER_ADDRESS: 100000/hour
+      ACTIO_LIMIT_TURNS_PER_USER: 100000/hour
+    volumes:
+      # In place of ./config: a models file that offers the fake, under the same name.
+      - ./deploy/e2e/config:/app/config:ro
+    networks: [models]
+    depends_on:
+      fakellm:
+        condition: service_healthy
+
+networks:
+  # The API and the model. Internal, like `backend`: the fake needs no way out.
+  models:
+    internal: true

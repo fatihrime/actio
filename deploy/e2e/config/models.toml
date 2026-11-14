@@ -1,0 +1,22 @@
+# The models the end-to-end test stack offers (`make e2e`): one, and it is the fake.
+#
+# compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API
+# reads this file in place of config/models.toml. "standard" is the same name as there:
+# the web app asks for the default model and never learns that this one only echoes.
+# See packages/fakellm/README.md for what it answers, and how a test scripts it.
+
+default = "standard"
+
+[providers.fake]
+kind = "openai-compatible"
+# The fakellm container, by its name on the stack's `models` network.
+url = "http://fakellm:8100/v1"
+
+[models.standard]
+title = "Fake model"
+provider = "fake"
+model = "fake-chat"
+context_window = 8192
+max_output_tokens = 2048
+# So the tests can ask for reasoning, which the fake writes on request: [[think: ...]].
+thinking = true

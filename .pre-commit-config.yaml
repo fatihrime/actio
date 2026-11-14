@@ -104,6 +104,12 @@ repos:
         language: unsupported
         files: ^(compose(\.dev)?\.yaml|\.env\.example)$
         pass_filenames: false
+      - id: compose-config-e2e
+        name: docker compose config (the end-to-end stack)
+        entry: env POSTGRES_PASSWORD=placeholder VALKEY_PASSWORD=placeholder docker compose --file compose.yaml --file compose.e2e.yaml config --quiet
+        language: unsupported
+        files: ^(compose(\.e2e)?\.yaml|\.env\.example)$
+        pass_filenames: false
 
   # GitHub Actions workflows: correctness (actionlint), then security (zizmor).
   - repo: https://github.com/rhysd/actionlint
