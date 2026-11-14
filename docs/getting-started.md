@@ -42,7 +42,12 @@ Then open <http://localhost:8080> and ask something. No account is needed: a fir
     - A picture an answer points at is not fetched, and HTML in an answer is shown as text. A model's words can come from anywhere, so they can't make your browser do things ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
 - **The page stays at the newest words** while an answer is written. Scroll up to read, and it leaves you there; the arrow at the bottom takes you back.
 - **Think before answering** has the model reason first, and shows its reasoning above the answer, folded away.
-- **A conversation has an address,** `/c/…`, once its first question is sent: reload the page, or come back to it with the browser's Back button. **New chat** starts another. A list of your conversations isn't there yet.
+- **A conversation has an address,** `/c/…`, once its first question is sent: reload the page, or come back to it with the browser's Back button. **New chat** starts another.
+- **Your conversations are listed beside the chat,** the one you continued last on top, each under its first question.
+    - The pencil renames one, and the bin deletes it, after asking: there is no way back.
+    - Opening another conversation while an answer is being written stops that answer, like **Stop** ([ADR 0018](adr/0018-the-list-of-conversations-is-the-servers.md)).
+    - The button at the top left puts the list away. In a narrow window it brings the list up over the chat.
+    - A guest's conversations last as long as the guest: a day.
 - **While the model is missing or Ollama isn't running, the page says so,** with the command above, and notices by itself when that changes.
 
 `make smoke` notes a model whose server doesn't answer too. The API says it in more detail: with a session, `GET /api/models` lists each model as `ready`, `missing` from its server, or its server as `unreachable`.
