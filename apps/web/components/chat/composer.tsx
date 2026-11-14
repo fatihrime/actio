@@ -45,7 +45,7 @@ export function Composer({
   return (
     <form
       onSubmit={submit}
-      className="rounded-2xl border border-zinc-300 bg-white p-2 shadow-sm focus-within:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:focus-within:border-zinc-400"
+      className="rounded-2xl border border-input bg-card p-2 shadow-sm focus-within:border-ring"
     >
       <textarea
         aria-label="Message"
@@ -58,20 +58,20 @@ export function Composer({
         onKeyDown={onKeyDown}
         // As tall as its text, up to a limit, where it scrolls. Browsers that don't
         // know `field-sizing` keep the two rows.
-        className="field-sizing-content max-h-60 w-full resize-none bg-transparent px-2 py-1.5 outline-none placeholder:text-zinc-400"
+        className="field-sizing-content max-h-60 w-full resize-none bg-transparent px-2 py-1.5 outline-none placeholder:text-muted-foreground"
       />
       <div className="flex items-center justify-between gap-3 px-1">
         {thinking === null ? (
           <span />
         ) : (
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-600 select-none dark:text-zinc-400">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground select-none">
             <input
               type="checkbox"
               checked={thinking.on}
               onChange={(event) => {
                 thinking.set(event.target.checked);
               }}
-              className="size-4 accent-zinc-700 dark:accent-zinc-300"
+              className="size-4 accent-primary"
             />
             Think before answering
           </label>
@@ -80,7 +80,7 @@ export function Composer({
           <button
             type="button"
             onClick={onStop}
-            className="rounded-lg border border-zinc-300 px-4 py-1.5 text-sm font-medium hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500 dark:border-zinc-600 dark:hover:bg-zinc-800"
+            className="rounded-lg border border-input px-4 py-1.5 text-sm font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >
             Stop
           </button>
@@ -89,7 +89,7 @@ export function Composer({
             type="submit"
             disabled={!sendable}
             title={blocked ?? undefined}
-            className="rounded-lg bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+            className="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-40"
           >
             Send
           </button>

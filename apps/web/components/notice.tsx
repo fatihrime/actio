@@ -1,10 +1,8 @@
 import type { ReactNode } from "react";
 
 const TONES = {
-  plain:
-    "border-zinc-200 bg-zinc-50 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300",
-  warning:
-    "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100",
+  plain: "border-border bg-sidebar text-foreground",
+  warning: "border-warning-border bg-warning text-warning-foreground",
 };
 
 /** A short message about something that needs the person's attention, with the
