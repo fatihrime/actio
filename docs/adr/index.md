@@ -25,5 +25,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0013](0013-the-models-on-offer-are-a-file.md) | The models on offer are a file | Accepted |
 | [0014](0014-turns-streamed-in-the-ai-sdks-format.md) | Turns: a question, an answer streamed in the AI SDK's format, and a record of how it went | Accepted |
 | [0015](0015-the-web-chat-calls-the-api-from-the-browser.md) | The web chat: the browser calls the API, and the server stays the truth | Accepted |
+| [0016](0016-answers-shown-as-markdown.md) | Answers are shown as markdown, which can't act on the page or its reader | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.

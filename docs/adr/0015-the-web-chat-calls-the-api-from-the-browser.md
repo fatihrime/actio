@@ -121,3 +121,12 @@ After Stop, the page showed what the server had kept within 0.1 s.
 - **How to reverse it:**
   - **server rendering** can be added for one kind of page, such as a shared conversation, without touching the chat: the API doesn't care who calls it;
   - **ready-made components** could replace these one by one, after changing the rule on copied code. Nothing outside `apps/web/components` knows how they are made.
+
+## Revisions
+
+### 2026-11-14: answers are shown as markdown
+
+The first item under "Not done yet" is done. How answers are shown, and what they are kept from doing, is its own decision: [ADR 0016](0016-answers-shown-as-markdown.md).
+
+- **The page no longer scrolls on each new message.** It now watches the size of what is shown, because formatted answers grow after their words have arrived.
+- **Why now, and not planned at the start:** following by message was enough for plain text, and what formatted answers need wasn't known until they were on the page.
