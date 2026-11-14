@@ -1,6 +1,44 @@
 @import "tailwindcss";
 
+/* Streamdown, which shows answers as markdown, styles what it renders with Tailwind
+   classes. Tailwind only writes the classes it finds, so it has to look there too. */
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+@source "../node_modules/@streamdown/math/dist/*.js";
+@source "../node_modules/@streamdown/mermaid/dist/*.js";
+
 /* Follow the operating system's light or dark setting. */
 :root {
   color-scheme: light dark;
+}
+
+/* A border with no colour of its own takes the border colour below, not the text's.
+   Streamdown is written for that. */
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--color-border);
+  }
+}
+
+/* The colours by role. Streamdown expects these names (they are shadcn/ui's), and the
+   app's own components use them too. Each is a light and a dark colour, and the
+   browser picks by the setting above. The page itself keeps the browser's own
+   background and text colours. */
+@theme {
+  --color-background: Canvas;
+  --color-foreground: CanvasText;
+  --color-muted: light-dark(var(--color-zinc-100), var(--color-zinc-800));
+  --color-muted-foreground: light-dark(
+    var(--color-zinc-500),
+    var(--color-zinc-400)
+  );
+  --color-border: light-dark(var(--color-zinc-200), var(--color-zinc-800));
+  --color-primary: light-dark(var(--color-zinc-900), var(--color-zinc-100));
+  --color-primary-foreground: light-dark(
+    var(--color-zinc-50),
+    var(--color-zinc-900)
+  );
+  --color-sidebar: light-dark(var(--color-zinc-50), var(--color-zinc-900));
 }

@@ -2,7 +2,7 @@
 
 Actio's own code is [MIT-licensed](LICENSE). Its dependencies are declared in the `pyproject.toml` files and `uv.lock` (Python), and in the `package.json` files and `pnpm-lock.yaml` (JavaScript). They are installed from the package registries: none of their code is copied into this repository.
 
-This file records what Actio's two container images ship. The API image was checked on 2026-11-11 and the web image on 2026-11-13, from the installed packages' own metadata and from inside the built images.
+This file records what Actio's two container images ship. The API image was checked on 2026-11-11 and the web image on 2026-11-14, from the installed packages' own metadata and from inside the built images.
 
 ## Components under the LGPL
 
@@ -35,7 +35,21 @@ Actio allows LGPL libraries that are used unmodified, as separate libraries ([AD
 | PSF-2.0 | typing-extensions |
 | The Unlicense (public domain) | email-validator |
 
-**The web image** (JavaScript, production dependencies only): 59 packages under MIT, including Next.js and React; 13 under Apache-2.0, including the AI SDK (`ai`, `@ai-sdk/react`); and the rest under ISC, BSD-3-Clause and 0BSD. `json-schema` is offered under AFL-2.1 or BSD-3-Clause, and is used under BSD-3-Clause. `caniuse-lite`, the browser-support data used at build time, is under CC-BY-4.0.
+**The web image** (JavaScript, production dependencies only) ships its server's packages, and the scripts it serves to browsers, which are built from the same dependencies. Those are about 330 packages, most of them brought in by what shows answers as markdown ([ADR 0016](docs/adr/0016-answers-shown-as-markdown.md)):
+
+| License | Packages |
+|---|---|
+| MIT | 260, including Next.js, React, Shiki, KaTeX and Mermaid |
+| ISC | 41, most of them D3's |
+| Apache-2.0 | 19, including the AI SDK (`ai`, `@ai-sdk/react`) and Streamdown |
+| BSD-3-Clause | 7 |
+| BSD-2-Clause | `entities` |
+| 0BSD | `tslib` |
+| The Unlicense (public domain) | `robust-predicates` |
+
+- `dompurify`, which Mermaid cleans its diagrams with, is offered under MPL-2.0 or Apache-2.0, and is used under Apache-2.0.
+- `json-schema` is offered under AFL-2.1 or BSD-3-Clause, and is used under BSD-3-Clause.
+- `caniuse-lite`, the browser-support data used at build time, is under CC-BY-4.0.
 
 ## Not covered here
 

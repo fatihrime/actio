@@ -42,6 +42,7 @@ flowchart LR
     - **A first visit starts a guest session,** so you can ask at once. `/` is a new conversation, and `/c/<id>` a stored one.
     - **An answer streams into the page** through the AI SDK's `useChat`. You can stop it, try a failed one again, reword a question that got no answer, and have the model show its reasoning.
     - **The server is the truth.** When an answer ends any other way than well, the page reads the conversation again and shows what is stored.
+    - **An answer is shown as the markdown it is written in:** headings, tables, coloured code, formulas and diagrams. It is a model's text, so it can do nothing else: HTML in it is shown as text, no picture is fetched, and a link opens only after you have seen its address ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
     - **Its types for the API are generated** from the API's recorded description, `apps/api/openapi.json`, so a change to the API that the page doesn't follow fails to compile.
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
     - Postgres holds five tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, and the turns in which a model answered.
@@ -82,7 +83,7 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
-- **more of the chat:** answers shown as formatted text with code and formulas, a list of your conversations, and pages to sign up and log in. Today the page shows answers as plain text, and an earlier conversation is reached by its address;
+- **more of the chat:** a list of your conversations, and pages to sign up and log in. Today an earlier conversation is reached by its address;
 - **turns that outlive their request:** today an answer stops when its reader leaves. Later a turn runs on its own, and a reader who comes back picks the stream up again;
 - **more providers:** cloud models behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them;
 - **usage limits:** session and weekly windows, enforced atomically in Valkey and recorded in a Postgres ledger. The [engine](reference/quota.md) already exists as a package, tested against a real Valkey server ([ADR 0006](adr/0006-usage-limits-engine.md)). Connecting it to the API, with the ledger, is still to come.

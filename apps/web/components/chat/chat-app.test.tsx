@@ -256,6 +256,80 @@ describe("reasoning", () => {
   });
 });
 
+describe("markdown", () => {
+  // What markdown becomes, and what it may not do, is in markdown.test.tsx. Here: that
+  // the chat shows answers through it.
+
+  it("shows an answer as markdown while it arrives, and what was kept of it", async () => {
+    // The recorded answer's first twelve events end in the middle of what is bold:
+    // "Echo: Name **two ". Its reasoning, "A *bike* has parts.", is whole by then.
+    const api = fakeApi();
+    api
+      .on(TURNS, heldAfter("markdown.sse", 12))
+      .on(CONVERSATION, (call) =>
+        json(
+          200,
+          conversation(conversationOf(call), [
+            question(sentQuestion(api), "Name **two bike** parts."),
+            answer(
+              RECORDED.answer,
+              "Echo: Name **two ",
+              sentQuestion(api),
+              turn({ status: "stopped", finish_reason: null }),
+            ),
+          ]),
+        ),
+      );
+    const user = open();
+
+    await user.click(await screen.findByLabelText("Think before answering"));
+    await ask(user, "Name **two bike** parts.");
+
+    expect(await screen.findByText("two")).toHaveClass("font-semibold");
+    expect(screen.getByText("bike").tagName).toBe("EM");
+    const arriving = screen.getByRole("article", { name: "Actio" });
+    expect(arriving).toHaveTextContent("Echo: Name two");
+    expect(arriving).not.toHaveTextContent("*");
+    // The question is shown as it was typed.
+    expect(screen.getByRole("article", { name: "You" })).toHaveTextContent(
+      "Name **two bike** parts.",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+
+    await screen.findByText("This answer was stopped before it was finished.");
+    expect(screen.getByText("two")).toHaveClass("font-semibold");
+    expect(
+      screen.getByRole("article", { name: "Actio" }),
+    ).not.toHaveTextContent("*");
+  });
+
+  it("shows a stored answer as markdown", async () => {
+    fakeApi().on(CONVERSATION, () =>
+      json(
+        200,
+        conversation(RECORDED.conversation, [
+          question(RECORDED.question, "Which parts?"),
+          answer(
+            RECORDED.answer,
+            "## Parts\n\n1. The `saddle`\n2. The chain",
+            RECORDED.question,
+          ),
+        ]),
+      ),
+    );
+
+    open(`/c/${RECORDED.conversation}`);
+
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Parts" }),
+    ).toBeVisible();
+    expect(
+      screen.getAllByRole("listitem").map((item) => item.textContent),
+    ).toEqual(["The saddle", "The chain"]);
+  });
+});
+
 describe("an answer that doesn't arrive whole", () => {
   it("explains a model's failure, and tries again when asked", async () => {
     const api = fakeApi();

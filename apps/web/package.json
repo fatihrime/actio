@@ -19,11 +19,17 @@
   },
   "dependencies": {
     "@ai-sdk/react": "4.0.170",
+    "@streamdown/code": "^2.0.0",
+    "@streamdown/math": "^1.0.3",
+    "@streamdown/mermaid": "^1.0.3",
     "ai": "7.0.166",
+    "katex": "^0.16.47",
     "next": "16.4.5",
     "openapi-fetch": "^0.17.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
+    "rehype-harden": "1.1.9",
+    "streamdown": "^2.7.1",
     "swr": "^2.5.1"
   },
   "devDependencies": {
