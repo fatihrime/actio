@@ -45,6 +45,7 @@ flowchart LR
     - **Signing up, logging in and the account are places in the same screen,** at `/signup`, `/login` and `/account`. What the page has read for one session is dropped when that session ends, so the next one starts with nothing of it ([ADR 0019](adr/0019-accounts-in-the-one-screen.md)).
     - **An answer streams into the page** through the AI SDK's `useChat`. You can stop it, try a failed one again, reword a question that got no answer, and have the model show its reasoning.
     - **The server is the truth.** When an answer ends any other way than well, the page reads the conversation again and shows what is stored.
+    - **The usage limits are the server's to count.** A meter under the list shows what the API said was used, read again after every turn. That a limit is reached, the page learns from a question being refused; it then says how long to wait, sends nothing meanwhile, and offers a model that costs nothing where there is one ([ADR 0021](adr/0021-usage-limits-in-the-page.md)).
     - **An answer is shown as the markdown it is written in:** headings, tables, coloured code, formulas and diagrams. It is a model's text, so it can do nothing else: HTML in it is shown as text, no picture is fetched, and a link opens only after you have seen its address ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
     - **Its types for the API are generated** from the API's recorded description, `apps/api/openapi.json`, so a change to the API that the page doesn't follow fails to compile.
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
@@ -89,8 +90,7 @@ The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
 - **turns that outlive their request:** today an answer stops when its reader leaves, or opens another conversation. Later a turn runs on its own, and a reader who comes back picks the stream up again;
-- **more providers:** cloud models behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them;
-- **usage limits in the page:** the API enforces them, and the chat doesn't show them yet. A meter, a countdown when a limit is reached, and the offer of a model that costs nothing come next.
+- **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them.
 
 ## Repository layout
 

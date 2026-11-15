@@ -4,7 +4,7 @@
 
 > A self-hostable, local-first AI platform: a ChatGPT/Claude-style assistant and an OpenAI- and Anthropic-compatible developer gateway, both governed by Claude-inspired usage limits whose correctness is tested.
 
-**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API holds conversations and streams a local model's answers, and there is a chat page on top of it: `make up`, open <http://localhost:8080>, and ask. Answers are formatted, with code, formulas and diagrams, and your conversations are listed beside the chat, to open, rename and delete. A guest can sign up and keep them, and log in again from anywhere. The API now holds every answer to usage limits, per session and per week; showing them in the page comes next. This README grows with each phase, and nothing below counts as done until it ships with tests.
+**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API holds conversations and streams a local model's answers, and there is a chat page on top of it: `make up`, open <http://localhost:8080>, and ask. Answers are formatted, with code, formulas and diagrams, and your conversations are listed beside the chat, to open, rename and delete. A guest can sign up and keep them, and log in again from anywhere. Every answer is held to usage limits, per session and per week, and the page shows them: a meter, the time left when a limit is reached, and a model that costs nothing to carry on with, where one is offered. This README grows with each phase, and nothing below counts as done until it ships with tests.
 
 **Documentation:** <https://fatihrime.github.io/actio/>: getting started, architecture, development and the decision records.
 
@@ -41,7 +41,8 @@ Actio tackles these problems end to end on a 16 GB laptop and free tiers.
   - A plain-Python reference model is its specification. Random sequences of requests, crashes, clock jumps and data loss run against both, and their results and stored state must match after every step.
   - In the chat's API, an answer's credits are held before a model is asked, and what it used is written to a ledger in Postgres before the counters hear of it. Valkey keeps nothing on disk: restart it, and every account's limits are counted up again from the ledger. A question that doesn't fit is refused before it is stored.
   - Measured: guessing a prompt's size from its bytes came out at under half for a page of numbers, because the model reads every digit as a token. The guess now counts digits one by one, and the provider's own count settles the bill.
-  - [The engine (ADR 0006)](docs/adr/0006-usage-limits-engine.md) · [in the chat (ADR 0020)](docs/adr/0020-usage-limits-on-turns.md) · [the rules](https://fatihrime.github.io/actio/reference/quota/) · [the tests](packages/quota/tests)
+  - The page counts nothing itself. It shows what the server counted, and learns that a limit is reached by being refused; the time to wait is taken from the length of the wait, not from a clock that may be wrong. A test in a real browser reaches a limit, carries on with a free model, and reloads to the same counts.
+  - [The engine (ADR 0006)](docs/adr/0006-usage-limits-engine.md) · [in the chat's API (ADR 0020)](docs/adr/0020-usage-limits-on-turns.md) · [in the page (ADR 0021)](docs/adr/0021-usage-limits-in-the-page.md) · [the rules](https://fatihrime.github.io/actio/reference/quota/) · [the tests](packages/quota/tests)
 
 - **A local-model client that never answers from half your prompt.**
   - Measured: Ollama has two engines. By default, one cuts a prompt that doesn't fit the model's context window, system prompt included, and still answers as if nothing happened. The other ignores the window and lets an answer run on: a small model thought for three minutes to say hello.
@@ -76,7 +77,7 @@ make dev         # starts the stack; open http://localhost:8080
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: repo, tooling, CI, docs | done |
-| 1 | Local chat + usage limits | in progress: the limits engine, the model client, the chat's API and the chat page, with formatted answers, a list of conversations and accounts, are done, and the API enforces the limits; showing them in the page is next |
+| 1 | Local chat + usage limits | in progress: the limits engine, the model client, the chat's API and the chat page, with formatted answers, a list of conversations and accounts, are done, and so are the usage limits, in the API and in the page; answers that outlive their request are next |
 | 2 | Model router + developer gateway | planned |
 | 3 | Core chat UX | planned |
 | 4 | Knowledge + web search | planned |

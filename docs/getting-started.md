@@ -82,20 +82,23 @@ An answer costs credits, and everyone has only so many: per session, which opens
 | A guest | 25,000 credits | 100,000 |
 | An account | 100,000 | 600,000 |
 
-- **Near a limit, answers get shorter.** An answer is given only as much room as is left.
-- **At a limit, a question is refused,** and told when the limit starts over: "You've reached your usage limit for this session. It resets in 3 hours." The question isn't stored, so it can be sent again then.
-- **The page doesn't show the limits yet.** The API does. With the session from the commands above:
+- **Under the list of conversations, a meter shows how much of each limit is used,** and when it resets, by your clock.
+- **On the way to a limit you are told once:** when half of it is used, three quarters, and nine tenths.
+- **Near a limit, answers get shorter.** An answer is given only as much room as is left. One that had to stop for that says so.
+- **At a limit, a question is refused.** The page says which limit was reached, when it resets, and counts down the time until then. Nothing is sent meanwhile. The question isn't stored: it is back in the box, to be sent later.
+- **A model that costs nothing can carry on.** Where the installation offers one, the page offers it at the limit, and that model answers until the limit resets. The default files offer none: see below.
+- **The API says the same.** With the session from the commands above:
 
     ```sh
     curl --silent --cookie "$jar" http://localhost:8080/api/usage
     ```
 
-    It answers with your plan, and for each limit how much is used and when it starts over.
+    It answers with your plan, and for each limit how much is used and when it starts over. The page shows exactly this, and counts nothing itself ([ADR 0021](adr/0021-usage-limits-in-the-page.md)).
 
 Prices, plans, the length of a session and the moment the week starts over are in `config/plans.toml`, which explains itself. Edit it and run `make up` or `make dev` again.
 
 - Every model in `config/models.toml` needs a price there, or the API doesn't start, and says which model is missing one.
-- A model priced at nothing is free: it uses up no credits and is never refused.
+- A model priced at nothing is free: it uses up no credits and is never refused. Offer a small one beside the default, at `input = 0` and `output = 0`, and the page offers it by its title to whoever reaches a limit: "Use Local (free)".
 - A plan that names no limits limits nothing: on a machine that is yours alone, give accounts such a plan.
 
 What was used is kept in the database, in a ledger that only ever grows. See [ADR 0020](adr/0020-usage-limits-on-turns.md).
@@ -186,7 +189,7 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 :   One of the two files in `config/` has a mistake, and the line says which. Fix it and start again. A model that is offered in `models.toml` and has no price in `plans.toml` is such a mistake.
 
 **"You've reached your usage limit"**
-:   The session's allowance, or the week's, is used up: see [Usage limits](#usage-limits). The answer says when it starts over. On your own machine, raise the limits in `config/plans.toml`, or leave them out, and run `make up` or `make dev` again.
+:   The session's allowance, or the week's, is used up: see [Usage limits](#usage-limits). The page says when it starts over, and counts down to it. On your own machine, raise the limits in `config/plans.toml`, or leave them out, and run `make up` or `make dev` again.
 
 **A question answers 503, "Usage can't be counted right now"**
 :   The API can't reach Valkey, where usage is counted, and refuses instead of answering uncounted. `/api/readyz` and `docker compose ps` show what is down.

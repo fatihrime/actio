@@ -8,7 +8,7 @@ Actio is a self-hostable, local-first AI platform. It will combine:
 
 !!! info "Status: Phase 1, local chat and usage limits"
 
-    The repository, tooling, local stack, container images and CI are in place. So is the [usage-limits engine](reference/quota.md), as a tested package that nothing calls yet. The chat that uses it comes next, then the gateway; see the [roadmap](https://github.com/fatihrime/actio#roadmap).
+    The chat works on a local model: `make up`, open the page, and ask. Answers are formatted, conversations are kept and listed, and a guest can sign up. Every answer is held to [usage limits](getting-started.md#usage-limits), counted by a [tested engine](reference/quota.md), and the page shows how much is used and what to do at a limit. Answers that outlive their request come next, then the gateway; see the [roadmap](https://github.com/fatihrime/actio#roadmap).
 
 ## Where to start
 
