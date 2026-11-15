@@ -1,4 +1,4 @@
-# The models the end-to-end test stack offers (`make e2e`): one, and it is the fake.
+# The models the end-to-end test stack offers (`make e2e`): the fake, under two names.
 #
 # compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API
 # reads this file in place of config/models.toml. "standard" is the same name as there:
@@ -20,3 +20,13 @@ context_window = 8192
 max_output_tokens = 2048
 # So the tests can ask for reasoning, which the fake writes on request: [[think: ...]].
 thinking = true
+
+# The same fake once more, as a model that costs nothing (plans.toml): what the page
+# offers to carry on with when a usage limit is reached.
+[models.local]
+title = "Local"
+provider = "fake"
+model = "fake-chat"
+context_window = 8192
+max_output_tokens = 2048
+thinking = false

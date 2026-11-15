@@ -74,6 +74,20 @@ def test_the_files_in_the_repository_price_the_models_beside_them(folder: str) -
     assert loaded.price_of("standard").output > 0
 
 
+def test_the_end_to_end_stack_has_a_limit_within_reach_and_a_model_that_costs_nothing() -> None:
+    """What its tests of the usage limits count on (apps/web/e2e/usage.spec.ts): an
+    account reaches its session's limit in a few questions, a guest never does, and
+    one model is free to carry on with."""
+    folder = ROOT / "deploy/e2e/config"
+    offered = catalog.read_file(folder / "models.toml").models
+
+    loaded = plans.load(folder / "plans.toml", models=offered)
+
+    assert loaded.free_models() == ["local"]
+    assert loaded.plan_for(is_guest=False).session_credits == 500
+    assert loaded.plan_for(is_guest=True).session_credits == 100_000
+
+
 def test_a_file_says_what_models_cost_and_what_each_plan_allows(tmp_path: Path) -> None:
     file = read_file(written(tmp_path, GOOD))
 
