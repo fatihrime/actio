@@ -1,9 +1,11 @@
 """Recorded turns: what the API streams, kept as files, for the web app's tests to read.
 
 Each scenario runs a turn with known ids and a fixed clock, and compares the stream,
-byte for byte, with a file in `fixtures/turns/`. The web app's test suite
-(`apps/web/tests/contract/`) parses the same files with the real `ai` package, the
-library the browser will read them with. So the two sides can't drift apart silently:
+byte for byte, with a file in `fixtures/turns/`. Two of the files are not streams: a
+conversation read back, and the refusal of a turn at a usage limit. The web app's test
+suite (`apps/web/tests/contract/`) parses the same files with the real `ai` package,
+the library the browser will read them with, and its component tests answer with them.
+So the two sides can't drift apart silently:
 
 - change what the API streams, and the comparison here fails;
 - record the files again, and the web app's test fails if the library can't make the
@@ -118,6 +120,37 @@ async def test_an_answer_that_passes_half_of_a_usage_limit_streams_what_was_reco
     response = await turn(browser, "How much may I still ask?")
 
     as_recorded("usage_warning.sse", response.text)
+
+
+async def test_a_question_refused_at_a_usage_limit_answers_what_was_recorded(
+    scripted: Any, plans_with: Any
+) -> None:
+    """Not a stream: the refusal a page reads when a limit is reached. It names the
+    window that is full, the moment it starts over, and the model that costs nothing:
+    here `local`, offered beside the scripted one."""
+    _, browser = await scripted(
+        TextDelta("A long answer."),
+        Finish(FinishReason.STOP, Usage(input_tokens=600, output_tokens=390)),
+        plans=plans_with(guest=(1_000, 10_000), free_models=["local"]),
+        also=["local"],
+    )
+    first = await turn(browser, "Name a bike part.")  # 990 of the session's 1,000
+    [answer] = [line for line in first.text.splitlines() if '"type":"start"' in line]
+    follow_up = {
+        "id": "01900000-0000-7000-8000-0000000000a2",
+        "parts": [{"type": "text", "text": "And one more?"}],
+    }
+
+    refused = await browser.post(
+        f"/api/conversations/{CONVERSATION}/turns",
+        json={
+            "message": follow_up,
+            "parent_id": json.loads(answer.removeprefix("data: "))["messageId"],
+        },
+    )
+
+    assert refused.status_code == 429
+    as_recorded("limit_reached.json", json.dumps(refused.json(), indent=2) + "\n")
 
 
 async def test_a_conversation_reads_back_as_it_was_recorded(api: httpx.AsyncClient) -> None:

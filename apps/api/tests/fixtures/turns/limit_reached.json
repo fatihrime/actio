@@ -1,0 +1,12 @@
+{
+  "type": "about:blank",
+  "title": "Too Many Requests",
+  "status": 429,
+  "detail": "You've reached your usage limit for this session. It resets in 5 hours.",
+  "retry_after": 18000,
+  "window": "session",
+  "resets_at": "2026-11-10T17:00:00Z",
+  "alternatives": [
+    "local"
+  ]
+}

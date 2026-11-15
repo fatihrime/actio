@@ -165,6 +165,7 @@ def plans_for_tests(
     free: bool = False,
     min_answer_tokens: int = 16,
     models: Iterable[str] = ("standard",),
+    free_models: Iterable[str] = (),
 ) -> Plans:
     """Prices and plans for the app under test.
 
@@ -172,7 +173,8 @@ def plans_for_tests(
     added up. `free=True` makes it cost nothing. `guest` and `account` are what each may
     use in a session and in a week, or `None` for no limits; by default far more than a
     test uses. `models` are the models to price: the one that nearly every catalog here
-    offers, unless a test offers others.
+    offers, unless a test offers others. `free_models` are offered beside them, and cost
+    nothing whatever `free` says.
     """
 
     def plan(title: str, allowance: tuple[int, int] | None) -> dict[str, Any]:
@@ -181,6 +183,8 @@ def plans_for_tests(
         return {"title": title, "session_credits": allowance[0], "week_credits": allowance[1]}
 
     price = 0 if free else 1_000_000
+    prices = {name: {"input": price, "output": price} for name in models}
+    prices |= {name: {"input": 0, "output": 0} for name in free_models}
     return Plans(
         PlansFile.model_validate(
             {
@@ -189,7 +193,7 @@ def plans_for_tests(
                 "session_hours": 5,
                 "week_resets": "MON 00:00 UTC",
                 "min_answer_tokens": min_answer_tokens,
-                "prices": {name: {"input": price, "output": price} for name in models},
+                "prices": prices,
                 "plans": {"guest": plan("Guest", guest), "member": plan("Member", account)},
             }
         )
@@ -205,6 +209,7 @@ class PlansWith(Protocol):
         free: bool = ...,
         min_answer_tokens: int = ...,
         models: Iterable[str] = ...,
+        free_models: Iterable[str] = ...,
     ) -> Plans: ...
 
 
@@ -245,18 +250,23 @@ class ScriptedModel:
             self.closed.set()
 
 
-def catalog_of(model: ChatProvider, *, thinking: bool = True) -> Catalog:
-    """A catalog that offers one model, `standard`, which is `model`."""
-    offered = OfferedModel(
-        name="standard",
-        title="Scripted",
-        kind="openai-compatible",
-        model="scripted-1",
-        context_window=4096,
-        max_output_tokens=512,
-        chat=model,
-    )
-    return Catalog({"standard": offered}, default="standard", thinking={"standard": thinking})
+def catalog_of(model: ChatProvider, *, thinking: bool = True, also: Iterable[str] = ()) -> Catalog:
+    """A catalog that offers one model, `standard`, which is `model`. Each name in `also`
+    is the same model offered once more, such as `local`, titled "Local"."""
+    titles = {"standard": "Scripted"} | {name: name.capitalize() for name in also}
+    offered = {
+        name: OfferedModel(
+            name=name,
+            title=title,
+            kind="openai-compatible",
+            model="scripted-1",
+            context_window=4096,
+            max_output_tokens=512,
+            chat=model,
+        )
+        for name, title in titles.items()
+    }
+    return Catalog(offered, default="standard", thinking=dict.fromkeys(offered, thinking))
 
 
 class ServerIds:
@@ -453,22 +463,29 @@ def served(serve: Serve) -> Served:
 
 class Scripted(Protocol):
     def __call__(
-        self, *script: Any, thinking: bool = True, plans: Plans | None = None
+        self,
+        *script: Any,
+        thinking: bool = True,
+        plans: Plans | None = None,
+        also: Iterable[str] = (),
     ) -> Awaitable[tuple[ScriptedModel, httpx.AsyncClient]]: ...
 
 
 @pytest.fixture
 def scripted(start_app: StartApp, settings: Settings, migrated: str) -> Scripted:
     """Call with a script to get a model that follows it, and a guest's browser on an
-    app that offers only that model."""
+    app that offers only that model: as `standard`, and under each name in `also`."""
     assert migrated
 
     async def make(
-        *script: Any, thinking: bool = True, plans: Plans | None = None
+        *script: Any,
+        thinking: bool = True,
+        plans: Plans | None = None,
+        also: Iterable[str] = (),
     ) -> tuple[ScriptedModel, httpx.AsyncClient]:
         model = ScriptedModel(*script)
         browser = await start_app(
-            settings, catalog=catalog_of(model, thinking=thinking), plans=plans
+            settings, catalog=catalog_of(model, thinking=thinking, also=also), plans=plans
         )
         await browser.post("/api/session/guest")
         return model, browser

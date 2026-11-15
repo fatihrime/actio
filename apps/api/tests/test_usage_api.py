@@ -433,6 +433,27 @@ async def test_a_model_that_costs_nothing_is_never_refused(
     assert (await windows(browser))["week"][:2] == (0, 0)
 
 
+async def test_a_refusal_names_the_model_that_costs_nothing_and_that_model_answers(
+    scripted: Any, plans_with: Any
+) -> None:
+    plans = plans_with(guest=(1_000, 10_000), free_models=["local"])
+    _, browser = await scripted(
+        TextDelta("A long answer."), used(read=600, written=390), plans=plans, also=["local"]
+    )
+    chat = Chat(browser)
+    await chat.ask()  # 990 of the session's 1,000
+    again = {"id": str(new_id()), "parts": [{"type": "text", "text": "And then?"}]}
+    question = {"message": again, "parent_id": chat.last_answer}
+
+    refused = await chat.turn(question)
+    answered = await chat.turn(question | {"model": refused.json()["alternatives"][0]})
+
+    assert (refused.status_code, refused.json()["alternatives"]) == (429, ["local"])
+    assert (answered.status_code, turn_of(answered)["model"]) == (200, "local")
+    assert turn_of(answered)["credits"] == 0
+    assert (await windows(browser))["session"][:2] == (990, 0)  # as before
+
+
 def test_a_long_wait_is_said_in_days() -> None:
     hour, day = 3_600, 86_400
 
