@@ -91,3 +91,13 @@ Actio can talk to a model through two clients: one for Ollama, one for any serve
   - one model per name, with no second choice when its server is away. Routing between providers comes with the router;
   - which accounts may use which model, and what a model costs in credits, come with the usage limits.
 - **How to reverse it:** the rest of Actio depends on `Catalog` and `OfferedModel`, not on the file. Keeping the list in the database instead changes `actio.catalog`, and nothing above it.
+
+## Revisions
+
+### 2026-11-14: a model has a price, in a file of its own
+
+"What a model costs in credits" was left for the usage limits above. It is decided in [ADR 0020](0020-usage-limits-on-turns.md):
+
+- **Prices are in a second file, `config/plans.toml`,** under the names the models have here. The models file says where a model runs and what it can hold; the plans file says what using it costs and how much each kind of account may use. They change for different reasons, and are read by different parts of the code.
+- **The two are checked against each other when the API starts.** A model without a price stops the start, and so does a price for a model that isn't offered. So offering a model now means editing two files.
+- Which accounts may use which model is still open: every account may use every model.

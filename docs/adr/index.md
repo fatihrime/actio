@@ -29,5 +29,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0017](0017-end-to-end-tests-on-the-real-stack.md) | End-to-end tests drive the real stack in a real browser, with a fake model | Accepted |
 | [0018](0018-the-list-of-conversations-is-the-servers.md) | The list of conversations is the server's: read again, never rearranged | Accepted |
 | [0019](0019-accounts-in-the-one-screen.md) | Signing up and logging in happen in the one screen, and the page forgets a session that has ended | Accepted |
+| [0020](0020-usage-limits-on-turns.md) | Usage limits on turns: credits held before an answer, and the ledger written before the counters | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.

@@ -161,3 +161,13 @@ The decision above says the model is shown the conversation "after one line that
   - **A conversation in which the date already came up keeps bringing it up,** because the model sees its own earlier answers. A new conversation starts clean.
   - **The day is the server's, in UTC.** Around midnight it can differ from the reader's.
   - **How good the instructions are is measured by hand.** It belongs in an evaluation that runs against real models, which this project doesn't have yet.
+
+### 2026-11-14: a turn is paid for
+
+"What an answer costs in credits" was left for later above, and the usage limits were said to need an estimate for turns that end without token counts. Both are decided in [ADR 0020](0020-usage-limits-on-turns.md). Nothing above is taken back; three things are added to it:
+
+- **Before a model is asked,** the transaction that writes the question and the turn also holds the credits the turn may cost. A turn that doesn't fit is answered 429, like one that comes too fast, with the usage window that is full and when it starts over. Nothing of it is stored.
+- **The stream has one chunk more,** `data-usage-warning`, sent just before `finish` by a turn that takes its account past 50, 75 or 90 percent of a limit. It is one of the library's data parts, marked `transient`: the library hands it to the page and keeps it out of the message. A stream with it is recorded, and read by the `ai` package in the web app's tests, like the others.
+- **The record of a turn gained two things:** `credits`, what it cost, and `capped_by_usage`, whether a limit left its answer less room than the model allows.
+
+A stopped turn still has no token counts of its own. What it is charged is guessed from what it wrote, and the ledger marks the guess as one.

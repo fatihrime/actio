@@ -42,6 +42,7 @@ nav = [
     { "0017. End-to-end tests on the real stack" = "adr/0017-end-to-end-tests-on-the-real-stack.md" },
     { "0018. The list of conversations is the server's" = "adr/0018-the-list-of-conversations-is-the-servers.md" },
     { "0019. Accounts in the one screen" = "adr/0019-accounts-in-the-one-screen.md" },
+    { "0020. Usage limits on turns" = "adr/0020-usage-limits-on-turns.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

@@ -68,3 +68,14 @@ The first version was specified one operation at a time: what reserve does, what
 **Why change it now:** nothing reads or writes these counters in a running system yet, so the fix is three small changes with no stored data to reconcile. Once the ledger exists, changing what "settled" means would also mean correcting rows already written.
 
 **The tests got stricter with it.** The random state machine used to allow the counters to undercount the ledger. Now they must equal it, minus only the settles the engine itself reports as lost: after Valkey lost its data, or more than 48 hours late.
+
+### 2026-11-14: the engine is in use
+
+Turns hold and settle their credits through the engine since [ADR 0020](0020-usage-limits-on-turns.md). Nothing in the engine changed for it. That record settles what this one left open:
+
+- **The ledger exists,** and is written before the counters are told, as decided above.
+- **The one error has been measured.** The decision above says a request can use more than it reserved when its prompt was longer than estimated, and that the size of that error would be measured and published. The estimate, and how far it was off on two models, is in ADR 0020.
+- **Valkey keeps nothing on disk.** "If Valkey loses a user's counters" is then every restart. A Valkey that restored an old file would bring back counters that are there and stale, which the engine has no way to notice.
+- **The time the engine is told is the application's own,** the moment a request arrived. Taking it from Valkey instead was considered and left: see ADR 0020.
+
+Still to come, as above: the nightly comparison of the two stores, and a job that settles what a process that died left held.
