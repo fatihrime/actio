@@ -9,14 +9,14 @@ Models answer in markdown: headings, lists, tables, code, formulas in LaTeX, and
 
 - **An answer arrives in pieces.** At any moment its last piece can be half of something: `**bo`, a link without its address, a block of code that isn't closed yet.
 - **A model's words are not to be trusted.** Today a model sees only what the person typed. Later it will read documents and web pages, and text in those can tell it what to write. What it writes is then shown in the browser of someone who is logged in. The known ways to use that are:
-  - a script, or HTML that covers the page;
-  - a picture whose address carries the conversation to whoever owns the address. The browser fetches a picture without being asked;
-  - a link whose words name one site while its address leads to another.
+    - a script, or HTML that covers the page;
+    - a picture whose address carries the conversation to whoever owns the address. The browser fetches a picture without being asked;
+    - a link whose words name one site while its address leads to another.
 - **Models don't write the markdown that parsers expect.** The default model (`qwen3.5:4b-q4_K_M`) was asked eight questions on 2026-11-14, and wrote:
-  - a formula between single dollar signs, `$E = mc^2$`, and a formula of its own as one line, `$$x = \frac{-b}{2a}$$`;
-  - money inside a formula with a backslash, `$4 \times 2 = \$8$`, and outside one without, `**$14**`;
-  - `<br>` in the cells of a table, on every row;
-  - a diagram with a mistake in its syntax.
+    - a formula between single dollar signs, `$E = mc^2$`, and a formula of its own as one line, `$$x = \frac{-b}{2a}$$`;
+    - money inside a formula with a backslash, `$4 \times 2 = \$8$`, and outside one without, `**$14**`;
+    - `<br>` in the cells of a table, on every row;
+    - a diagram with a mistake in its syntax.
 - **The libraries that render all this are large,** and the page should open as fast as it did.
 
 ## Options considered
@@ -24,23 +24,23 @@ Models answer in markdown: headings, lists, tables, code, formulas in LaTeX, and
 **What turns markdown into a page:**
 
 1. **react-markdown,** with plugins chosen here.
-   - Pro: the usual choice, and small.
-   - Con: it knows nothing of answers that arrive in pieces. Half-written markdown shows as its marks until it is closed, and every new piece renders the whole answer again.
+    - Pro: the usual choice, and small.
+    - Con: it knows nothing of answers that arrive in pieces. Half-written markdown shows as its marks until it is closed, and every new piece renders the whole answer again.
 2. **Streamdown** (Apache-2.0), a replacement for it made for streamed answers.
-   - Pro: it closes what is half-written, and renders again only the block that changed.
-   - Pro: code colouring (Shiki), formulas (KaTeX) and diagrams (Mermaid) come as plugins, each with a button to copy what it shows.
-   - Con: a young library with a look and words of its own, and it expects shadcn/ui's colour names.
-   - Con: as it comes, it trusts more than this project does: it obeys HTML after cleaning it, and fetches every picture.
+    - Pro: it closes what is half-written, and renders again only the block that changed.
+    - Pro: code colouring (Shiki), formulas (KaTeX) and diagrams (Mermaid) come as plugins, each with a button to copy what it shows.
+    - Con: a young library with a look and words of its own, and it expects shadcn/ui's colour names.
+    - Con: as it comes, it trusts more than this project does: it obeys HTML after cleaning it, and fetches every picture.
 
 **HTML in an answer:**
 
 1. **Obey it after cleaning it,** by the rules GitHub uses for comments. The library's default.
-   - Pro: `<details>`, `<sub>` and `<br>` work.
-   - Con: every tag and attribute that is let through is something to keep safe. The plugin that checks addresses looks at links and at pictures, and at no other tag that can fetch.
-   - Con: a model that explains HTML and forgets the backticks loses its tags: "the <b> tag" becomes "the tag", and the rest of the sentence is bold.
+    - Pro: `<details>`, `<sub>` and `<br>` work.
+    - Con: every tag and attribute that is let through is something to keep safe. The plugin that checks addresses looks at links and at pictures, and at no other tag that can fetch.
+    - Con: a model that explains HTML and forgets the backticks loses its tags: "the <b> tag" becomes "the tag", and the rest of the sentence is bold.
 2. **Show it as text.**
-   - Pro: what markdown itself can turn into is a short list, with two things in it that carry an address.
-   - Con: the few useful tags don't work, and models do write `<br>` in tables.
+    - Pro: what markdown itself can turn into is a short list, with two things in it that carry an address.
+    - Con: the few useful tags don't work, and models do write `<br>` in tables.
 
 **Pictures an answer points at:**
 
@@ -119,20 +119,20 @@ In a headless Chromium against `make up`, on 2026-11-14. Sizes are what was sent
 ## Consequences
 
 - **Easier:**
-  - what an answer may do is decided in one file, and a test fails for each rule that is loosened. Tried on 2026-11-14 with eleven planted mistakes: eight were caught at once, and the other three after their tests were made sharper;
-  - a new kind of content, such as pictures Actio makes itself, is one more allowed address.
+    - what an answer may do is decided in one file, and a test fails for each rule that is loosened. Tried on 2026-11-14 with eleven planted mistakes: eight were caught at once, and the other three after their tests were made sharper;
+    - a new kind of content, such as pictures Actio makes itself, is one more allowed address.
 - **Harder:**
-  - **about 250 more packages in the lock file,** most of them Mermaid's. All are under permissive licenses (`THIRD_PARTY_NOTICES.md`);
-  - **the library's look and words are its own.** The dialog and the buttons on code, tables and diagrams are in English, in its wording;
-  - **the rules for dollar signs are guesses.** "I have $5, you have 10$" becomes a formula, and `$ x $`, with spaces inside, stays text;
-  - **only the default model's writing was looked at.** Other models have other habits.
+    - **about 250 more packages in the lock file,** most of them Mermaid's. All are under permissive licenses (`THIRD_PARTY_NOTICES.md`);
+    - **the library's look and words are its own.** The dialog and the buttons on code, tables and diagrams are in English, in its wording;
+    - **the rules for dollar signs are guesses.** "I have $5, you have 10$" becomes a formula, and `$ x $`, with spaces inside, stays text;
+    - **only the default model's writing was looked at.** Other models have other habits.
 - **Not done yet:**
-  - **`\(…\)` and `\[…\]` are not read as formulas.** Some models write them. The parser doesn't know them, and swapping them in the text beforehand would also change code;
-  - **no Content-Security-Policy.** It would be a second lock on the same door: a browser told not to fetch from elsewhere, whatever the page says;
-  - **a footnote's number opens the dialog,** like any link;
-  - **the dialog doesn't keep the keyboard inside it,** and a copied block of code ends with a new line. Both are the library's;
-  - no setting for text written right to left;
-  - **scrolling is tested with made-up sizes,** because the simulated browser lays nothing out. It was tried in a real browser by hand, and belongs in the end-to-end tests.
+    - **`\(…\)` and `\[…\]` are not read as formulas.** Some models write them. The parser doesn't know them, and swapping them in the text beforehand would also change code;
+    - **no Content-Security-Policy.** It would be a second lock on the same door: a browser told not to fetch from elsewhere, whatever the page says;
+    - **a footnote's number opens the dialog,** like any link;
+    - **the dialog doesn't keep the keyboard inside it,** and a copied block of code ends with a new line. Both are the library's;
+    - no setting for text written right to left;
+    - **scrolling is tested with made-up sizes,** because the simulated browser lays nothing out. It was tried in a real browser by hand, and belongs in the end-to-end tests.
 - **How to reverse it:** only `components/chat/markdown.tsx` knows the library. Another renderer goes there, and the rules in `lib/chat/markdown.ts` are plugins of the kind most of them take. Loosening a rule is a line in that component, and a test to change on purpose.
 
 ## Revisions

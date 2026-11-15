@@ -19,28 +19,28 @@ The API has lasting accounts ([ADR 0010](0010-accounts-with-a-password.md)): sig
 **Where the forms are:**
 
 1. **Pages of their own,** loaded like any web page. After a login the browser loads the chat.
-   - Pro: a page has one session for its whole life. Nothing read for one session can show up in the next, by construction.
-   - Con: a guest who signs up in the middle of a conversation leaves it for another page, and comes back through a reload.
+    - Pro: a page has one session for its whole life. Nothing read for one session can show up in the next, by construction.
+    - Con: a guest who signs up in the middle of a conversation leaves it for another page, and comes back through a reload.
 2. **Dialogs over the chat.**
-   - Con: a dialog that holds the keyboard is hard to get right, and would be written here ([ADR 0018](0018-the-list-of-conversations-is-the-servers.md) decided against one for the same reason).
+    - Con: a dialog that holds the keyboard is hard to get right, and would be written here ([ADR 0018](0018-the-list-of-conversations-is-the-servers.md) decided against one for the same reason).
 3. **Places in the one screen:** `/login`, `/signup` and `/account`, where the chat otherwise is.
-   - Pro: nothing loads. After signing up, the guest is back where they were.
-   - Con: the page lives through a change of session, and has to let go of what it read for the one before.
+    - Pro: nothing loads. After signing up, the guest is back where they were.
+    - Con: the page lives through a change of session, and has to let go of what it read for the one before.
 
 **What the page does with what it has read, when the session changes:**
 
 1. **Keep it, under the account's id.** Another account's data is never shown, and the same account's is reused.
-   - Con: wrong. See "Measured": the same account can log in again in one page's life, and what was read earlier is out of date by then.
+    - Con: wrong. See "Measured": the same account can log in again in one page's life, and what was read earlier is out of date by then.
 2. **Load the page again at every change of session.** That is option 1 above.
 3. **Hold everything under the session it was read in, and drop it when that session ends.**
 
 **Whether opening `/login` starts a guest session first,** like every other address:
 
 1. **No.** The form would only ask who has the session.
-   - Pro: no guest is made for nothing.
-   - Con: two ways for the page to start, and every form would have to work in both.
+    - Pro: no guest is made for nothing.
+    - Con: two ways for the page to start, and every form would have to work in both.
 2. **Yes.** A guest made for nothing is deleted by the login that follows.
-   - Con: it uses up one of the network's new guests for the hour.
+    - Con: it uses up one of the network's new guests for the hour.
 
 **How a password is typed when it is chosen:**
 
@@ -98,16 +98,16 @@ About 60 ms of the first two is the password being hashed ([ADR 0010](0010-accou
 ## Consequences
 
 - **Easier:**
-  - a guest becomes an account without losing their place, and sees that nothing was lost;
-  - nothing on the page decides who is logged in. It shows what the API said last;
-  - a second session in a page's life starts as empty as the first.
+    - a guest becomes an account without losing their place, and sees that nothing was lost;
+    - nothing on the page decides who is logged in. It shows what the API said last;
+    - a second session in a page's life starts as empty as the first.
 - **Harder:**
-  - **whatever the page reads for someone must be held under the session,** not under a fixed name or the account's id. One place hands out what to hold it under, and one place drops it; a new reader has to use them;
-  - **an answer of the API that arrives after its session has ended** is still put away, under the session that is gone. It is never shown, and it is gone when the next session ends or the page is closed. Loading the page again at every change would rule even that out;
-  - **the page learns late that its session ended elsewhere,** when the password was changed in another browser: at its next request. The chat then says so, and offers a new session.
+    - **whatever the page reads for someone must be held under the session,** not under a fixed name or the account's id. One place hands out what to hold it under, and one place drops it; a new reader has to use them;
+    - **an answer of the API that arrives after its session has ended** is still put away, under the session that is gone. It is never shown, and it is gone when the next session ends or the page is closed. Loading the page again at every change would rule even that out;
+    - **the page learns late that its session ended elsewhere,** when the password was changed in another browser: at its next request. The chat then says so, and offers a new session.
 - **Not done yet:**
-  - a forgotten password. Without email, only whoever runs the installation can replace one, and the tool for that comes with the admin pages ([ADR 0010](0010-accounts-with-a-password.md));
-  - changing the address, and deleting the account;
-  - a second factor, passkeys, logging in through another provider ([ADR 0010](0010-accounts-with-a-password.md));
-  - a list of the browsers an account is logged in from.
+    - a forgotten password. Without email, only whoever runs the installation can replace one, and the tool for that comes with the admin pages ([ADR 0010](0010-accounts-with-a-password.md));
+    - changing the address, and deleting the account;
+    - a second factor, passkeys, logging in through another provider ([ADR 0010](0010-accounts-with-a-password.md));
+    - a list of the browsers an account is logged in from.
 - **How to reverse it:** two functions decide what happens after a change of session, `enter` and `startOver` in `components/chat/chat-app.tsx`. Made to load the page instead, they give option 1, and holding things under the session becomes unnecessary. The forms themselves wouldn't change.

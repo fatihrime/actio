@@ -134,6 +134,7 @@ files = [
     "packages/quota/src",
     "packages/quota/tests",
     "deploy/tests",
+    "scripts",
     "conftest.py",
 ]
 # Name modules by their path, so each test folder's conftest.py is a distinct module.

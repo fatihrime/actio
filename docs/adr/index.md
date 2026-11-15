@@ -1,6 +1,7 @@
 # Decisions
 
 Each architecture decision record (ADR) captures one decision that would be hard to reverse:
+
 - the context;
 - the options weighed;
 - what was chosen and why;

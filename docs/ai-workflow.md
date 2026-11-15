@@ -22,10 +22,10 @@ The rules the assistant works under live in the repository: [`AGENTS.md`](https:
 ## What keeps it honest
 
 - **Strict tools:**
-  - mypy in strict mode;
-  - typescript-eslint's strict type-checked rules;
-  - TypeScript's strict mode, with checked index access;
-  - warnings that fail the tests.
+    - mypy in strict mode;
+    - typescript-eslint's strict type-checked rules;
+    - TypeScript's strict mode, with checked index access;
+    - warnings that fail the tests.
 - **Independent checks.** The official OpenAI SDK, not just tests written alongside the code, verifies that fakellm speaks the right wire format.
 - **Rules as tests.** The containers' security rules are tests that fail when someone weakens them.
 - **Written decisions.** Each decision record lists the options weighed and the evidence behind the choice.

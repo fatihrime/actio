@@ -4,9 +4,9 @@
 
 - **Python 3.13 with uv.** One workspace (`apps/api`, `packages/fakellm`, `packages/llm` and `packages/quota`), one lockfile, and uv's own CPython build. See [ADR 0002](adr/0002-python-workspace-with-uv.md).
 - **TypeScript with pnpm 12.**
-  - pnpm also installs the pinned Node.js, 26 LTS.
-  - TypeScript stays on 6.0 and ESLint on 9 until the linters support the next major versions.
-  - See [ADR 0003](adr/0003-web-app-on-nextjs.md).
+    - pnpm also installs the pinned Node.js, 26 LTS.
+    - TypeScript stays on 6.0 and ESLint on 9 until the linters support the next major versions.
+    - See [ADR 0003](adr/0003-web-app-on-nextjs.md).
 - **Docker Compose** for the local stack and the images. See [ADR 0004](adr/0004-local-development-stack.md) and [ADR 0005](adr/0005-container-images.md).
 
 Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or npm.
@@ -23,6 +23,7 @@ Add dependencies with `uv add` or `pnpm --dir apps/web add`, never with pip or n
 | Shell scripts | shellcheck |
 | Docker Compose | `docker compose config` |
 | GitHub Actions | actionlint, zizmor |
+| This site's pages | Lists written so that the site shows them as lists: see [This site](#this-site) |
 | Secrets | gitleaks, plus a private denylist of names that must never appear |
 
 `make fmt` applies formatting and safe fixes. Don't bypass a failing check with `git commit --no-verify`; fix what it reports.
@@ -55,8 +56,8 @@ A broken rule names the file, the line and the import, and says what to do inste
 - **Coverage gate:** `make test` fails if the quota engine's test coverage drops below 90%.
 - **Docker:** the quota engine's tests need Valkey, and the API's tests need Postgres and Valkey. They start throwaway containers, from the images pinned in `compose.yaml`, once per run. Each API test gets its own empty database in that Postgres, and its own key prefix in that Valkey, so what one test counts against a limit the next doesn't inherit.
 - **Usage limits in the API's tests:** the app under test gets plans of its own, in which a credit is a token and the limits are out of reach. A test that wants to reach one asks for it: `plans_with(guest=(1_000, 10_000))`. A scripted model's last event says what a turn used, so a test chooses what the turn costs.
-  - Without Docker, `uv run pytest` skips those tests; `make test`, and so CI, sets `ACTIO_REQUIRE_DOCKER=1`, so there they fail with the reason instead.
-  - Set `ACTIO_TEST_VALKEY_URL` or `ACTIO_TEST_POSTGRES_URL` to use a server you already run.
+    - Without Docker, `uv run pytest` skips those tests; `make test`, and so CI, sets `ACTIO_REQUIRE_DOCKER=1`, so there they fail with the reason instead.
+    - Set `ACTIO_TEST_VALKEY_URL` or `ACTIO_TEST_POSTGRES_URL` to use a server you already run.
 - **One format, tested from both sides:** the API streams answers in the format of a JavaScript library, the AI SDK. The API's streams are recorded in `apps/api/tests/fixtures/turns/`: a Python test fails when the API stops producing exactly those files, and a test in `apps/web` reads the same files with the library itself. After changing the stream on purpose, record them again with `ACTIO_RECORD_TURNS=1 uv run pytest apps/api/tests/test_turn_fixtures.py`, review the difference, and run the web app's tests. See [ADR 0014](adr/0014-turns-streamed-in-the-ai-sdks-format.md).
 - **One description of the API, checked from both sides:** the API's description of itself (OpenAPI) is recorded in `apps/api/openapi.json`, and the web app's types in `apps/web/lib/api/schema.d.ts` are generated from it. A Python test fails when the API no longer matches the file, and a test in `apps/web` fails when the types no longer match it. After changing a route or a schema on purpose, run `make openapi`, which writes both again, and review the difference. The TypeScript compiler then points at every call in the web app that no longer fits. See [ADR 0015](adr/0015-the-web-chat-calls-the-api-from-the-browser.md).
 - **The chat's tests never reach a network.** They render the real components and replace `fetch` with a fake API (`apps/web/tests/fake-api.ts`). It answers with the recorded streams above, and with bodies typed by the generated types, so a test can't run on an answer the API wouldn't give. A request that a test set up no answer for fails that test.
@@ -103,3 +104,10 @@ Each push to `main` also publishes this site to GitHub Pages.
 ## This site
 
 `make docs` serves it at <http://localhost:8001> and reloads pages as you edit them. Pages are Markdown files in `docs/`, and the navigation lives in `zensical.toml`. The build is strict: a broken link or a missing page fails `make build`, and so CI.
+
+The site reads lists more strictly than GitHub does, so a list can look right there and wrong here. In a page, and in a package's README that a page includes:
+
+- **a list starts after an empty line.** Right under a line of text it is no list at all: its items run on as text;
+- **what belongs to an item is indented by four spaces a level:** a sub-item, a table, a quote, a second paragraph. With two spaces a sub-item joins the list above it.
+
+A check fails when a page breaks either rule (`scripts/check_docs_lists.py`), and names the line.

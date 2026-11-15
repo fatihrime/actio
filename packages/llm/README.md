@@ -137,10 +137,10 @@ prompt_tokens(prompt)  # 31, with what a chat template writes around the two mes
 - **Three rules:** a digit is a token, a punctuation mark is a token, and everything else is four bytes to a token. White space is free.
 - **Measured against two models' own counts,** for whole prompts, as guess ÷ count:
 
-  | | English | Turkish | Python | Japanese | JSON full of numbers |
-  |---|---|---|---|---|---|
-  | `qwen3.5:4b` | 1.05 | 0.90 | 1.11 | 1.26 | 1.06 |
-  | `granite4:micro` | 1.05 | 0.70 | 1.16 | 0.66 | 1.47 |
+    | | English | Turkish | Python | Japanese | JSON full of numbers |
+    |---|---|---|---|---|---|
+    | `qwen3.5:4b` | 1.05 | 0.90 | 1.11 | 1.26 | 1.06 |
+    | `granite4:micro` | 1.05 | 0.70 | 1.16 | 0.66 | 1.47 |
 
 - **It can be a third out either way,** because tokenizers differ. Counting bytes alone, at three to a token, came out at 0.46 for the JSON: under half. A caller that must not come out short adds its own margin, and uses the provider's count when one arrives.
 
@@ -160,8 +160,8 @@ make test-live                  # the same requests, sent to a real Ollama serve
 
 - **Recorded exchanges.** `tests/fixtures/ollama/` holds real responses from an Ollama server, one file per request. The tests replay them, and fail if the adapter no longer sends exactly the recorded request.
 - **Live mode.** `make test-live` needs `granite4:micro` on the server. It also runs what a recording can't show: that closing a stream frees the server, and that the guess at a prompt's tokens stays near the server's count.
-  - Set `ACTIO_TEST_OLLAMA_THINKING_MODEL` to a model that can reason, to test reasoning against it too.
-  - Set `ACTIO_TEST_OLLAMA_MLX_MODEL` to a model that runs on the MLX engine, to pin that engine's behaviour. On an Apple Silicon Mac, `qwen3.5:4b` serves for both.
-  - Add `ACTIO_RECORD_OLLAMA=1` to save the server's answers as the new recordings, after an Ollama upgrade.
+    - Set `ACTIO_TEST_OLLAMA_THINKING_MODEL` to a model that can reason, to test reasoning against it too.
+    - Set `ACTIO_TEST_OLLAMA_MLX_MODEL` to a model that runs on the MLX engine, to pin that engine's behaviour. On an Apple Silicon Mac, `qwen3.5:4b` serves for both.
+    - Add `ACTIO_RECORD_OLLAMA=1` to save the server's answers as the new recordings, after an Ollama upgrade.
 - **Hand-written responses** cover what a healthy server won't produce on demand: dropped connections, stalls, malformed lines, old versions.
 - **The OpenAI-compatible adapter runs against fakellm,** in process. fakellm is a separate implementation of the format, itself checked with OpenAI's official SDK, so neither is only tested against itself. Directives in the prompt script its reasoning, tool calls and failures.

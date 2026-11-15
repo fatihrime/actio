@@ -17,24 +17,24 @@ A conversation is what a person and a model said to each other. Storing it has t
 **How to keep a message that was written again:**
 
 1. **A flat list of messages; an edit overwrites.**
-   - Pro: the simplest table and the simplest queries.
-   - Con: the old version, and everything said after it, is gone.
+    - Pro: the simplest table and the simplest queries.
+    - Con: the old version, and everything said after it, is gone.
 2. **A flat list, with a version number on each message.**
-   - Pro: old versions survive.
-   - Con: a version of a message has its own follow-ups, which have versions too. Numbers alone can't say which follow-up belongs to which version.
+    - Pro: old versions survive.
+    - Con: a version of a message has its own follow-ups, which have versions too. Numbers alone can't say which follow-up belongs to which version.
 3. **A tree.** Each message points at the message it follows. Messages that follow the same one are versions of each other.
-   - Pro: one rule covers every case, to any depth. Nothing is ever overwritten.
-   - Con: a conversation is no longer "its messages in order". Reading means choosing a branch, and which branch is shown has to be stored.
+    - Pro: one rule covers every case, to any depth. Nothing is ever overwritten.
+    - Con: a conversation is no longer "its messages in order". Reading means choosing a branch, and which branch is shown has to be stored.
 
 **What a message's content is stored as:**
 
 1. **One column of text.** Reasoning, tool calls and sources don't fit.
 2. **The AI SDK's message, as it is.**
-   - Pro: nothing to convert on the way to the browser.
-   - Con: the format of the database would belong to a JavaScript library, which has changed its message format between major versions before.
+    - Pro: nothing to convert on the way to the browser.
+    - Con: the format of the database would belong to a JavaScript library, which has changed its message format between major versions before.
 3. **Actio's own list of typed parts,** with names that follow the AI SDK's.
-   - Pro: converting is copying, today. If the library changes, the conversion changes, and the stored data doesn't.
-   - Con: one more definition to keep.
+    - Pro: converting is copying, today. If the library changes, the conversion changes, and the stored data doesn't.
+    - Con: one more definition to keep.
 
 **What deleting means:**
 
@@ -71,9 +71,9 @@ A conversation is what a person and a model said to each other. Storing it has t
 
 - **Every lookup takes the account's id** and finds only that account's conversations. Someone else's conversation answers 404, exactly like one that doesn't exist.
 - **A guest's conversations go where the guest goes:**
-  - a guest who signs up keeps them: the account is the same row ([ADR 0010](0010-accounts-with-a-password.md));
-  - a guest who logs in to an account they already had takes them along: they move to that account before the guest is deleted;
-  - a guest who logs out, or whose day is over, is deleted, and the database deletes their conversations with them.
+    - a guest who signs up keeps them: the account is the same row ([ADR 0010](0010-accounts-with-a-password.md));
+    - a guest who logs in to an account they already had takes them along: they move to that account before the guest is deleted;
+    - a guest who logs out, or whose day is over, is deleted, and the database deletes their conversations with them.
 - **Deleting a conversation deletes its messages,** on every branch, at once.
 
 **The list** is ordered by `last_active_at`, the time a message was last added. Renaming doesn't change it, so a renamed conversation stays in its place. A page is fetched with a cursor that says where the previous one ended.
@@ -86,15 +86,15 @@ A conversation is what a person and a model said to each other. Storing it has t
 ## Consequences
 
 - **Easier:**
-  - writing a question again and asking for another answer are both "add a message after an earlier one". The next step needs no new storage for them;
-  - nothing a person or a model said is lost by going on;
-  - a new kind of part, such as a tool call, is a new class. No table changes.
+    - writing a question again and asking for another answer are both "add a message after an earlier one". The next step needs no new storage for them;
+    - nothing a person or a model said is lost by going on;
+    - a new kind of part, such as a tool call, is a new class. No table changes.
 - **Harder:**
-  - nobody can ask for "the messages of a conversation" any more. Every reader names a branch: the model's context, a search result, an export;
-  - a deleted conversation can't be brought back;
-  - what is kept about usage must not point at messages in a way that would block deleting them. The ledger will name what it needs by value.
+    - nobody can ask for "the messages of a conversation" any more. Every reader names a branch: the model's context, a search result, an export;
+    - a deleted conversation can't be brought back;
+    - what is kept about usage must not point at messages in a way that would block deleting them. The ledger will name what it needs by value.
 - **Not done yet:**
-  - **nothing adds messages over HTTP.** Turns do that, in the next step: they also create the conversation;
-  - titles are empty until someone renames a conversation. Automatic titles come with the worker process;
-  - no search, and no limit yet on how long a message or a conversation can be. Turns set the limits on what comes in.
+    - **nothing adds messages over HTTP.** Turns do that, in the next step: they also create the conversation;
+    - titles are empty until someone renames a conversation. Automatic titles come with the worker process;
+    - no search, and no limit yet on how long a message or a conversation can be. Turns set the limits on what comes in.
 - **How to reverse it:** a tree holds every flat list. Going back to one means keeping each conversation's shown branch and dropping the others, which loses data. The stored parts are Actio's own format, so changing it is a migration that nothing outside has to follow.

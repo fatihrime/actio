@@ -19,11 +19,11 @@ Actio can talk to a model through two clients: one for Ollama, one for any serve
 1. **In the code.** Changing a model means changing Actio.
 2. **In environment variables.** Fine for one model. A list of models, each with a server, a size and limits, doesn't fit in a line of text.
 3. **In a file.**
-   - Pro: readable as a whole, with comments, and kept in version control.
-   - Con: a change needs a restart.
+    - Pro: readable as a whole, with comments, and kept in version control.
+    - Con: a change needs a restart.
 4. **In the database,** edited on an admin page.
-   - Pro: no restart, no file access needed.
-   - Con: needs the admin pages first, and the first start needs a model before anyone can open them.
+    - Pro: no restart, no file access needed.
+    - Con: needs the admin pages first, and the first start needs a model before anyone can open them.
 
 **The file's format:**
 
@@ -49,8 +49,8 @@ Actio can talk to a model through two clients: one for Ollama, one for any serve
 
 - **A model has a name of Actio's own,** such as `standard`. Everything else asks for a model by that name. `default` says which is used when none is named.
 - **A provider is a server that runs models,** of one of two kinds:
-  - `ollama`: its address is `ACTIO_OLLAMA_URL`, not in the file, because it depends on where Actio itself runs: `127.0.0.1` natively, `host.docker.internal` from a container;
-  - `openai-compatible`: its `url` is in the file. If it needs a key, the file names the environment variable that holds it. The key itself is never in the file.
+    - `ollama`: its address is `ACTIO_OLLAMA_URL`, not in the file, because it depends on where Actio itself runs: `127.0.0.1` natively, `host.docker.internal` from a container;
+    - `openai-compatible`: its `url` is in the file. If it needs a key, the file names the environment variable that holds it. The key itself is never in the file.
 - **Each model says** its provider, its name there, its context window, and the most tokens one answer may have.
 - **The file is read when the API starts.** A mistake stops it, with one line that names the file and the fault: a misspelt setting, a model on a provider that isn't listed, an answer as large as the whole window. An unknown setting is a mistake too, so a typo can't be silently ignored.
 - `ACTIO_MODELS_FILE` says where the file is. The migration job never reads it.
@@ -62,12 +62,12 @@ Actio can talk to a model through two clients: one for Ollama, one for any serve
 - **An answer is reused for 15 seconds,** so a page can ask often.
 - Checked against Ollama 0.40.16 on 2026-11-11, through the catalog:
 
-  | Model | Status | Can reason |
-  |---|---|---|
-  | `qwen3.5:4b-q4_K_M` | ready | yes |
-  | `qwen3.5:4b` (the MLX build) | ready | yes |
-  | `granite4:micro` | ready | no |
-  | `qwen3.5:9b`, not downloaded | missing | |
+    | Model | Status | Can reason |
+    |---|---|---|
+    | `qwen3.5:4b-q4_K_M` | ready | yes |
+    | `qwen3.5:4b` (the MLX build) | ready | yes |
+    | `granite4:micro` | ready | no |
+    | `qwen3.5:9b`, not downloaded | missing | |
 
 **In the container stack:**
 
@@ -79,17 +79,17 @@ Actio can talk to a model through two clients: one for Ollama, one for any serve
 ## Consequences
 
 - **Easier:**
-  - the model behind `standard` can change, and nothing that asked for `standard` has to know;
-  - another server, such as LM Studio or vLLM, is a few lines in the file;
-  - an interface can say "run `ollama pull …`" or "start Ollama" before the first message, instead of failing at it.
+    - the model behind `standard` can change, and nothing that asked for `standard` has to know;
+    - another server, such as LM Studio or vLLM, is a few lines in the file;
+    - an interface can say "run `ollama pull …`" or "start Ollama" before the first message, instead of failing at it.
 - **Harder:**
-  - a change to the file needs a restart of the API;
-  - a provider's address is in one of two places: Ollama's in the environment, the others' in the file;
-  - on Linux, Ollama listens only on `127.0.0.1` by default, which a container can't reach. It has to be told to listen on an address the container can reach (`OLLAMA_HOST`), and that address must not be open to the network.
+    - a change to the file needs a restart of the API;
+    - a provider's address is in one of two places: Ollama's in the environment, the others' in the file;
+    - on Linux, Ollama listens only on `127.0.0.1` by default, which a container can't reach. It has to be told to listen on an address the container can reach (`OLLAMA_HOST`), and that address must not be open to the network.
 - **Not done yet:**
-  - **nothing streams an answer through the catalog yet.** Turns do, in the next step;
-  - one model per name, with no second choice when its server is away. Routing between providers comes with the router;
-  - which accounts may use which model, and what a model costs in credits, come with the usage limits.
+    - **nothing streams an answer through the catalog yet.** Turns do, in the next step;
+    - one model per name, with no second choice when its server is away. Routing between providers comes with the router;
+    - which accounts may use which model, and what a model costs in credits, come with the usage limits.
 - **How to reverse it:** the rest of Actio depends on `Catalog` and `OfferedModel`, not on the file. Keeping the list in the database instead changes `actio.catalog`, and nothing above it.
 
 ## Revisions

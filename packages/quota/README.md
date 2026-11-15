@@ -20,25 +20,30 @@ cost_credits(Usage(input_tokens=12_000, output_tokens=800), standard)  # 15.2, r
 ```
 
 **Buckets.** A user's plan gives them buckets, and a request must fit in all of them:
+
 - `session`: a rolling window. It opens at the first *admitted* request and resets 5 hours later.
 - `week`: a calendar window that resets at a fixed local time, worked out with `CalendarReset`.
-  - A calendar window only moves forward. Around a reset, a request that read its clock just before it can arrive after one that read it just after; it joins the new window instead of reopening the old one.
+    - A calendar window only moves forward. Around a reset, a request that read its clock just before it can arrive after one that read it just after; it joins the new window instead of reopening the old one.
 - Others follow the same two shapes, such as a premium-model bucket or a daily search bucket.
 
 **Admission is strict.** A request is admitted only if `used + reserved + cost ≤ limit` holds in every bucket.
+
 - An admitted request *reserves* its credits, so requests running at the same time can't overspend together.
 - A denied request changes nothing. It doesn't even open a session window, and it says when the blocking bucket resets.
 - A request that costs 0 credits, such as one to a free local model, is always admitted.
 
 **Answers shrink before they're refused.** An `Estimate` has a fixed part (the prompt) and a per-unit part (output tokens). The engine grants the most output tokens that fit, down to a minimum.
+
 - A step that may call tools sets that minimum to 512 tokens. Below it, the step is denied rather than shrunk, because a tool call cut off mid-JSON would fail anyway.
 
 **Finishing.** When the request ends, it is *settled* with what it really cost, or *released* if it was cancelled before using anything.
+
 - Usage counts toward the window that admitted the request. If that window has reset meanwhile, the new window isn't charged.
 - Retrying a reserve, settle or release is safe: the engine remembers finished requests for 48 hours.
 - Each bucket warns once per window, at 50%, 75% and 90%.
 
 **Crashes heal themselves.** A running request keeps extending its reservation. If its process dies, the reservation expires, and the next reserve for that user gives its held credits back.
+
 - Expiry gives back the hold, not the bill. If the request settles after all (it was only slow, or a cleanup job records what a crashed request had already produced), its usage is still charged.
 - An expired reservation ends like any other: the first settle or release decides how.
 

@@ -111,6 +111,17 @@ repos:
         files: ^(compose(\.e2e)?\.yaml|\.env\.example)$
         pass_filenames: false
 
+  # The documentation site's pages. Its Markdown reader is stricter about lists than
+  # GitHub's, so a list can look right there and wrong on the site: see the script.
+  - repo: local
+    hooks:
+      - id: docs-lists
+        name: lists in the documentation site's pages
+        entry: uv run python scripts/check_docs_lists.py
+        language: unsupported
+        files: (\.md|^scripts/check_docs_lists\.py)$
+        pass_filenames: false
+
   # GitHub Actions workflows: correctness (actionlint), then security (zizmor).
   - repo: https://github.com/rhysd/actionlint
     rev: 914e7df21a07ef503a81201c76d2b11c789d3fca  # frozen: v1.7.12

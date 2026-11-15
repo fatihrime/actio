@@ -24,33 +24,33 @@ Until now this was tried by hand, with throwaway scripts that drove a headless b
 **What the browser is pointed at:**
 
 1. **The web app alone,** with the API's answers made up in the browser.
-   - Pro: no containers. Fast.
-   - Con: tests the page against what its author believes the API does. The component tests already do that, better.
+    - Pro: no containers. Fast.
+    - Con: tests the page against what its author believes the API does. The component tests already do that, better.
 2. **`make dev`:** the API and the web app as native processes with hot reload.
-   - Pro: starts in seconds.
-   - Con: not what anyone runs. The development server compiles pages on demand and renders twice.
+    - Pro: starts in seconds.
+    - Con: not what anyone runs. The development server compiles pages on demand and renders twice.
 3. **The stack that `make up` runs,** in containers behind the proxy, with the model swapped.
-   - Pro: the thing itself. What passes here works for the person who types `make up`.
-   - Con: the images have to be built: a minute when little changed, several from nothing.
+    - Pro: the thing itself. What passes here works for the person who types `make up`.
+    - Con: the images have to be built: a minute when little changed, several from nothing.
 
 **Where the fake model runs:**
 
 1. **On the machine itself,** reached from the API's container like Ollama.
-   - Con: how a container reaches its host differs between macOS and Linux. On Linux the fake would have to listen on every interface of the machine.
+    - Con: how a container reaches its host differs between macOS and Linux. On Linux the fake would have to listen on every interface of the machine.
 2. **As one more container of the stack.**
-   - Pro: the same on a laptop and in CI, and it can sit on a network with no way out.
-   - Con: a third image to build.
+    - Pro: the same on a laptop and in CI, and it can sit on a network with no way out.
+    - Con: a third image to build.
 
 **How a test tells the fake what to do:**
 
 1. **A control API** on the fake: "the next answer fails".
-   - Con: state between requests, so tests can't run side by side.
+    - Con: state between requests, so tests can't run side by side.
 2. **Directives in the question,** which the fake already reads. A test types them into the chat box.
 
 **How the test stack relates to the developer's own:**
 
 1. **The same one:** `make up`, then run the tests.
-   - Con: test guests and conversations in the developer's database, and the API switched from the real model to the fake one.
+    - Con: test guests and conversations in the developer's database, and the API switched from the real model to the fake one.
 2. **A stack of its own:** another project name, another port, its own data, started and removed by the test run.
 
 **The tool:** Playwright, which the plan named. It waits for what it asserts, records a trace of a failed test, and drives the headless Chromium that the earlier hand checks used.
@@ -101,19 +101,19 @@ On a MacBook Pro (M1 Pro, 16 GB), 2026-11-14:
 ## Consequences
 
 - **Easier:**
-  - a change is tried the way a person would meet it, by one command, without a model;
-  - what an answer can't do is proved in the browser it would do it in;
-  - the next defect of timing has somewhere to show up.
+    - a change is tried the way a person would meet it, by one command, without a model;
+    - what an answer can't do is proved in the browser it would do it in;
+    - the next defect of timing has somewhere to show up.
 - **Harder:**
-  - **a third image** to keep building, though only tests use it;
-  - **`make e2e` needs Docker and a minute,** so it isn't part of `make check`. CI runs it on every push;
-  - **Playwright downloads a browser** the first time: Chromium's headless build, about 90 MB. A run that shows the browser (`--headed`) needs the whole of it, about 200 MB more. The script fetches whichever the run needs;
-  - **a test waits on a real page.** A test written carelessly fails now and then. The tool's own waiting is used throughout, and one fixed tolerance is explained where it stands (`scrolling.spec.ts`).
+    - **a third image** to keep building, though only tests use it;
+    - **`make e2e` needs Docker and a minute,** so it isn't part of `make check`. CI runs it on every push;
+    - **Playwright downloads a browser** the first time: Chromium's headless build, about 90 MB. A run that shows the browser (`--headed`) needs the whole of it, about 200 MB more. The script fetches whichever the run needs;
+    - **a test waits on a real page.** A test written carelessly fails now and then. The tool's own waiting is used throughout, and one fixed tolerance is explained where it stands (`scrolling.spec.ts`).
 - **Not done yet:**
-  - only Chromium, at a desktop's size. A phone's size comes with the mobile layout;
-  - no test with a real model. The model clients have theirs (`make test-live`);
-  - the model's server being away, and the limits being reached, are tested below this level only;
-  - the time Actio adds before an answer's first word isn't measured here yet.
+    - only Chromium, at a desktop's size. A phone's size comes with the mobile layout;
+    - no test with a real model. The model clients have theirs (`make test-live`);
+    - the model's server being away, and the limits being reached, are tested below this level only;
+    - the time Actio adds before an answer's first word isn't measured here yet.
 - **How to reverse it:** the tests are plain Playwright, and know the stack only by its address (`ACTIO_E2E_URL`). They would run against any other way of starting it. The overlay, the image and the script are three files.
 
 ## Revisions

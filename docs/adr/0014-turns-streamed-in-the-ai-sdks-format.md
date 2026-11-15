@@ -17,11 +17,11 @@ A turn is one question put to a model, and its answer. The answer takes seconds 
 **The stream's format:**
 
 1. **A format of Actio's own,** over server-sent events.
-   - Pro: belongs to nobody else.
-   - Con: the web app needs a reader for it, and loses everything `useChat` already does: growing a message piece by piece, keeping reasoning apart, reporting errors.
+    - Pro: belongs to nobody else.
+    - Con: the web app needs a reader for it, and loses everything `useChat` already does: growing a message piece by piece, keeping reasoning apart, reporting errors.
 2. **The AI SDK's "UI message stream", version 1,** written by the Python API.
-   - Pro: the library reads it as it is.
-   - Con: the format belongs to a JavaScript library. Nothing ties a Python server to it but care.
+    - Pro: the library reads it as it is.
+    - Con: the format belongs to a JavaScript library. Nothing ties a Python server to it but care.
 
 **Who chooses the ids of a new conversation and a new question:**
 
@@ -59,8 +59,8 @@ A turn is one question put to a model, and its answer. The answer takes seconds 
 - **The first question creates the conversation,** under the id in the path, and names it after its first line.
 - **The question's id makes a repeat harmless.** The same message sent again answers 409, with the id and the state of the turn it already has. Nothing is asked twice.
 - **The browser sends one message, never the history.** The server builds what the model is shown from what it stored: the branch that ends at the question, as text, after one line that gives the date. A client can't put words into a conversation that were never said.
-  - Earlier reasoning is not sent back. It was never part of what was said.
-  - Nothing is cut to make it fit. A conversation too long for the model fails the turn, and says so.
+    - Earlier reasoning is not sent back. It was never part of what was said.
+    - Nothing is cut to make it fit. A conversation too long for the model fails the turn, and says so.
 
 **Before a model is asked,** one transaction writes the conversation if it is new, the question, and the turn, marked `running`. A question never exists without the turn that is answering it. What is wrong at this point is an ordinary error: 404, 409, 422, 429, or 503 when the model isn't ready.
 
@@ -108,20 +108,20 @@ A turn is one question put to a model, and its answer. The answer takes seconds 
 ## Consequences
 
 - **Easier:**
-  - the web chat can use `useChat` with a thin layer that shapes the request;
-  - asking, rewording and asking for another answer are one request;
-  - a failure is a stored fact with a code, not a line in a log.
+    - the web chat can use `useChat` with a thin layer that shapes the request;
+    - asking, rewording and asking for another answer are one request;
+    - a failure is a stored fact with a code, not a line in a log.
 - **Harder:**
-  - **the stream's format belongs to someone else's library.** Its version is pinned, and the recorded streams must be recorded again when the stream changes on purpose;
-  - **ids chosen by a browser** are valid, and unused, and nothing more. Nothing may read meaning into them, such as the time inside a version 7 id;
-  - **a stopped or failed turn has no token counts,** because the model never reported them. The usage limits will need an estimate.
+    - **the stream's format belongs to someone else's library.** Its version is pinned, and the recorded streams must be recorded again when the stream changes on purpose;
+    - **ids chosen by a browser** are valid, and unused, and nothing more. Nothing may read meaning into them, such as the time inside a version 7 id;
+    - **a stopped or failed turn has no token counts,** because the model never reported them. The usage limits will need an estimate.
 - **Not done yet:**
-  - **a turn lives inside its request.** Closing the page stops the answer, and a reader who reconnects can't pick the stream up again. Turns that run apart from the request, and can be rejoined, come in a later step;
-  - **an answer is stored when it ends.** If the API's process dies half-way, what had been written is lost with it;
-  - a conversation too long for the model fails, where it should be shortened or summarized;
-  - no limit on how many conversations one account has answered at once, and none on the size of a request before it is read;
-  - nothing is sent while a model loads, which can take a minute. A proxy that closes silent connections would cut in;
-  - tools, and what an answer costs in credits.
+    - **a turn lives inside its request.** Closing the page stops the answer, and a reader who reconnects can't pick the stream up again. Turns that run apart from the request, and can be rejoined, come in a later step;
+    - **an answer is stored when it ends.** If the API's process dies half-way, what had been written is lost with it;
+    - a conversation too long for the model fails, where it should be shortened or summarized;
+    - no limit on how many conversations one account has answered at once, and none on the size of a request before it is read;
+    - nothing is sent while a model loads, which can take a minute. A proxy that closes silent connections would cut in;
+    - tools, and what an answer costs in credits.
 - **How to reverse it:** following a model's answer (`actio.chat.answering`) produces steps that know nothing about the format. Another format is another small module beside `actio.api.ui_stream`, and the record of turns stays as it is.
 
 ## Revisions
@@ -141,26 +141,27 @@ The decision above says the model is shown the conversation "after one line that
 - **Why it surfaced only now.** The tests of turns run against a fake model, which echoes the question. They pin what is sent, and can't say what a real model makes of it. The first person to chat with the real model for a while noticed within minutes.
 - **The fix.** The instructions now say who the model is first, and say when the date is for:
 
-  > You are a helpful assistant.
-  >
-  > Today's date is Saturday, 14 November 2026. Use it when a question depends on the date. Otherwise, don't mention it.
+    > You are a helpful assistant.
+    >
+    > Today's date is Saturday, 14 November 2026. Use it when a question depends on the date. Otherwise, don't mention it.
 
 - **The day of the week is given too.** Left to work it out, the model got it wrong, and once bent the date to fit: told "14 November 2026", it answered "Friday, November 13".
 - **Measured,** against the real model, with seven questions that have nothing to do with the date ("Hello", "give me a basic code on python", "What can you do?" and four more), each asked several times:
 
-  | Instructions | Answers that brought up the date |
-  |---|---|
-  | The date alone (before) | 6 of 35; with reasoning on, 3 of 14 |
-  | Who the model is, then the date and when to use it, without the weekday | 0 of 35 |
-  | The same with the weekday (now) | 2 of 21 |
-  | No date at all | 1 of 35, and it can't say what day it is |
+    | Instructions | Answers that brought up the date |
+    |---|---|
+    | The date alone (before) | 6 of 35; with reasoning on, 3 of 14 |
+    | Who the model is, then the date and when to use it, without the weekday | 0 of 35 |
+    | The same with the weekday (now) | 2 of 21 |
+    | No date at all | 1 of 35, and it can't say what day it is |
 
-  On the three questions that tempt it most, the wordings with and without the weekday were close: 1 to 3 answers in 18. The counts are small, so they show the size of the change, not which wording is best.
+    On the three questions that tempt it most, the wordings with and without the weekday were close: 1 to 3 answers in 18. The counts are small, so they show the size of the change, not which wording is best.
+
 - **What is left.**
-  - **It still happens now and then.** A model of this size can't be held to an instruction every time. The lasting fix is to give the date through a tool the model calls when it needs it, which comes with tools.
-  - **A conversation in which the date already came up keeps bringing it up,** because the model sees its own earlier answers. A new conversation starts clean.
-  - **The day is the server's, in UTC.** Around midnight it can differ from the reader's.
-  - **How good the instructions are is measured by hand.** It belongs in an evaluation that runs against real models, which this project doesn't have yet.
+    - **It still happens now and then.** A model of this size can't be held to an instruction every time. The lasting fix is to give the date through a tool the model calls when it needs it, which comes with tools.
+    - **A conversation in which the date already came up keeps bringing it up,** because the model sees its own earlier answers. A new conversation starts clean.
+    - **The day is the server's, in UTC.** Around midnight it can differ from the reader's.
+    - **How good the instructions are is measured by hand.** It belongs in an evaluation that runs against real models, which this project doesn't have yet.
 
 ### 2026-11-14: a turn is paid for
 

@@ -14,8 +14,8 @@ Point any OpenAI-compatible client at `http://127.0.0.1:8100/v1`. To try it in a
 ## What it does
 
 - `POST /v1/chat/completions` replies `Echo: <last user message>`:
-  - as one JSON response;
-  - or, with `"stream": true`, as server-sent events ending with `data: [DONE]`.
+    - as one JSON response;
+    - or, with `"stream": true`, as server-sent events ending with `data: [DONE]`.
 - Each word, with the whitespace after it, counts as one token. `usage` reports those counts. With `stream_options.include_usage`, a stream ends with OpenAI's extra usage chunk.
 - `max_completion_tokens` (or the older `max_tokens`) cuts the reply short and sets `finish_reason` to `length`.
 - Unknown models get a 404 and invalid requests a 400, both in OpenAI's error format.

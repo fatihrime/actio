@@ -18,39 +18,39 @@ The API holds conversations and streams answers ([ADR 0012](0012-conversations-a
 **Who calls the API:**
 
 1. **The Next.js server,** which renders conversations into the page and passes requests on.
-   - Pro: a conversation is in the first HTML the browser gets.
-   - Con: a second place that handles the session, and every request it passes on has to carry the client's address, or the rate limits count the web server instead.
-   - Con: a streamed answer would pass through one more process.
+    - Pro: a conversation is in the first HTML the browser gets.
+    - Con: a second place that handles the session, and every request it passes on has to carry the client's address, or the rate limits count the web server instead.
+    - Con: a streamed answer would pass through one more process.
 2. **The browser,** at the address the page came from. The reverse proxy already sends `/api/*` to the API ([ADR 0004](0004-local-development-stack.md)).
-   - Pro: one path for the cookie, and the API sees who is really asking.
-   - Con: a stored conversation shows a moment later than the page around it.
+    - Pro: one path for the cookie, and the API sees who is really asking.
+    - Con: a stored conversation shows a moment later than the page around it.
 
 **How the page moves between conversations (`/` is a new one, `/c/<id>` a stored one):**
 
 1. **The framework's navigation.** Each address is a page of its own.
-   - Con: a new conversation gets its address while its first answer is still streaming. A navigation at that moment builds the page anew, which ends the stream.
+    - Con: a new conversation gets its address while its first answer is still streaming. A navigation at that moment builds the page anew, which ends the stream.
 2. **One component for both addresses,** which changes the address through the browser's history and reads it back from there.
 
 **What the page shows after a turn that didn't end well:**
 
 1. **What it can work out itself.** It knows what it sent and what arrived.
-   - Con: often it can't know. Was a question that was stopped at once stored? Did the server keep the same half answer the page shows?
+    - Con: often it can't know. Was a question that was stopped at once stored? Did the server keep the same half answer the page shows?
 2. **What the server has.** The page asks for the conversation again.
 
 **How the page knows the API's shapes:**
 
 1. **Types written by hand.** Nothing notices when they fall behind.
 2. **A client generated from the API's description** (OpenAPI), functions included.
-   - Con: a lot of generated code for a dozen routes.
+    - Con: a lot of generated code for a dozen routes.
 3. **Types generated from the description, and a small typed `fetch`** (`openapi-typescript`, `openapi-fetch`; both MIT).
 
 **Where the interface's components come from:**
 
 1. **shadcn/ui and AI Elements,** copied in and adapted.
-   - Pro: a finished look, and accessible parts, quickly.
-   - Con: several thousand lines of someone else's code in the repository, to be kept current by hand. It would break the rule above, or need the rule changed.
+    - Pro: a finished look, and accessible parts, quickly.
+    - Con: several thousand lines of someone else's code in the repository, to be kept current by hand. It would break the rule above, or need the rule changed.
 2. **Components written here,** on libraries that are declared dependencies.
-   - Con: more to write, and accessibility is this project's own work.
+    - Con: more to write, and accessibility is this project's own work.
 
 ## Decision
 
@@ -103,24 +103,24 @@ After Stop, the page showed what the server had kept within 0.1 s.
 ## Consequences
 
 - **Easier:**
-  - nothing but the API handles a session, and the limits count real clients;
-  - the page can't drift from the server: whatever went wrong, it ends up showing what is stored;
-  - a change to a route or a schema fails two tests, and then the compiler lists what to fix.
+    - nothing but the API handles a session, and the limits count real clients;
+    - the page can't drift from the server: whatever went wrong, it ends up showing what is stored;
+    - a change to a route or a schema fails two tests, and then the compiler lists what to fix.
 - **Harder:**
-  - **a stored conversation appears after the page around it,** with a short "Loading" in between;
-  - **the interface is this project's to build and to keep accessible.** Keyboard use and labels are checked in the component tests; a screen reader has not been tried yet;
-  - **two recorded files to keep current** after a change to the API, though one command writes both.
+    - **a stored conversation appears after the page around it,** with a short "Loading" in between;
+    - **the interface is this project's to build and to keep accessible.** Keyboard use and labels are checked in the component tests; a screen reader has not been tried yet;
+    - **two recorded files to keep current** after a change to the API, though one command writes both.
 - **Not done yet:**
-  - answers are shown as plain text. Markdown, code and formulas come in the next step;
-  - no list of conversations: an earlier one is reached by its address or the browser's history;
-  - no pages for signing up and logging in;
-  - the tests run in a simulated browser, against a fake API that answers with the recorded streams. Tests in a real browser, against the real stack, come in a later step. For this step the page was driven by hand in a headless Chromium;
-  - an answer that another window started is waited for, not followed word by word, and closing the page stops an answer ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md));
-  - two windows opened at the same instant by a first-time visitor each start a guest, and the first loses its session;
-  - the interface is in English only.
+    - answers are shown as plain text. Markdown, code and formulas come in the next step;
+    - no list of conversations: an earlier one is reached by its address or the browser's history;
+    - no pages for signing up and logging in;
+    - the tests run in a simulated browser, against a fake API that answers with the recorded streams. Tests in a real browser, against the real stack, come in a later step. For this step the page was driven by hand in a headless Chromium;
+    - an answer that another window started is waited for, not followed word by word, and closing the page stops an answer ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md));
+    - two windows opened at the same instant by a first-time visitor each start a guest, and the first loses its session;
+    - the interface is in English only.
 - **How to reverse it:**
-  - **server rendering** can be added for one kind of page, such as a shared conversation, without touching the chat: the API doesn't care who calls it;
-  - **ready-made components** could replace these one by one, after changing the rule on copied code. Nothing outside `apps/web/components` knows how they are made.
+    - **server rendering** can be added for one kind of page, such as a shared conversation, without touching the chat: the API doesn't care who calls it;
+    - **ready-made components** could replace these one by one, after changing the rule on copied code. Nothing outside `apps/web/components` knows how they are made.
 
 ## Revisions
 
