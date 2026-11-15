@@ -1,7 +1,8 @@
-import type { KeyboardEvent, SyntheticEvent } from "react";
+import type { KeyboardEvent, RefObject, SyntheticEvent } from "react";
 
 /** Where a question is written and sent, or the running answer stopped. */
 export function Composer({
+  box,
   text,
   onText,
   onSend,
@@ -10,6 +11,8 @@ export function Composer({
   blocked,
   thinking,
 }: {
+  /** The box to write in, for whoever wants to put the keyboard there. */
+  box?: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onText: (text: string) => void;
   onSend: () => void;
@@ -48,6 +51,7 @@ export function Composer({
       className="rounded-2xl border border-input bg-card p-2 shadow-sm focus-within:border-ring"
     >
       <textarea
+        ref={box}
         aria-label="Message"
         placeholder="Ask anything"
         rows={2}

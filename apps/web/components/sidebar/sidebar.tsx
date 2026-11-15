@@ -4,21 +4,25 @@ import { useEffect, useRef, useState } from "react";
 
 import { InAppLink } from "@/components/in-app-link";
 import { Notice, NoticeButton } from "@/components/notice";
+import { UsageMeter } from "@/components/usage/meter";
 import { ApiProblem } from "@/lib/api/client";
 import type { Conversations } from "@/lib/chat/list";
 import { explain } from "@/lib/chat/outcomes";
 import { conversationPath, SIGNUP } from "@/lib/location";
+import type { UsageLimits } from "@/lib/usage";
 
 import { Row } from "./row";
 
 /** The list of the caller's conversations, most recently active first: open one,
- * rename it, delete it.
+ * rename it, delete it. Under it, how much of the usage limits is used.
  *
- * The list is read by the page around it, which also knows when to read it again
- * (`lib/chat/list.ts`). What is shown here is always what the server said last.
+ * Both are read by the page around it, which also knows when to read them again
+ * (`lib/chat/list.ts`, `lib/usage.ts`). What is shown here is always what the server
+ * said last.
  */
 export function Sidebar({
   list,
+  usage,
   current,
   takesFocus = false,
   guest,
@@ -26,6 +30,7 @@ export function Sidebar({
   onDeleted,
 }: {
   list: Conversations;
+  usage: UsageLimits;
   /** The conversation on the page, if the server has it. */
   current: string | null;
   /** Whether the keyboard goes to the list when it appears: when it was just asked
@@ -169,6 +174,7 @@ export function Sidebar({
         </div>
       </nav>
       {/* Under the list, not in it: the list holds conversations and nothing else. */}
+      <UsageMeter usage={usage} />
       {guest && (
         <p className="shrink-0 border-t border-border px-5 py-3 text-xs text-muted-foreground">
           You are a guest: these conversations are kept for a day.{" "}

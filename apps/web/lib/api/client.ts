@@ -23,6 +23,8 @@ export type StoredMessage = Schemas["MessageOut"];
 export type MessageMetadata = Schemas["MessageMetadata"];
 export type Turn = Schemas["TurnOut"];
 export type TurnRequest = Schemas["TurnRequest"];
+export type Usage = Schemas["UsageOut"];
+export type UsageWindow = Schemas["WindowOut"];
 export type Problem = Schemas["Problem"];
 
 /** The API refused a request. Carries the problem document it answered with. */
@@ -173,6 +175,11 @@ export async function logOutEverywhere(): Promise<void> {
 /** The models on offer, and whether each can answer right now. */
 export async function listModels(): Promise<ModelList> {
   return answered(await api().GET("/api/models"));
+}
+
+/** The caller's plan, and how much of each of its usage limits is used. */
+export async function getUsage(): Promise<Usage> {
+  return answered(await api().GET("/api/usage"));
 }
 
 /** A conversation, with the messages of the branch that is shown. */

@@ -3,10 +3,18 @@ import type { UIMessage } from "ai";
 
 import type { MessageMetadata, StoredMessage, Turn } from "@/lib/api/client";
 
+/** What an answer's stream carries beside the answer: said once to the page, and never
+ * part of a message. The API writes these chunks in `actio.api.ui_stream`. */
+export interface ChatData extends Record<string, unknown> {
+  /** A share of a usage limit was passed by this turn. What it says is checked when
+   * it arrives (`passedIn` in `lib/usage.ts`). */
+  "usage-warning": unknown;
+}
+
 /** A message as the `ai` library holds it. Everything of Actio's own is under
  * `metadata`: the message it follows, its versions, and for an answer the turn that
  * wrote it. The API stores messages in this shape and streams answers into it. */
-export type ChatMessage = UIMessage<MessageMetadata>;
+export type ChatMessage = UIMessage<MessageMetadata, ChatData>;
 
 /** Messages as the API stores them, for the library to start from. */
 export function fromStored(messages: StoredMessage[]): ChatMessage[] {

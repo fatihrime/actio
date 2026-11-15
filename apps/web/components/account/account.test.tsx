@@ -160,6 +160,30 @@ describe("signing up", () => {
     },
   );
 
+  it("leaves the page knowing its models, in the session that follows", async () => {
+    // What the page read for the guest's session is let go of when the session
+    // changes hands. The models are read again for the new one, at once: a moment
+    // after the page was loaded, as here, as much as an hour after.
+    const api = fakeApi().on(SIGN_UP, () =>
+      json(201, account({ id: GUEST.id })),
+    );
+    const user = open();
+    await screen.findByLabelText("Think before answering");
+
+    await user.click(within(header()).getByRole("link", { name: "Sign up" }));
+    await fillIn(user, {
+      "Email address": "ada@example.com",
+      Password: GOOD_PASSWORD,
+    });
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+
+    expect(
+      await screen.findByLabelText("Think before answering"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Answered by Qwen 3.5 4B/)).toBeInTheDocument();
+    expect(api.to("GET /api/models")).toHaveLength(2);
+  });
+
   it("says so under the address when it has an account already", async () => {
     fakeApi().on(SIGN_UP, () =>
       problem(409, "An account with this email address already exists."),

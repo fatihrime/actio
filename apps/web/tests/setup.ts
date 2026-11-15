@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
 
 // The simulated page lays nothing out, so nothing on it ever changes size, and it has
 // nothing to tell so. The chat asks to be told (components/chat/follow.ts).
@@ -23,4 +23,5 @@ afterEach(() => {
   cleanup();
   window.localStorage.clear();
   window.history.replaceState(null, "", "/");
+  vi.useRealTimers(); // a test may have set the clock (./clock.ts)
 });

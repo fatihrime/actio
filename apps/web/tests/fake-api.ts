@@ -15,6 +15,8 @@ import type {
   Problem,
   StoredMessage,
   Turn,
+  Usage,
+  UsageWindow,
 } from "@/lib/api/client";
 
 import { recorded } from "./recorded";
@@ -112,14 +114,15 @@ function matches(route: string, call: Call): boolean {
 }
 
 /** Replace `fetch` with a fake API for the running test. It starts with a guest
- * session, one model that is ready and can reason, and no conversations: what a
- * working installation answers a first visit. A request the test didn't set up fails
- * the test. */
+ * session, one model that is ready and can reason, no conversations, and nothing used
+ * of the usage limits: what a working installation answers a first visit. A request
+ * the test didn't set up fails the test. */
 export function fakeApi(): FakeApi {
   const api = new FakeApi()
     .on("POST /api/session/guest", () => json(201, GUEST))
     .on("GET /api/models", () => json(200, models()))
-    .on("GET /api/conversations", () => json(200, listed([])));
+    .on("GET /api/conversations", () => json(200, listed([])))
+    .on("GET /api/usage", () => json(200, usage()));
   vi.stubGlobal("fetch", api.fetch);
   onTestFinished(() => {
     expect(api.unexpected, "requests the test set up no answer for").toEqual(
@@ -153,6 +156,20 @@ export function problem(
   };
   return new Response(JSON.stringify(body), {
     status,
+    headers: { "content-type": "application/problem+json" },
+  });
+}
+
+/** A refusal the API was recorded giving, such as `limit_reached.json`: the 429 for a
+ * question at a usage limit. Its members beyond the usual ones are in no generated
+ * type, so a test starts from the real thing. `changes` replaces some of them. */
+export function refused(
+  name: string,
+  changes: Record<string, unknown> = {},
+): Response {
+  const body = { ...(JSON.parse(recorded(name)) as Problem), ...changes };
+  return new Response(JSON.stringify(body), {
+    status: body.status,
     headers: { "content-type": "application/problem+json" },
   });
 }
@@ -228,6 +245,44 @@ export function model(changes: Partial<Model> = {}): Model {
 
 export function models(changes: Partial<Model> = {}): ModelList {
   return { default: "standard", models: [model(changes)] };
+}
+
+/** A second model on offer, which costs nothing: the one the recorded refusal at a
+ * usage limit names (`limit_reached.json`). */
+export function freeModel(changes: Partial<Model> = {}): Model {
+  return model({
+    id: "local",
+    title: "Local",
+    model: "granite4:micro",
+    thinking: false,
+    ...changes,
+  });
+}
+
+/** What `GET /api/usage` answers: a guest's plan, of which nothing is used. `windows`
+ * replaces its two windows. */
+export function usage(
+  windows: UsageWindow[] = [usageWindow("session"), usageWindow("week")],
+): Usage {
+  return { plan: { id: "guest", title: "Guest" }, windows };
+}
+
+/** One window of a plan, with a guest's limit at the repository's settings. `changes`
+ * says how it differs: what is used, when it starts over. */
+export function usageWindow(
+  name: UsageWindow["name"],
+  changes: Partial<UsageWindow> = {},
+): UsageWindow {
+  return {
+    name,
+    limit: name === "session" ? 25_000 : 100_000,
+    used: 0,
+    reserved: 0,
+    // A session opens with the first question that costs something. The week is the
+    // calendar's: this one ends with the Sunday after MOMENT.
+    resets_at: name === "session" ? null : "2026-11-16T00:00:00Z",
+    ...changes,
+  };
 }
 
 export function turn(changes: Partial<Turn> = {}): Turn {

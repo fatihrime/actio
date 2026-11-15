@@ -62,6 +62,8 @@
     var(--color-amber-300),
     var(--color-amber-900)
   );
+  /* A level that is close to its limit. */
+  --color-caution: light-dark(var(--color-amber-600), var(--color-amber-400));
   /* What can't be undone. */
   --color-destructive: light-dark(var(--color-red-700), var(--color-red-400));
   --color-destructive-foreground: light-dark(

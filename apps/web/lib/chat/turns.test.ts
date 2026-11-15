@@ -93,6 +93,26 @@ describe("turnRequest", () => {
     expect(request).toEqual({ answer_to: "q2", thinking: false });
   });
 
+  it("names the model only when another than the default one is to answer", () => {
+    const messages = [message("q1", "user", "Why is the sky blue?")];
+
+    const asked = turnRequest({
+      messages,
+      trigger: "submit-message",
+      thinking: false,
+      model: "local",
+    });
+    const again = turnRequest({
+      messages,
+      trigger: "regenerate-message",
+      thinking: false,
+      model: "local",
+    });
+
+    expect(asked).toMatchObject({ message: { id: "q1" }, model: "local" });
+    expect(again).toEqual({ answer_to: "q1", thinking: false, model: "local" });
+  });
+
   it("refuses to ask for an answer to an answer", () => {
     expect(() =>
       turnRequest({

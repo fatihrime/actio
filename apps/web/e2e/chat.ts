@@ -72,6 +72,17 @@ export class Chat {
     return this.page.getByLabel("Password", { exact: true });
   }
 
+  /** Under the list of conversations: the plan, and how full each usage limit is. */
+  get usage(): Locator {
+    return this.page.getByRole("region", { name: "Usage" });
+  }
+
+  /** One usage limit's meter, "Session" or "Week": its value is the share used, in
+   * percent. */
+  meter(name: string): Locator {
+    return this.usage.getByRole("meter", { name });
+  }
+
   /** The header's link to an account's own page: there once its owner is logged in. */
   accountLink(email: string): Locator {
     return this.header.getByRole("link", { name: `Account: ${email}` });

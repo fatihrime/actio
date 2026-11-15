@@ -19,6 +19,8 @@ interface Asked {
   trigger: "submit-message" | "regenerate-message";
   /** Whether the model should reason before it answers. */
   thinking: boolean;
+  /** The model to ask, by its id. Left out: the installation's default one. */
+  model?: string;
 }
 
 /** The body to post to `/api/conversations/{id}/turns`. */
@@ -26,6 +28,7 @@ export function turnRequest({
   messages,
   trigger,
   thinking,
+  model,
 }: Asked): TurnRequest {
   const question = messages.at(-1);
   if (question?.role !== "user") {
@@ -33,8 +36,11 @@ export function turnRequest({
       "Only a question can be answered: the last message isn't one.",
     );
   }
+  // The default model is asked for by naming none: which one that is, is the API's
+  // to say.
+  const how = model === undefined ? { thinking } : { thinking, model };
   if (trigger === "regenerate-message") {
-    return { answer_to: question.id, thinking };
+    return { answer_to: question.id, ...how };
   }
   return {
     message: {
@@ -47,13 +53,14 @@ export function turnRequest({
     // The message before it on the page: the answer it follows, or nothing for a
     // conversation's first question.
     parent_id: messages.at(-2)?.id ?? null,
-    thinking,
+    ...how,
   };
 }
 
 /** What a caller passes along with a message, for `turnRequest` to pick up. */
 export interface TurnOptions {
   thinking: boolean;
+  model?: string;
 }
 
 /** The library's connection to one conversation's turns. */
@@ -63,12 +70,16 @@ export function turnTransport(
   return new DefaultChatTransport<ChatMessage>({
     api: turnsUrl(conversationId),
     fetch: fetchStream,
-    prepareSendMessagesRequest: ({ messages, trigger, body }) => ({
-      body: turnRequest({
-        messages,
-        trigger,
-        thinking: (body as Partial<TurnOptions> | undefined)?.thinking === true,
-      }),
-    }),
+    prepareSendMessagesRequest: ({ messages, trigger, body }) => {
+      const options = body as Partial<TurnOptions> | undefined;
+      return {
+        body: turnRequest({
+          messages,
+          trigger,
+          thinking: options?.thinking === true,
+          model: options?.model,
+        }),
+      };
+    },
   });
 }

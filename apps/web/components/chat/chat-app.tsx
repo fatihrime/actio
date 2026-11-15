@@ -27,6 +27,8 @@ import type { Place } from "@/lib/location";
 import { useMedia, WIDE } from "@/lib/media";
 import { useSession } from "@/lib/session";
 import { useStoredSwitch } from "@/lib/stored-switch";
+import { useUsage } from "@/lib/usage";
+import type { UsageLimits } from "@/lib/usage";
 
 import { Chat } from "./chat";
 
@@ -86,6 +88,7 @@ export function ChatApp() {
   const session = useSession();
   const { me } = session;
   const list = useConversations(session.holder);
+  const usage = useUsage(session.holder);
 
   useEffect(() => {
     document.title = TITLES[place.kind];
@@ -209,6 +212,7 @@ export function ChatApp() {
               >
                 <Sidebar
                   list={list}
+                  usage={usage}
                   current={inAddress}
                   // Over the chat it was just asked for: the keyboard goes there.
                   takesFocus={!wide}
@@ -244,6 +248,8 @@ export function ChatApp() {
               // A conversation this page started, and still shows, is already on it:
               // nothing to load.
               load={inAddress !== null && inAddress !== fresh}
+              holder={session.holder}
+              usage={usage}
               onExists={onExists}
               onActivity={list.refresh}
               onStartNew={startNew}
@@ -317,6 +323,8 @@ function Who({
 function Current({
   id,
   load,
+  holder,
+  usage,
   onExists,
   onActivity,
   onStartNew,
@@ -324,13 +332,27 @@ function Current({
 }: {
   id: string;
   load: boolean;
+  /** What the session's data is held under (`Session.holder`). */
+  holder: string | null;
+  usage: UsageLimits;
   onExists: () => void;
   onActivity: () => void;
   onStartNew: () => void;
   onStartOver: () => void;
 }) {
-  const model = useDefaultModel();
-  const chat = { id, model, onExists, onActivity, onStartOver };
+  const models = useModels(holder, usage.standIn);
+  const chat = {
+    id,
+    model: models === null ? null : answering(models, usage.standIn),
+    // The models that cost nothing, as far as this installation still offers them.
+    offers: (usage.reached?.free ?? []).flatMap(
+      (free) => models?.models.find((model) => model.id === free) ?? [],
+    ),
+    usage,
+    onExists,
+    onActivity,
+    onStartOver,
+  };
   // Keyed by the id: a conversation that is opened again is loaded again, and never
   // shown as it was the last time it was on the page.
   return load ? (
@@ -344,6 +366,8 @@ function Current({
 function StoredChat({
   id,
   model,
+  offers,
+  usage,
   onExists,
   onActivity,
   onStartNew,
@@ -351,6 +375,8 @@ function StoredChat({
 }: {
   id: string;
   model: Model | null;
+  offers: Model[];
+  usage: UsageLimits;
   onExists: () => void;
   onActivity: () => void;
   onStartNew: () => void;
@@ -393,6 +419,8 @@ function StoredChat({
       id={id}
       stored={loaded.conversation}
       model={model}
+      offers={offers}
+      usage={usage}
       onExists={onExists}
       onActivity={onActivity}
       onStartOver={onStartOver}
@@ -450,18 +478,32 @@ function useStored(id: string): Stored {
   };
 }
 
-/** The model that answers when a request names none, with whether it can right now.
- * Nothing until the API has said. */
-function useDefaultModel(): Model | null {
-  const { data } = useSWR("models", listModels, {
-    refreshInterval: (latest: ModelList | undefined) =>
-      latest !== undefined && defaultOf(latest)?.status !== "ready"
-        ? UNREADY_POLL_MS
-        : 0,
-  });
-  return data === undefined ? null : defaultOf(data);
+/** The models on offer, with whether each can answer right now. Nothing until the API
+ * has said. Asked again and again while the one that answers can't.
+ *
+ * Held under the session it was read in, like everything read from the API: a new
+ * session reads it anew, instead of looking where the last one's answer was. */
+function useModels(
+  holder: string | null,
+  standIn: string | null,
+): ModelList | null {
+  const { data } = useSWR(
+    holder === null ? null : (["models", holder] as const),
+    listModels,
+    {
+      refreshInterval: (latest: ModelList | undefined) =>
+        latest !== undefined && answering(latest, standIn)?.status !== "ready"
+          ? UNREADY_POLL_MS
+          : 0,
+    },
+  );
+  return data ?? null;
 }
 
-function defaultOf(list: ModelList): Model | null {
-  return list.models.find((model) => model.id === list.default) ?? null;
+/** The model that answers: the one a request gets that names none, unless another was
+ * chosen to stand in for it and is still on offer. */
+function answering(list: ModelList, standIn: string | null): Model | null {
+  const named = (id: string | null) =>
+    list.models.find((model) => model.id === id);
+  return named(standIn) ?? named(list.default) ?? null;
 }

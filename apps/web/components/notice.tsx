@@ -6,19 +6,24 @@ const TONES = {
 };
 
 /** A short message about something that needs the person's attention, with the
- * buttons to act on it. `role="status"` has a screen reader say it when it appears. */
+ * buttons to act on it. `role="status"` has a screen reader say it when it appears,
+ * and again whenever anything in it changes. A notice with something that keeps
+ * changing, such as a time counting down, is `changing`: it marks the part to be said
+ * itself, and leaves the rest unsaid. */
 export function Notice({
   tone = "plain",
+  changing = false,
   children,
   actions,
 }: {
   tone?: keyof typeof TONES;
+  changing?: boolean;
   children: ReactNode;
   actions?: ReactNode;
 }) {
   return (
     <div
-      role="status"
+      role={changing ? undefined : "status"}
       className={`flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border px-4 py-3 text-sm ${TONES[tone]}`}
     >
       <div className="min-w-0 space-y-1">{children}</div>

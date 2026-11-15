@@ -397,6 +397,32 @@ describe("an answer that doesn't arrive whole", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("says when it was a usage limit that left an answer no more room", async () => {
+    // Near a limit the API gives an answer less room than the model allows, and the
+    // turn says so.
+    const cramped = turn({ finish_reason: "length", capped_by_usage: true });
+    fakeApi().on(CONVERSATION, () =>
+      json(
+        200,
+        conversation(RECORDED.conversation, [
+          question(RECORDED.question, "Count to a hundred."),
+          answer(RECORDED.answer, "One, two", RECORDED.question, cramped),
+        ]),
+      ),
+    );
+
+    open(`/c/${RECORDED.conversation}`);
+
+    expect(
+      await screen.findByText(
+        "This answer stops here: your usage limit left no room for more of it.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/reached the model's length limit/),
+    ).not.toBeInTheDocument();
+  });
+
   it("stops when asked, and shows what the server kept of it", async () => {
     const api = fakeApi();
     const kept = (call: Call, by: Parameters<typeof turn>[0], text?: string) =>

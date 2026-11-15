@@ -32,9 +32,14 @@ export function outcomeOf(turn: Turn): string | null {
     case "interrupted":
       return "The server was restarted while this answer was being written.";
     case "completed":
-      return turn.finish_reason === "length"
-        ? "The answer reached the model's length limit, and stops here."
-        : null;
+      if (turn.finish_reason !== "length") {
+        return null;
+      }
+      // Near a usage limit an answer is given less room than the model allows
+      // (ADR 0020). When it ran out of that, the limit is why it stops.
+      return turn.capped_by_usage
+        ? "This answer stops here: your usage limit left no room for more of it."
+        : "The answer reached the model's length limit, and stops here.";
     case "running":
       return null;
   }

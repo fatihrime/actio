@@ -10,6 +10,9 @@ export default defineConfig({
     // Components are rendered into a simulated browser page (jsdom). The network is
     // never reached: each test says what `fetch` answers.
     environment: "jsdom",
+    // Times of day are shown in the reader's time zone. Here that is the same one on
+    // every machine, so a test can say what a moment looks like.
+    env: { TZ: "UTC" },
     setupFiles: ["./tests/setup.ts"],
     // A test that leaves a `fetch` stubbed, or a timer faked, doesn't hand it on.
     unstubGlobals: true,

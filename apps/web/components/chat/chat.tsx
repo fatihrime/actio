@@ -4,6 +4,7 @@ import { useChat } from "@ai-sdk/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Notice, NoticeButton } from "@/components/notice";
+import { LimitReached, UsagePassed } from "@/components/usage/limit";
 import { ApiProblem, getConversation } from "@/lib/api/client";
 import type { Conversation, Model, Turn } from "@/lib/api/client";
 import { fromStored, hasContent, turnOf } from "@/lib/chat/messages";
@@ -19,6 +20,7 @@ import { turnTransport } from "@/lib/chat/turns";
 import type { TurnOptions } from "@/lib/chat/turns";
 import { newId } from "@/lib/ids";
 import { useStoredSwitch } from "@/lib/stored-switch";
+import type { UsageLimits } from "@/lib/usage";
 
 import { Composer } from "./composer";
 import { useFollow } from "./follow";
@@ -40,11 +42,17 @@ const ELSEWHERE_MS = 1500;
  * into them as it arrives. The server keeps the conversation itself, so when a turn
  * ends in any way but well (stopped, failed, refused, connection lost), the page asks
  * the server what it has and shows that, instead of guessing.
+ *
+ * What answers cost is the server's to count too. A question refused at a usage limit
+ * is handed to `usage`, which holds the limit until it starts over: nothing is sent
+ * meanwhile, unless a model that costs nothing was chosen to carry on with.
  */
 export function Chat({
   id,
   stored,
   model,
+  offers,
+  usage,
   onExists,
   onActivity,
   onStartOver,
@@ -54,8 +62,13 @@ export function Chat({
   id: string;
   /** What the server has of it, or nothing for a new one. Read once. */
   stored: Conversation | null;
-  /** The model that answers, once known. */
+  /** The model that answers, once known: the installation's default one, or the one
+   * that was chosen to carry on with at a usage limit. */
   model: Model | null;
+  /** The models that cost nothing, to offer when a usage limit is reached. */
+  offers: Model[];
+  /** The usage limits of whoever has the session. */
+  usage: UsageLimits;
   /** Called once the server has the conversation, so it has an address. */
   onExists: () => void;
   /** Called when the server has taken a question, and when its turn has ended: the
@@ -82,6 +95,7 @@ export function Chat({
   // dropped when it arrives after the next action.
   const actions = useRef(0);
   const { scroller, content, away, follow } = useFollow();
+  const box = useRef<HTMLTextAreaElement>(null);
 
   const transport = useMemo(() => turnTransport(id), [id]);
   const { messages, setMessages, sendMessage, regenerate, stop, status } =
@@ -92,13 +106,25 @@ export function Chat({
       transport,
       onError: (error) => {
         // A refusal, or no connection. What a model's own failure was is part of the
-        // turn, and shown with it.
-        if (error instanceof ApiProblem || error instanceof TypeError) {
+        // turn, and shown with it. A refusal at a usage limit is not this question's
+        // problem alone: it holds for every question until the limit starts over.
+        if (
+          (error instanceof ApiProblem || error instanceof TypeError) &&
+          !usage.refused(error)
+        ) {
           setProblem(error);
+        }
+      },
+      onData: (part) => {
+        if (part.type === "data-usage-warning") {
+          usage.pass(part.data);
         }
       },
       onFinish: ({ isAbort, isError }) => {
         onActivity();
+        // However the turn ended, what it cost is the server's to say. So is what is
+        // left after a question that was refused.
+        usage.refresh();
         if (isAbort || isError) {
           void resync({ settle: isAbort });
         }
@@ -179,6 +205,7 @@ export function Chat({
     setText("");
     setProblem(null);
     setOpen(null);
+    usage.dismiss(); // a warning was read, or not: the next one is the API's to send
     // The new question follows the last message the server has. Two kinds of message
     // at the end of the page are left out on the way there:
     //
@@ -209,8 +236,16 @@ export function Chat({
     void regenerate({ body: options() });
   }
 
+  // The model that costs nothing and answers while a usage limit is reached, once the
+  // person chose it and the API still offers it.
+  const standIn =
+    usage.standIn !== null && model?.id === usage.standIn ? model : null;
+
   function options(): TurnOptions {
-    return { thinking: thinking && model?.thinking === true };
+    const reasoning = thinking && model?.thinking === true;
+    return standIn === null
+      ? { thinking: reasoning }
+      : { thinking: reasoning, model: standIn.id };
   }
 
   // Once the server has the conversation, it gets its address.
@@ -247,9 +282,11 @@ export function Chat({
     ? "Your session has ended."
     : elsewhere
       ? "An answer is being written."
-      : unready !== null
-        ? "The model can't answer right now."
-        : null;
+      : usage.reached !== null && standIn === null
+        ? "You’ve reached your usage limit."
+        : unready !== null
+          ? "The model can't answer right now."
+          : null;
 
   return (
     <>
@@ -338,6 +375,27 @@ export function Chat({
             {explain(problem)}
           </Notice>
         )}
+        {usage.reached !== null && (
+          <LimitReached
+            reached={usage.reached}
+            standIn={standIn}
+            offers={offers}
+            onCarryOn={(free) => {
+              usage.carryOnWith(free.id);
+              // The question that was refused is back in the box: the next thing to
+              // do is to send it.
+              box.current?.focus();
+            }}
+          />
+        )}
+        <UsagePassed
+          passed={usage.passed}
+          read={usage.read}
+          onDismiss={() => {
+            usage.dismiss();
+            box.current?.focus();
+          }}
+        />
         {unready !== null && (
           <Notice tone="warning">
             <p className="font-medium">{unready.title}</p>
@@ -362,6 +420,7 @@ export function Chat({
           </Notice>
         )}
         <Composer
+          box={box}
           text={text}
           onText={setText}
           onSend={send}
