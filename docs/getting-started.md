@@ -24,7 +24,7 @@ The first run builds the images, which takes a few minutes; later runs take seco
 - <http://localhost:8080/api/healthz>: the API's health check;
 - <http://localhost:8080/api/readyz>: whether the API can do its work. It says `ready` when the database is reachable and migrated and Valkey answers, and otherwise names what is missing.
 
-`make smoke` checks all three from the command line. `make down` stops everything.
+`make smoke` checks them from the command line, and that a guest can start a session and is told the models and its usage limits. `make down` stops everything.
 
 ## Models
 
@@ -73,6 +73,33 @@ Which models are offered is in `config/models.toml`: the file explains itself. T
 !!! note "On Linux"
     Ollama listens only on `127.0.0.1` by default, which containers can't reach, so with `make up` the model shows as `unreachable`. Ollama's `OLLAMA_HOST` setting changes where it listens: Docker's bridge address, usually `172.17.0.1`, is reachable from containers and not from your network. This follows Ollama's and Docker's documentation; this project's own Linux run, in CI, has no Ollama to try it with.
 
+## Usage limits
+
+An answer costs credits, and everyone has only so many: per session, which opens with the first question and lasts five hours, and per week. At the default prices a credit is one token of an answer, and what the model reads costs a quarter of that.
+
+| | A session | A week |
+|---|---|---|
+| A guest | 25,000 credits | 100,000 |
+| An account | 100,000 | 600,000 |
+
+- **Near a limit, answers get shorter.** An answer is given only as much room as is left.
+- **At a limit, a question is refused,** and told when the limit starts over: "You've reached your usage limit for this session. It resets in 3 hours." The question isn't stored, so it can be sent again then.
+- **The page doesn't show the limits yet.** The API does. With the session from the commands above:
+
+    ```sh
+    curl --silent --cookie "$jar" http://localhost:8080/api/usage
+    ```
+
+    It answers with your plan, and for each limit how much is used and when it starts over.
+
+Prices, plans, the length of a session and the moment the week starts over are in `config/plans.toml`, which explains itself. Edit it and run `make up` or `make dev` again.
+
+- Every model in `config/models.toml` needs a price there, or the API doesn't start, and says which model is missing one.
+- A model priced at nothing is free: it uses up no credits and is never refused.
+- A plan that names no limits limits nothing: on a machine that is yours alone, give accounts such a plan.
+
+What was used is kept in the database, in a ledger that only ever grows. See [ADR 0020](adr/0020-usage-limits-on-turns.md).
+
 ## Develop it
 
 ```sh
@@ -82,7 +109,7 @@ make dev         # starts the stack; Ctrl-C stops the API and the web app
 
 `make doctor` lists any missing tools, with install hints. You don't need Node.js itself: pnpm installs the version the project pins.
 
-In this mode, saving a Python file restarts the API, and the browser picks up changes to the web app by itself. `make dev` first stops any containers that `make up` started, so you can switch between the two modes freely. Postgres and Valkey keep their data in Docker volumes in both modes, so it survives restarts.
+In this mode, saving a Python file restarts the API, and the browser picks up changes to the web app by itself. `make dev` first stops any containers that `make up` started, so you can switch between the two modes freely. Postgres keeps its data in a Docker volume in both modes, so it survives restarts. Valkey keeps nothing on disk: after a restart the rate limits start full, and the usage limits are counted up again from the database.
 
 ## Talk to a local model from the terminal
 
@@ -101,7 +128,7 @@ The answer streams to your terminal, followed by its token counts and speed. `uv
 |---|---|
 | `make up` | Build and run the whole stack in containers |
 | `make dev` | Run the stack with the API and the web app native |
-| `make smoke` | Check a running stack: the web page, the API's health and its docs |
+| `make smoke` | Check a running stack: the web page, the API's health and its docs, a guest session, the models and the usage limits |
 | `make down` | Stop all containers; their data is kept |
 | `make check` | Run what CI's main job runs: static checks, tests and builds |
 | `make e2e` | Run the end-to-end tests: a stack of its own with a fake model, driven in a real browser |
@@ -155,8 +182,14 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 **A model is `missing` or `unreachable`**
 :   The chat says so above the message box, `GET /api/models` says so, and `make smoke` notes it. `missing`: Ollama runs but hasn't got the model; `ollama pull` it, by the name in `config/models.toml`. `unreachable`: Ollama isn't running, or isn't where the API looks. If it runs on another machine, set `ACTIO_OLLAMA_URL` in `.env`. It takes up to 15 seconds for a change to show.
 
-**The API doesn't start, and says `actio: … models.toml: …`**
-:   `config/models.toml` has a mistake, and the line says which. Fix it and start again.
+**The API doesn't start, and says `actio: … models.toml: …` or `actio: … plans.toml: …`**
+:   One of the two files in `config/` has a mistake, and the line says which. Fix it and start again. A model that is offered in `models.toml` and has no price in `plans.toml` is such a mistake.
+
+**"You've reached your usage limit"**
+:   The session's allowance, or the week's, is used up: see [Usage limits](#usage-limits). The answer says when it starts over. On your own machine, raise the limits in `config/plans.toml`, or leave them out, and run `make up` or `make dev` again.
+
+**A question answers 503, "Usage can't be counted right now"**
+:   The API can't reach Valkey, where usage is counted, and refuses instead of answering uncounted. `/api/readyz` and `docker compose ps` show what is down.
 
 **Logging in answers 503, "This can't be done right now"**
 :   The API can't reach Valkey, so it can't count attempts, and refuses them instead of letting them through uncounted. `/api/readyz` and `docker compose ps` show what is down. People who are already logged in are not affected.

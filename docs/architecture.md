@@ -35,7 +35,8 @@ flowchart LR
     - new guests, sign-ups and password attempts are rate-limited. Past a limit, the answer is 429 with a `Retry-After` header ([ADR 0011](adr/0011-rate-limits-as-token-buckets-in-valkey.md));
     - `GET /api/conversations` lists your conversations a page at a time, and `GET /api/conversations/{id}` returns one with its messages. `PATCH` renames it, `DELETE` deletes it, and `PUT …/branch` shows another version of a question or an answer ([ADR 0012](adr/0012-conversations-as-a-tree-of-messages.md));
     - `POST /api/conversations/{id}/turns` puts a question to a model and streams the answer back, piece by piece, in the format the AI SDK reads. The first question creates the conversation. The same route rewords an earlier question, or asks for another answer. Each turn is recorded: which model, how it ended, what it cost in tokens and time ([ADR 0014](adr/0014-turns-streamed-in-the-ai-sdks-format.md));
-    - `GET /api/models` lists the models on offer, from `config/models.toml`, and says whether each can answer right now: `ready`, `missing` from its server, or its server `unreachable` ([ADR 0013](adr/0013-the-models-on-offer-are-a-file.md)).
+    - `GET /api/models` lists the models on offer, from `config/models.toml`, and says whether each can answer right now: `ready`, `missing` from its server, or its server `unreachable` ([ADR 0013](adr/0013-the-models-on-offer-are-a-file.md));
+    - a turn costs credits, and an account has only so many per session and per week, from `config/plans.toml`. The most a turn can cost is held before a model is asked; a turn that doesn't fit is answered 429, with the moment the limit starts over. `GET /api/usage` says how much is used ([ADR 0020](adr/0020-usage-limits-on-turns.md)).
 - **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
 - **The web app** is a Next.js application: the chat ([ADR 0015](adr/0015-the-web-chat-calls-the-api-from-the-browser.md)).
     - **Its server sends only the frame of the page.** Everything of yours is fetched by the browser, straight from the API, with the session cookie. Nothing but the API handles a session.
@@ -47,18 +48,20 @@ flowchart LR
     - **An answer is shown as the markdown it is written in:** headings, tables, coloured code, formulas and diagrams. It is a model's text, so it can do nothing else: HTML in it is shown as text, no picture is fetched, and a link opens only after you have seen its address ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
     - **Its types for the API are generated** from the API's recorded description, `apps/api/openapi.json`, so a change to the API that the page doesn't follow fails to compile.
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
-    - Postgres holds five tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, and the turns in which a model answered.
-    - Valkey holds the rate limits' counters: one number per client address or email address that has made an attempt lately, under a hashed name.
+    - Postgres holds six tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, the turns in which a model answered, and the usage ledger: what each turn used, in rows that are only ever added.
+    - Valkey holds what is counted fast: the rate limits' counters, one number per client address or email address that has made an attempt lately, under a hashed name; and each account's usage counters, with the credits held for answers being written.
+    - Valkey keeps nothing on disk. After a restart the rate limits start full, and an account's usage counters are rebuilt from the ledger the next time they are needed.
 
 Inside the API, the code is split into layers that only import downward, and a tool enforces it:
 
 | Layer | Holds |
 |---|---|
 | `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, which attempts are rate-limited, the error format. The only layer that knows the web framework |
-| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended. Tables and rules, with no HTTP |
+| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Tables and rules, with no HTTP |
 | `actio.catalog` | The models on offer: reading `config/models.toml`, and asking a model's server about it |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
-| `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter |
+| `actio.usage` | Usage limits: reading `config/plans.toml`, holding credits before a request and counting them after it through the [engine](reference/quota.md), and the ledger |
+| `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter, reading a file in `config/` |
 
 | Path | Goes to |
 |---|---|
@@ -87,7 +90,7 @@ The next phases add:
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
 - **turns that outlive their request:** today an answer stops when its reader leaves, or opens another conversation. Later a turn runs on its own, and a reader who comes back picks the stream up again;
 - **more providers:** cloud models behind a router with fallbacks. In tests, [fakellm](reference/fakellm.md) stands in for all of them;
-- **usage limits:** session and weekly windows, enforced atomically in Valkey and recorded in a Postgres ledger. The [engine](reference/quota.md) already exists as a package, tested against a real Valkey server ([ADR 0006](adr/0006-usage-limits-engine.md)). Connecting it to the API, with the ledger, is still to come.
+- **usage limits in the page:** the API enforces them, and the chat doesn't show them yet. A meter, a countdown when a limit is reached, and the offer of a model that costs nothing come next.
 
 ## Repository layout
 
@@ -96,10 +99,10 @@ The next phases add:
 | `apps/api` | The Python application: the API today, plus the worker later |
 | `apps/web` | The Next.js web app: the chat's pages and components, its calls to the API, and their tests |
 | `packages/fakellm` | A fake LLM server for tests, scripted by directives in the prompt |
-| `packages/llm` | Model clients: a neutral chat format, adapters for Ollama and for OpenAI-compatible servers, and the `actio-llm` command |
+| `packages/llm` | Model clients: a neutral chat format, adapters for Ollama and for OpenAI-compatible servers, a guess at a text's tokens, and the `actio-llm` command |
 | `packages/quota` | The usage-limits engine: Lua scripts for Valkey, and the Python reference model they're tested against |
 | `compose.yaml`, `compose.dev.yaml` | The stack for `make up`, and the overlay for `make dev` |
-| `config/` | What an installation changes without touching code. Today: `models.toml`, the models on offer |
+| `config/` | What an installation changes without touching code. Today: `models.toml`, the models on offer, and `plans.toml`, what they cost and how much each kind of account may use |
 | `deploy/` | Caddy's configuration, and the tests for the containers' rules |
 | `docs/` | This site, including the decision records |
 | `scripts/` | Developer scripts: tool checks, the denylist hook, the smoke test |

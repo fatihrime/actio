@@ -27,15 +27,15 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 
 | Path | Purpose |
 |---|---|
-| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `chat/` holds conversations, their tree of messages and the turns in which a model answers; `catalog.py` holds the models on offer; `identity/` holds accounts and sessions; `core/` holds settings, ids, the database and the rate limiter; `migrations/` holds the schema's history |
+| `apps/api` | FastAPI modular monolith (`python -m actio --role api\|migrate`; `worker` and `all` come with the job queue). `api/` is the HTTP interface; `chat/` holds conversations, their tree of messages and the turns in which a model answers; `catalog.py` holds the models on offer; `identity/` holds accounts and sessions; `usage/` holds the prices and plans, the usage ledger, and the limits on what answers may cost; `core/` holds settings, ids, the database and the rate limiter; `migrations/` holds the schema's history |
 | `apps/web` | Next.js web app: the chat. `app/` holds the pages, which only place components; `components/` the interface: the conversation on the page (`components/chat`), the list of conversations beside it (`components/sidebar`) and the forms for signing up, logging in and the account (`components/account`); `lib/` what it is built on: the calls to the API (`lib/api`, with types generated from the API's description), how a turn is requested, how an answer's markdown is read and how the list of conversations is kept (`lib/chat`), whose session the page has (`lib/session.ts`), ids and the address bar; `tests/` the fake API and the recorded answers the component tests run on; `e2e/` the end-to-end tests, which Playwright runs against the stack of `make e2e` |
 | `packages/quota` | Usage-limits engine: Lua scripts plus a Python reference model |
-| `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`); the router comes later |
+| `packages/llm` | Model clients: the neutral chat format, the Ollama adapter and the OpenAI-compatible adapter (`actio-llm`), and a guess at a text's tokens for when no provider has counted them; the router comes later |
 | `packages/fakellm` | Deterministic fake LLM server for tests, scripted by directives in the prompt (`[[think: ...]]`, `[[call: ...]]`, `[[fail: 503]]`, `[[pace: 0.1]]`). Its `Dockerfile` builds the image the end-to-end stack runs |
-| `config/` | What an installation changes without touching code. Today `models.toml`, the models on offer ([ADR 0013](docs/adr/0013-the-models-on-offer-are-a-file.md)); plans, assistant profiles and the demo knowledge base come later. TOML, which Python reads without a dependency |
-| `compose.yaml` | The production-shaped stack behind `make up`: Caddy, web, API, Postgres, Valkey, and the `migrate` job that runs before the API |
+| `config/` | What an installation changes without touching code. Today `models.toml`, the models on offer ([ADR 0013](docs/adr/0013-the-models-on-offer-are-a-file.md)), and `plans.toml`, what they cost and how much each kind of account may use ([ADR 0020](docs/adr/0020-usage-limits-on-turns.md)); assistant profiles and the demo knowledge base come later. TOML, which Python reads without a dependency |
+| `compose.yaml` | The production-shaped stack behind `make up`: Caddy, web, API, Postgres, Valkey, which keeps nothing on disk, and the `migrate` job that runs before the API |
 | `compose.dev.yaml` | The overlay behind `make dev`: Caddy routes to the native processes; data ports open on 127.0.0.1 |
-| `compose.e2e.yaml` | The overlay behind `make e2e`: the same stack with the fake model as one more container, and the models file in `deploy/e2e/config/` that offers it ([ADR 0017](docs/adr/0017-end-to-end-tests-on-the-real-stack.md)) |
+| `compose.e2e.yaml` | The overlay behind `make e2e`: the same stack with the fake model as one more container, and the models and plans files in `deploy/e2e/config/` that offer and price it ([ADR 0017](docs/adr/0017-end-to-end-tests-on-the-real-stack.md)) |
 | `deploy/caddy/` | Caddy config: one entry point routing `/api/*` and `/v1/*` to the API, the rest to the web app |
 | `deploy/tests/` | Policy tests for the containers: published ports, pinned images, networks, hardening |
 | `docs/` | The documentation site's pages (built by Zensical from `zensical.toml`), including the ADRs in `docs/adr/` |
@@ -52,7 +52,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `make install` | Install the Python and JavaScript workspaces with their dev tools, plus the git hooks |
 | `make up` | Build and run the whole stack in containers, shaped like production, at http://localhost:8080 |
 | `make dev` | Run the stack at http://localhost:8080 with the API and web app native, with hot reload |
-| `make smoke` | Check a running stack through Caddy: the web page, and that the API is healthy, ready (database migrated, Valkey answering), serves its docs, starts a guest session and lists its models |
+| `make smoke` | Check a running stack through Caddy: the web page, and that the API is healthy, ready (database migrated, Valkey answering), serves its docs, starts a guest session, lists its models and says what a guest may use |
 | `make migration name="..."` | Write a new database migration from the table models, as a numbered draft to read and edit |
 | `make openapi` | After a change to a route or a schema: record the API's description again (`apps/api/openapi.json`), and generate the web app's types from it (`apps/web/lib/api/schema.d.ts`). Review the difference |
 | `make docs` | Preview the documentation site at http://localhost:8001, reloading on edits |
@@ -78,6 +78,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - `make test` fails below 90% coverage of `packages/quota`, and needs Docker running: the quota and API tests start throwaway Valkey and Postgres containers;
   - a change to a table model needs a migration in the same commit (`make migration name="..."`): a test fails when the models and the migrations disagree. Never edit a migration that is already on `main`; write the next one;
   - `apps/api/src/actio/core` imports nothing else from `actio`;
+  - a file in `config/` is read through `actio.core.config_file`, which says a mistake in it in one line. The API's command line reads each such file before starting, so a mistake stops it there;
+  - in the API's tests a credit is a token and the usage limits are out of reach. A test that wants to reach one asks for plans, `plans_with(guest=(1_000, 10_000))`, and a `ScriptedModel`'s last event says what a turn used;
   - change the Lua in `packages/quota` only together with the Python reference model (`oracle.py`): the differential test requires both to behave identically;
   - the same holds for the rate limiter's script, `apps/api/src/actio/core/rate_limit.lua`, and the plain token buckets in `apps/api/tests/test_rate_limit.py`;
   - new HTTP client code uses `httpx2`, the maintained continuation of httpx ([ADR 0007](docs/adr/0007-local-models-through-ollamas-native-api.md)). The older test fixtures that call an app in-process still use httpx;
@@ -115,8 +117,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 - **Commits:** [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `test:`, `chore:` and so on.
 - **Architecture boundaries,** enforced by import-linter at every commit and in CI. The rules are in `pyproject.toml`, under `[tool.importlinter]`:
   - `packages/*` never import the application, or each other;
-  - inside `actio`, imports only point down the layers: `cli`, `app`, `api`, `tables`, `chat`, then `catalog` and `identity` side by side, `core`. So `core` imports nothing else from `actio`, and `catalog` and `identity` don't import each other;
-  - only `actio.api` imports the web framework. `core` and the domain modules, `chat`, `catalog` and `identity`, never do;
+  - inside `actio`, imports only point down the layers: `cli`, `app`, `api`, `tables`, `chat`, then `catalog`, `identity` and `usage` side by side, `core`. So `core` imports nothing else from `actio`, and `catalog`, `identity` and `usage` don't import each other;
+  - only `actio.api` imports the web framework. `core` and the domain modules, `chat`, `catalog`, `identity` and `usage`, never do;
   - a new module directly under `actio` must be given a layer in that list, or the check fails. A new domain module goes among the domain modules, above the ones whose tables it points at, and joins the rule against importing the web framework;
   - a table that points at another module's table names its class, such as `ForeignKey(User.id)`, never the text `"users.id"`. Then loading one table module loads what it needs, and a process that loads only that one still works. A test loads each alone.
 - **API conventions:**
@@ -131,5 +133,9 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
   - what belongs to an account is looked up with the account's id, in the query itself. Someone else's row answers 404, like one that doesn't exist: see `OwnConversation` in `actio.api.conversations`;
   - a route that anyone can call, or that checks a password, counts the attempt before doing its work: it takes `Limits` and calls one, such as `await limits.log_in(email)` ([ADR 0011](docs/adr/0011-rate-limits-as-token-buckets-in-valkey.md)). A new limit is a method in `actio.api.rate_limits` and a `limit_*` setting, listed in `compose.yaml` and `.env.example` too, or a test fails;
   - a module that defines tables is named `models` and listed in `actio/tables.py`, or a test fails. So nothing else is named `models`: the models people chat with are the `catalog`;
-  - a model is asked for by its name in `config/models.toml`, through the `Models` dependency: `catalog.get("standard")`. Nothing outside `actio.catalog` names a provider's own model, or builds a client for one.
+  - a model is asked for by its name in `config/models.toml`, through the `Models` dependency: `catalog.get("standard")`. Nothing outside `actio.catalog` names a provider's own model, or builds a client for one;
+  - a model on offer needs a price in `config/plans.toml`, under the same name, or the API doesn't start. The same goes for the pair of files in `deploy/e2e/config/`;
+  - whatever costs credits goes through `actio.usage.limits`, taken as the `Usage` dependency, in this order ([ADR 0020](docs/adr/0020-usage-limits-on-turns.md)): `reserve` before the work, in the transaction that starts it, so that a refusal leaves nothing behind; `record` in the transaction that writes how the work ended; and only after that is committed, `settle`, or `release` when nothing was used. Never the counters before the ledger: they are rebuilt from it;
+  - the usage ledger only takes new rows. The database refuses to change or delete one, so no code should try;
+  - `Usage` is the limit on what answers cost, and `Limits` the limit on how often something is tried. A turn passes both.
 - **Decisions:** anything hard to reverse gets an ADR. Copy [`docs/adr/0000-template.md`](docs/adr/0000-template.md).

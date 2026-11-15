@@ -6,7 +6,7 @@ Actio's usage-limits engine, inspired by the session and weekly limits of Claude
 - **A reference model** (`oracle.QuotaOracle`) implements the same operations in plain Python. It is the specification: differential tests run identical random event sequences against both engines and require identical results and identical stored state at every step.
 - **Credit math** (`cost`), **calendar reset windows** (`windows`), such as "every Monday at 00:00 in Europe/Istanbul", and **the engines' inputs and results** (`model`).
 
-The design and its trade-offs are in [ADR 0006](https://fatihrime.github.io/actio/adr/0006-usage-limits-engine/).
+The design and its trade-offs are in [ADR 0006](https://fatihrime.github.io/actio/adr/0006-usage-limits-engine/). How Actio's API uses the engine for every answer, with its prices, its plans and its ledger, is in [ADR 0020](https://fatihrime.github.io/actio/adr/0020-usage-limits-on-turns/).
 
 ## The rules
 
@@ -79,6 +79,8 @@ Each user has six keys, all under the hash tag `{u:<id>}`, so a cluster keeps th
 | `q:{u:<id>}:done_exp` | sorted set | The same reservations by when they're forgotten |
 
 Times come from the `now_ms` arguments, never from Valkey's clock, so tests can replay any sequence of events. Every write also sets all six keys to expire after 8 idle days; a returning user is rebuilt from the ledger.
+
+The `q` is a prefix the caller chooses. Actio's API uses `actio:q`, beside its rate limits' keys, and runs Valkey without any persistence: counters that came back from an old file would be there, and stale, and nothing would rebuild them.
 
 ## Tests
 
