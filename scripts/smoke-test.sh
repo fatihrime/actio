@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks a running stack (`make dev` or `make up`) through Caddy: the web page, the API's
-# health and readiness, and the API docs. Retries for up to a minute while the stack starts.
+# health and readiness, the API docs, a guest session, the models and the usage limits.
+# Retries for up to a minute while the stack starts.
 # Usage: scripts/smoke-test.sh [base URL]    (default: http://localhost:8080)
 set -uo pipefail
 
@@ -28,14 +29,17 @@ check "API readiness" /api/readyz '"status":"ready"'
 check "API docs" /api/docs 'swagger-ui'
 
 # A guest session, through the proxy: start one, read it back with its cookie, ask for
-# the models with it, end it. The models' answer is kept for the check after this one.
+# the models and the usage with it, end it. Those two answers are kept for the checks
+# after this one.
 models=""
+usage=""
 session_round_trip() {
   local jar started me
   jar="$(mktemp)"
   started="$(curl --silent --max-time 5 --cookie-jar "$jar" --request POST "$base/api/session/guest")"
   me="$(curl --silent --max-time 5 --cookie "$jar" "$base/api/me")"
   models="$(curl --silent --max-time 10 --cookie "$jar" "$base/api/models")"
+  usage="$(curl --silent --max-time 5 --cookie "$jar" "$base/api/usage")"
   curl --silent --max-time 5 --cookie "$jar" --request DELETE "$base/api/session" >/dev/null
   rm -f "$jar"
   [[ $started == *'"is_guest":true'* && $me == "$started" ]]
@@ -62,6 +66,15 @@ if [[ $models == *'"default":"'*'"models":[{'* ]]; then
   esac
 else
   printf '  ✗ %s: GET /api/models did not list any model\n' "models on offer"
+  failures=$((failures + 1))
+fi
+
+# The API read its plans file, and can say what a new guest may use: that takes the
+# counters in Valkey and, for an account it hasn't counted for yet, the ledger.
+if [[ $usage == *'"plan":{"id":"'*'"windows":['* ]]; then
+  printf '  ✓ %s\n' "usage limits"
+else
+  printf '  ✗ %s: GET /api/usage did not answer with a plan and its limits\n' "usage limits"
   failures=$((failures + 1))
 fi
 

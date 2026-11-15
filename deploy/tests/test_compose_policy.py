@@ -193,12 +193,33 @@ def test_a_rate_limit_set_in_env_reaches_the_api(limit: str) -> None:
     assert api_environment()[limit] is None  # left out: the API's own default applies
 
 
-def test_the_api_reads_the_models_file_from_a_read_only_mount(stack: dict[str, Any]) -> None:
-    """config/models.toml is edited on the host and read in the container. The mount must
-    land where the image expects the file, and the container must not be able to write it."""
+def test_valkey_keeps_nothing_on_disk(stack: dict[str, Any]) -> None:
+    """The usage limits' counters are rebuilt from the ledger when they are missing. A
+    Valkey that restarted with a file from before would hold counters that are there,
+    and stale: nothing would rebuild them. So it has no file to come back with: no
+    snapshots, no append-only file, and no volume to keep either in. See ADR 0020."""
+    valkey = stack["services"]["valkey"]
+    command = valkey["command"]
+
+    assert command[command.index("--save") + 1] == ""
+    assert command[command.index("--appendonly") + 1] == "no"
+    assert not valkey.get("volumes")
+    assert valkey["tmpfs"] == ["/data"]  # or Docker would make a volume of its own there
+    assert set(stack["volumes"]) == {"postgres-data"}
+
+
+@pytest.mark.parametrize(
+    "setting", ["ACTIO_MODELS_FILE", "ACTIO_PLANS_FILE"], ids=["models.toml", "plans.toml"]
+)
+def test_the_api_reads_its_two_files_from_a_read_only_mount(
+    stack: dict[str, Any], setting: str
+) -> None:
+    """config/models.toml and config/plans.toml are edited on the host and read in the
+    container. The mount must land where the image expects each file, and the container
+    must not be able to write them."""
     [mount] = stack["services"]["api"]["volumes"]
     dockerfile = (ROOT / "apps/api/Dockerfile").read_text()
-    expected = re.search(r"ACTIO_MODELS_FILE=(\S+)", dockerfile)
+    expected = re.search(rf"{setting}=(\S+)", dockerfile)
 
     assert expected is not None
     assert mount["type"] == "bind"
@@ -301,16 +322,17 @@ def test_the_fake_model_is_reached_by_the_api_alone_and_has_no_way_out(
     assert e2e["services"]["api"]["depends_on"]["fakellm"]["condition"] == "service_healthy"
 
 
-def test_the_e2e_stack_reads_its_own_models_file_where_the_api_expects_one(
+def test_the_e2e_stack_reads_its_own_files_where_the_api_expects_them(
     stack: dict[str, Any], e2e: dict[str, Any]
 ) -> None:
     """The overlay swaps the folder that is mounted, not the place it is mounted at.
-    What the file says is checked by the API's own tests, which can read it."""
+    What the files say is checked by the API's own tests, which can read them."""
     [usual] = stack["services"]["api"]["volumes"]
     [mount] = e2e["services"]["api"]["volumes"]
 
     assert Path(mount["source"]) == ROOT / "deploy" / "e2e" / "config"
     assert (Path(mount["source"]) / "models.toml").is_file()
+    assert (Path(mount["source"]) / "plans.toml").is_file()
     assert mount["target"] == usual["target"]
     assert mount["read_only"] is True
 

@@ -155,11 +155,22 @@ services:
     image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
     <<: *hardening
     user: valkey
-    command: [valkey-server, --requirepass, "${VALKEY_PASSWORD:?run make bootstrap to create .env}"]
+    # Nothing is kept on disk: no snapshots (--save ""), no append-only file. What
+    # Valkey holds, the rate limits' buckets and the usage limits' counters, is
+    # rebuilt or refilled when it is missing; the usage counters from the ledger in
+    # Postgres. A Valkey that came back with an old file would hold counters that look
+    # valid and are not. See docs/adr/0020-usage-limits-on-turns.md.
+    command:
+      - valkey-server
+      - --requirepass
+      - "${VALKEY_PASSWORD:?run make bootstrap to create .env}"
+      - --save
+      - ""
+      - --appendonly
+      - "no"
     environment:
       VALKEYCLI_AUTH: ${VALKEY_PASSWORD:?run make bootstrap to create .env} # for the health check
-    volumes:
-      - valkey-data:/data
+    tmpfs: [/data] # the image's working directory, declared a volume there; never written
     networks: [backend]
     mem_limit: 256m
     healthcheck:
@@ -176,4 +187,3 @@ networks:
 
 volumes:
   postgres-data:
-  valkey-data:
