@@ -12,15 +12,17 @@ from actio.core import schema
 DATABASE = "postgresql://actio:pw@127.0.0.1:1/actio"
 VALKEY = "valkey://127.0.0.1:1/0"
 MODELS = Path(__file__).resolve().parents[3] / "config" / "models.toml"
+PLANS = MODELS.with_name("plans.toml")
 
 
 @pytest.fixture(autouse=True)
 def stores(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The two required settings, and the repository's models file wherever the tests
-    are run from. Nothing in these tests connects unless it says so."""
+    """The two required settings, and the repository's models and plans files wherever
+    the tests are run from. Nothing in these tests connects unless it says so."""
     monkeypatch.setenv("ACTIO_DATABASE_URL", DATABASE)
     monkeypatch.setenv("ACTIO_VALKEY_URL", VALKEY)
     monkeypatch.setenv("ACTIO_MODELS_FILE", str(MODELS))
+    monkeypatch.setenv("ACTIO_PLANS_FILE", str(PLANS))
 
 
 def test_api_role_serves_the_app_factory_with_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,12 +106,67 @@ def test_a_mistake_in_the_models_file_is_said_in_one_line(
     )
 
 
-def test_migrating_needs_no_models_file(
+def test_the_api_does_not_start_without_its_plans_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    missing = tmp_path / "plans.toml"
+    monkeypatch.setenv("ACTIO_PLANS_FILE", str(missing))
+    monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it started"))
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "api"])
+
+    assert stopped.value.code == 2
+    said = capsys.readouterr().err
+    assert said.startswith(f"actio: the plans file '{missing}' doesn't exist.")
+    assert "ACTIO_PLANS_FILE" in said
+    assert said.count("\n") == 1
+
+
+def test_a_mistake_in_the_plans_file_is_said_in_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    broken = tmp_path / "plans.toml"
+    broken.write_text(PLANS.read_text().replace('guests = "guest"', 'guests = "visitor"'))
+    monkeypatch.setenv("ACTIO_PLANS_FILE", str(broken))
+    monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it started"))
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "api"])
+
+    assert stopped.value.code == 2
+    assert capsys.readouterr().err == (
+        f'actio: {broken}: guests = "visitor" is not one of the plans\n'
+    )
+
+
+def test_the_api_does_not_start_while_a_model_on_offer_has_no_price(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The two files are edited apart. Offering a model and forgetting what it costs
+    must not make it free, or fail at the first question: it stops the start."""
+    unpriced = tmp_path / "plans.toml"
+    unpriced.write_text(PLANS.read_text().replace("[prices.standard]", "[prices.standrd]"))
+    monkeypatch.setenv("ACTIO_PLANS_FILE", str(unpriced))
+    monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it started"))
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "api"])
+
+    assert stopped.value.code == 2
+    assert capsys.readouterr().err == (
+        f'actio: {unpriced}: prices: the model "standard" is on offer and has no price. '
+        "Add [prices.standard]; input = 0 and output = 0 make it free\n"
+    )
+
+
+def test_migrating_needs_no_models_file_and_no_plans_file(
     monkeypatch: pytest.MonkeyPatch, database_url: str, tmp_path: Path
 ) -> None:
     """The migration job changes the database and exits: it never talks to a model."""
     monkeypatch.setenv("ACTIO_DATABASE_URL", database_url)
     monkeypatch.setenv("ACTIO_MODELS_FILE", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ACTIO_PLANS_FILE", str(tmp_path / "missing-too.toml"))
 
     cli.main(["--role", "migrate"])
 

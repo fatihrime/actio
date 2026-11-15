@@ -1,0 +1,65 @@
+# What using a model costs, and how much each kind of account may use.
+#
+# Usage is counted in credits. A request must fit in two windows at once: a session,
+# which opens with the first message and lasts some hours, and the week. Near a limit
+# an answer gets less room; with too little left to answer at all, the request is
+# refused, and told when the window starts over.
+#
+# The API reads this file when it starts: restart it after a change. A mistake here
+# stops it from starting, with a message that says what is wrong.
+# See docs/adr/0020-usage-limits-on-turns.md.
+
+# Which of the plans below a visitor who hasn't signed up gets, and which an account.
+guests = "guest"
+accounts = "free"
+
+# --- The two windows --------------------------------------------------------------------
+
+# A session opens with the first message, and lasts this long.
+session_hours = 5
+
+# The week starts over at this moment, by the clock of the place named: a day (MON to
+# SUN), a time, and a time zone such as Europe/Istanbul or UTC.
+week_resets = "MON 00:00 Europe/Istanbul"
+
+# The shortest answer worth starting, in tokens. A request that can't afford this much
+# is refused, instead of being answered in a handful of words.
+min_answer_tokens = 256
+
+# --- What a model costs -----------------------------------------------------------------
+#
+# In credits per million tokens, for every model in models.toml, under the same name:
+#
+# input         what the model reads: the conversation so far
+# output        what it writes: its answer, and its reasoning
+# cached_input  what it reads again from its server's cache. Left out: the price of input
+#
+# Here a credit is one token of an answer, and reading costs a quarter of writing. A
+# question with a page of conversation behind it and a page of answer costs about 600.
+#
+# A model with input = 0 and output = 0 is free: it uses up no credits, so it is never
+# refused. Whether a machine of your own is shared out fairly, or just used, is yours
+# to say here.
+
+[prices.standard]
+input = 250_000
+output = 1_000_000
+cached_input = 25_000
+
+# --- The plans --------------------------------------------------------------------------
+#
+# title            what people see
+# session_credits  how much one session allows
+# week_credits     how much one week allows
+#
+# Leave a line out and that window has no limit. A plan with neither limits nothing.
+
+[plans.guest]
+title = "Guest"
+session_credits = 25_000
+week_credits = 100_000
+
+[plans.free]
+title = "Free"
+session_credits = 100_000
+week_credits = 600_000

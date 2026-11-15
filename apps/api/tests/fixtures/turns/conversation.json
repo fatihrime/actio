@@ -55,6 +55,8 @@
           "load_ms": null,
           "prompt_ms": null,
           "generation_ms": null,
+          "credits": 45,
+          "capped_by_usage": false,
           "started_at": "2026-11-10T12:00:00Z",
           "finished_at": "2026-11-10T12:00:00Z"
         }

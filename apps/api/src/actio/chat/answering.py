@@ -10,6 +10,10 @@ database. Whatever happens on the way, the turn doesn't stay `running`:
 - whoever was listening leaves: `stopped`, with what had arrived. Closing the stream
   also closes the connection to the model, which stops generating.
 
+Recording a turn also settles what it cost. Credits were held for it before it started
+(`actio.usage.limits`). What it used goes into the usage ledger in the transaction that
+records its outcome, and only then are the counters told: see `_record`.
+
 Nothing here knows about HTTP, or about the format a browser reads: `actio.api.turns`
 turns the steps into that.
 """
@@ -30,6 +34,7 @@ from actio.catalog import OfferedModel
 from actio.chat import turns
 from actio.chat.parts import Part, ReasoningPart, TextPart
 from actio.chat.turns import Ending
+from actio.usage.limits import Reserved, UsageLimits
 from actio_llm import (
     ChatRequest,
     ContextOverflowError,
@@ -43,7 +48,9 @@ from actio_llm import (
     StreamEvent,
     StreamInterruptedError,
     TextDelta,
+    tokens_in,
 )
+from actio_quota import UsageWarning
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +125,12 @@ class Ended:
     ending: Ending
     at: datetime
     """When it was recorded: the turn's `finished_at`, and its answer's `created_at`."""
+    credits: int | None = None
+    """What the turn cost its account. `None`: nothing, and nothing was written to the
+    usage ledger."""
+    warnings: tuple[UsageWarning, ...] = ()
+    """The shares of a usage window, such as 75 percent of the session, that this turn
+    was the first to pass."""
 
 
 type Step = Opened | Wrote | Closed
@@ -192,12 +205,15 @@ async def answer(
     answer_id: uuid.UUID,
     open_session: async_sessionmaker[AsyncSession],
     clock: Callable[[], datetime],
+    usage: UsageLimits,
+    reserved: Reserved,
 ) -> AsyncGenerator[Step | Ended]:
     """Ask the model, yield its answer step by step, and record the turn at the end.
 
-    The turn was started before (`turns.ask`). This writes its outcome in a transaction
-    of its own, from `open_session`, and yields `Ended` once that is done: whoever
-    reads that far can rely on the answer being stored.
+    The turn was started before (`turns.ask`), and `reserved` holds the credits it may
+    cost. This writes its outcome, and what it used, in a transaction of its own, from
+    `open_session`. It yields `Ended` once that is done: whoever reads that far can rely
+    on the answer being stored, and counted.
     """
     collected = Answer()
     ending: Ending | None = None
@@ -233,8 +249,53 @@ async def answer(
             # unshielded write would be cancelled with it, leaving the turn `running`.
             finished = clock()
             with anyio.CancelScope(shield=True):
-                await _record(open_session, conversation_id, turn_id, ending, answer_id, finished)
-    yield Ended(ending, finished)
+                credits, warnings = await _record(
+                    open_session,
+                    conversation_id,
+                    turn_id,
+                    ending,
+                    answer_id,
+                    finished,
+                    usage,
+                    reserved,
+                )
+    yield Ended(ending, finished, credits, warnings)
+
+
+@dataclass(frozen=True, slots=True)
+class _Used:
+    """The tokens to count for a turn."""
+
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    estimated: bool
+    """Whether they are Actio's guess, because the provider reported none."""
+
+
+def _used(ending: Ending, reserved: Reserved) -> _Used | None:
+    """What to count for a turn that ended this way. `None`: nothing.
+
+    - **A failed turn costs nothing.** The fault was the model's, or Actio's own.
+    - **A provider's count is taken as it is.**
+    - **Without one, what was written is counted by guess,** with the guess at the
+      prompt that was made before the turn started. That is every stopped turn: a
+      stream that is closed never sends its count. So stopping an answer at its last
+      word doesn't make it free.
+    - **A turn that wrote nothing, and has no count, costs nothing.** Nobody can say
+      whether the model had even begun to read.
+    """
+    if ending.status == "failed":
+        return None
+    if ending.usage is not None:
+        counted = ending.usage
+        return _Used(
+            counted.input_tokens, counted.cached_input_tokens, counted.output_tokens, False
+        )
+    written = sum(tokens_in(part.text) for part in ending.parts)
+    if written == 0:
+        return None
+    return _Used(reserved.prompt_tokens, 0, written, estimated=True)
 
 
 async def _record(
@@ -244,14 +305,42 @@ async def _record(
     ending: Ending,
     answer_id: uuid.UUID,
     now: datetime,
-) -> None:
+    usage: UsageLimits,
+    reserved: Reserved,
+) -> tuple[int | None, tuple[UsageWarning, ...]]:
+    """Write how the turn ended, and what it used, in one transaction. Then tell the
+    counters. Returns what it cost, and the warnings the counters gave.
+
+    In that order, because the counters can be lost and are then rebuilt from the
+    ledger: what they have counted must be in the ledger already.
+    """
+    used = _used(ending, reserved)
+    credits = None
     try:
         async with open_session() as db:
-            await turns.finish(db, conversation_id, turn_id, ending, answer_id=answer_id, now=now)
+            if used is not None:
+                credits = usage.record(
+                    db,
+                    reserved,
+                    input_tokens=used.input_tokens,
+                    cached_input_tokens=used.cached_input_tokens,
+                    output_tokens=used.output_tokens,
+                    estimated=used.estimated,
+                    now=now,
+                )
+            await turns.finish(
+                db, conversation_id, turn_id, ending, answer_id=answer_id, now=now, credits=credits
+            )
             await db.commit()
     except (SQLAlchemyError, OSError) as error:
-        # The turn stays `running` and is given up on later, as `interrupted`.
+        # The turn stays `running` and is given up on later, as `interrupted`. Nothing
+        # of it was written, so nothing is counted for it either.
         logger.error(
             "turn %s: its outcome couldn't be recorded (%s)", turn_id, type(error).__name__
         )
+        await usage.release(reserved, now=now)
         raise
+    if credits is None:
+        await usage.release(reserved, now=now)
+        return None, ()
+    return credits, await usage.settle(reserved, credits, now=now)

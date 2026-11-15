@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     """The file that lists the models on offer. The default is where the repository
     keeps it, seen from the repository's root; the container image sets its own path."""
 
+    plans_file: Path = Path("config/plans.toml")
+    """The file that says what the models cost, and how much each kind of account may
+    use. Found the same way as the models file."""
+
     ollama_url: str = Field(default="http://127.0.0.1:11434", pattern=r"^https?://[^\s/]+/?$")
     """Where the Ollama server is, as seen from this process. From inside a container,
     ``127.0.0.1`` is the container itself: ``compose.yaml`` points at the host instead."""

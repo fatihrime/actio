@@ -244,6 +244,10 @@ export function turn(changes: Partial<Turn> = {}): Turn {
     load_ms: null,
     prompt_ms: null,
     generation_ms: null,
+    // At the repository's prices: a quarter of a credit for a token read, one for a
+    // token written.
+    credits: 9,
+    capped_by_usage: false,
     started_at: MOMENT,
     finished_at: MOMENT,
     ...changes,

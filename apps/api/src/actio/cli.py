@@ -19,6 +19,8 @@ import uvicorn
 from actio.catalog import CatalogError, read_file
 from actio.core import schema
 from actio.core.settings import Settings
+from actio.usage.plans import PlansError
+from actio.usage.plans import load as load_plans
 
 ROLES = ("api", "migrate")
 
@@ -42,10 +44,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     try:
-        # The app reads the models file again when it starts. Reading it here first
-        # turns a mistake in it into one clear line, instead of a failed startup's trace.
-        read_file(settings.models_file)
-    except CatalogError as error:
+        # The app reads the two files again when it starts. Reading them here first
+        # turns a mistake in one into one clear line, instead of a failed startup's trace.
+        offered = read_file(settings.models_file).models
+        load_plans(settings.plans_file, models=offered)
+    except (CatalogError, PlansError) as error:
         parser.exit(2, f"actio: {error}\n")
 
     uvicorn.run(

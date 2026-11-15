@@ -6,12 +6,14 @@ from datetime import datetime
 from typing import Any, Literal
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     String,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -158,5 +160,11 @@ class Turn(Base):
     generation_ms: Mapped[int | None]
     """Where the time went, for providers that say: loading the model, reading the
     prompt, writing the answer."""
+    credits: Mapped[int | None] = mapped_column(BigInteger)
+    """What the turn cost its account, as the usage ledger has it. Empty for a turn
+    that cost nothing: one that failed, or produced nothing."""
+    capped_by_usage: Mapped[bool] = mapped_column(server_default=false())
+    """Whether the answer was given less room than the model allows, because a usage
+    limit was near. With the finish reason `length`, that is why it was cut."""
     created_at: Mapped[datetime]
     finished_at: Mapped[datetime | None]

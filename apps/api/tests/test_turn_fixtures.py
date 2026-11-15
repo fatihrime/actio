@@ -103,6 +103,23 @@ async def test_an_answer_cut_off_at_the_limit_streams_what_was_recorded(scripted
     as_recorded("cut_off.sse", response.text)
 
 
+async def test_an_answer_that_passes_half_of_a_usage_limit_streams_what_was_recorded(
+    scripted: Any, plans_with: Any
+) -> None:
+    """The one chunk of Actio's own in the stream: a data part, which the library has to
+    accept and hand to the page without making it part of the message."""
+    _, browser = await scripted(
+        TextDelta("That was "),
+        TextDelta("half of it."),
+        Finish(FinishReason.STOP, Usage(input_tokens=300, output_tokens=250)),
+        plans=plans_with(guest=(1_000, 10_000)),
+    )
+
+    response = await turn(browser, "How much may I still ask?")
+
+    as_recorded("usage_warning.sse", response.text)
+
+
 async def test_a_conversation_reads_back_as_it_was_recorded(api: httpx.AsyncClient) -> None:
     """The messages a browser gets when it opens a conversation again. The web app's
     test checks that the `ai` package accepts them as its own kind of message."""

@@ -15,24 +15,18 @@ Nothing here knows about HTTP: the route is in `actio.api.models`.
 
 import asyncio
 import os
-import tomllib
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Literal, Self
 
 import httpx2
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    StringConstraints,
-    ValidationError,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from actio.core import config_file
+from actio.core.config_file import Name
 from actio.core.settings import Settings
 from actio_llm import (
     ChatProvider,
@@ -52,9 +46,6 @@ TIMEOUTS = Timeouts(connect_s=2.0, request_s=3.0)
 """Asking for a status is a small call: a provider that takes longer than this counts as
 away. Waiting for an answer to start, and between its pieces, keeps the adapters' own,
 much longer, patience."""
-
-type Name = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")]
-"""The name of a model or a provider in the file: short, lower-case, safe in a URL."""
 
 type Kind = Literal["ollama", "openai-compatible"]
 
@@ -140,30 +131,15 @@ class CatalogFile(BaseModel):
 
 def read_file(path: Path) -> CatalogFile:
     """Read and check the models file. Raises `CatalogError` naming the file and the fault."""
-    try:
-        with path.open("rb") as file:
-            data = tomllib.load(file)
-    except FileNotFoundError:
-        raise CatalogError(
-            f"the models file {str(path)!r} doesn't exist. Set ACTIO_MODELS_FILE to where "
-            "it is; the repository has one at config/models.toml"
-        ) from None
-    except OSError as error:
-        raise CatalogError(f"can't read the models file {str(path)!r}: {error}") from error
-    except tomllib.TOMLDecodeError as error:
-        raise CatalogError(f"{path} isn't valid TOML: {error}") from error
-    try:
-        return CatalogFile.model_validate(data)
-    except ValidationError as error:
-        raise CatalogError(f"{path}: {'; '.join(map(_in_words, error.errors()))}") from None
-
-
-def _in_words(fault: Mapping[str, Any]) -> str:
-    """One fault as `models.big.context_window: what is wrong with it`. A fault of the
-    file as a whole, such as a default that isn't a model, names its place itself."""
-    where = ".".join(str(part) for part in fault["loc"])
-    what = str(fault["msg"]).removeprefix("Value error, ")
-    return f"{where}: {what}" if where else what
+    return config_file.read(
+        path,
+        CatalogFile,
+        what="models",
+        elsewhere=(
+            "Set ACTIO_MODELS_FILE to where it is; the repository has one at config/models.toml"
+        ),
+        failure=CatalogError,
+    )
 
 
 # --- What the rest of Actio uses ------------------------------------------------------

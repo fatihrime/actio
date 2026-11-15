@@ -169,6 +169,9 @@ async def test_a_question_is_answered_as_a_stream(chat: Chat, server_ids: Any) -
         "load_ms": None,
         "prompt_ms": None,
         "generation_ms": None,
+        # A credit a token here, read or written: see `plans_with` in conftest.py.
+        "credits": len(TODAY.content.split()) + 2 + 3,
+        "capped_by_usage": False,
         "started_at": "2026-11-10T12:00:00Z",
         "finished_at": "2026-11-10T12:00:00Z",
     }

@@ -121,13 +121,15 @@ class RateLimits:
             seconds = math.ceil(wait.total_seconds())
             raise Problem(
                 429,
-                f"{what} Try again in {_in_words(seconds)}.",
+                f"{what} Try again in {in_words(seconds)}.",
                 headers={"Retry-After": str(seconds)},
                 retry_after=seconds,
             )
 
 
-def _in_words(seconds: int) -> str:
+def in_words(seconds: int) -> str:
+    """How long a wait is, for a person: in the largest unit that still says enough,
+    rounded up, so that nobody tries again too early."""
     if seconds == 1:
         return "1 second"
     if seconds < 120:
@@ -135,7 +137,10 @@ def _in_words(seconds: int) -> str:
     minutes = math.ceil(seconds / 60)
     if minutes < 120:
         return f"{minutes} minutes"
-    return f"{math.ceil(minutes / 60)} hours"
+    hours = math.ceil(minutes / 60)
+    if hours < 48:
+        return f"{hours} hours"
+    return f"{math.ceil(hours / 24)} days"
 
 
 def get_rate_limits(

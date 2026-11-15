@@ -27,25 +27,30 @@ COPY packages/quota/pyproject.toml packages/quota/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --package actio --no-install-workspace
 
-# Then the app itself, and the workspace package it uses to talk to models, installed
-# as regular packages: the source tree stays behind.
+# Then the app itself, and the two workspace packages it is built on: the model clients
+# and the usage-limits engine. They are installed as regular packages: the source tree
+# stays behind.
 COPY apps/api/src apps/api/src
 COPY packages/llm/README.md packages/llm/
 COPY packages/llm/src packages/llm/src
+COPY packages/quota/README.md packages/quota/
+COPY packages/quota/src packages/quota/src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --package actio --no-editable
 
 FROM python:3.13.18-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS runtime
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin actio
 COPY --from=build /app/.venv /app/.venv
-# The models on offer. The image carries the repository's file so that it starts on its
-# own; compose.yaml mounts ./config over it, so the file can change without a rebuild.
+# The models on offer, and what they cost. The image carries the repository's files so
+# that it starts on its own; compose.yaml mounts ./config over them, so they can change
+# without a rebuild.
 COPY config /app/config
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     ACTIO_HOST=0.0.0.0 \
-    ACTIO_MODELS_FILE=/app/config/models.toml
+    ACTIO_MODELS_FILE=/app/config/models.toml \
+    ACTIO_PLANS_FILE=/app/config/plans.toml
 USER actio
 EXPOSE 8000
 CMD ["actio", "--role", "api"]

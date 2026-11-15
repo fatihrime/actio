@@ -24,6 +24,8 @@ interface Metadata {
     finish_reason: string | null;
     error: string | null;
     output_tokens: number | null;
+    credits: number | null;
+    capped_by_usage: boolean;
   };
 }
 
@@ -56,6 +58,31 @@ async function replay(
     states.push(structuredClone(message));
   }
   return { states, errors };
+}
+
+/** The chunks of a recorded stream, as the library's transport hands them on after
+ * checking each against its own description of a chunk. */
+async function chunksOf(name: string): Promise<{ type: string }[]> {
+  const transport = new DefaultChatTransport<Message>({
+    api: "http://actio.test/api/conversations/c1/turns",
+    fetch: () => Promise.resolve(streamed(name)),
+  });
+  const stream = await transport.sendMessages({
+    trigger: "submit-message",
+    chatId: "c1",
+    messageId: undefined,
+    messages: [],
+    abortSignal: undefined,
+  });
+  const chunks: { type: string }[] = [];
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      return chunks;
+    }
+    chunks.push(value);
+  }
 }
 
 function last(states: Message[]): Message {
@@ -138,6 +165,36 @@ describe("a recorded turn, read by the ai package", () => {
       status: "completed",
       finish_reason: "length",
     });
+  });
+
+  it("says in the metadata what the turn cost", async () => {
+    const { states } = await replay("answer.sse");
+
+    expect(states[0]?.metadata?.turn).toMatchObject({
+      credits: null,
+      capped_by_usage: false,
+    });
+    // The fake model read 30 tokens and wrote 6, at a credit each.
+    expect(last(states).metadata?.turn.credits).toBe(36);
+  });
+
+  it("takes a usage warning as a chunk of the stream, and keeps it out of the message", async () => {
+    const { states, errors } = await replay("usage_warning.sse");
+    const chunks = await chunksOf("usage_warning.sse");
+
+    expect(errors).toEqual([]);
+    expect(chunks.filter((chunk) => chunk.type.startsWith("data-"))).toEqual([
+      {
+        type: "data-usage-warning",
+        data: { window: "session", percent: 50 },
+        transient: true,
+      },
+    ]);
+    // It is for the page to show once, not something the model said.
+    expect(last(states).parts).toEqual([
+      { type: "step-start" },
+      { type: "text", text: "That was half of it.", state: "done" },
+    ]);
   });
 
   it("reports a model that can't be reached as an error, with the turn's outcome", async () => {

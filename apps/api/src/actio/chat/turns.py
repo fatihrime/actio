@@ -178,8 +178,12 @@ async def finish(
     *,
     answer_id: uuid.UUID,
     now: datetime,
+    credits: int | None = None,
 ) -> Turn | None:
     """Record how a turn ended, and write its answer if the model produced anything.
+
+    `credits` is what the turn cost its account, when it cost something: the same
+    number the usage ledger gets, in the same transaction.
 
     Returns the turn, or `None` if its conversation was deleted meanwhile. A turn that
     is no longer `running`, because it was given up on, is left as it is.
@@ -216,6 +220,7 @@ async def finish(
         turn.load_ms = ending.timings.load_ms
         turn.prompt_ms = ending.timings.prompt_ms
         turn.generation_ms = ending.timings.generation_ms
+    turn.credits = credits
     turn.finished_at = now
     await db.flush()
     return turn

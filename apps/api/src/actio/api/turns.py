@@ -11,14 +11,21 @@ What goes wrong before a model is asked is an ordinary error: 404, 409, 422, 429
 Once the turn has started the answer is `200`, and everything else, the model's own
 failures included, comes in the stream (`actio.api.ui_stream`).
 
+A turn costs credits, and an account has only so many per session and per week
+(`actio.usage`). Before a model is asked, the most the turn can cost is held. A turn
+that doesn't fit is answered 429, with the moment the limit starts over, and nothing of
+it is stored: the question was never asked.
+
 The conversation's and the question's ids are chosen by whoever sends them, as a
 browser does before it has heard from the server. The question's id also makes a
 repeated request harmless: the same message is never asked twice.
 """
 
+import math
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Self
 
@@ -38,15 +45,25 @@ from actio.api.dependencies import (
     Models,
     NewId,
     Now,
+    Usage,
 )
 from actio.api.problems import Problem
-from actio.api.rate_limits import Limits
+from actio.api.rate_limits import Limits, in_words
+from actio.api.usage import UNAVAILABLE
 from actio.catalog import OfferedModel, UnknownModelError
 from actio.chat import answering, context, tree, turns
 from actio.chat.answering import Ended
 from actio.chat.parts import TextPart
-from actio.chat.turns import Begun, Ending
-from actio_llm import ChatRequest
+from actio.chat.turns import Begun
+from actio.identity.sessions import Principal
+from actio.usage.limits import (
+    Account,
+    LimitReachedError,
+    Reserved,
+    UsageLimits,
+    UsageUnavailableError,
+)
+from actio_llm import ChatRequest, prompt_tokens
 
 router = APIRouter(tags=["conversations"], responses=NO_SESSION)
 
@@ -115,10 +132,15 @@ class TurnRequest(BaseModel):
         },
         404: {"description": "No such conversation, or no such message in it."},
         409: {"description": "The message was sent before, or an answer is still being written."},
-        429: {"description": "Too many messages. `Retry-After` says how long to wait."},
+        429: {
+            "description": "Too many messages in a short time, or a usage limit is "
+            "reached. `Retry-After` says how long to wait. For a usage limit, `window` "
+            "names the one that is full, `resets_at` says when it starts over, and "
+            "`alternatives` lists the models that cost nothing."
+        },
         503: {
             "description": "The model can't answer right now: `model_status` says why. "
-            "Or messages can't be counted right now."
+            "Or messages, or usage, can't be counted right now."
         },
     },
 )
@@ -129,6 +151,7 @@ async def start_turn(
     db: Database,
     catalog: Models,
     limits: Limits,
+    usage: Usage,
     resources: AppResources,
     clock: Clock,
     now: Now,
@@ -147,8 +170,6 @@ async def start_turn(
         raise Problem(422, "This model can't reason before it answers.", model=offered.name)
 
     begun = await _begin(db, body, conversation_id, principal.user_id, offered, new_id(), now)
-    await db.commit()
-
     request = ChatRequest(
         model=offered.model,
         messages=context.for_model(begun.history, now=now),
@@ -158,7 +179,17 @@ async def start_turn(
         # must not be told anything: its server refuses the setting.
         thinking=body.thinking if status.thinking else None,
     )
-    chunks = _stream(begun, offered, request, new_id(), resources.database, clock)
+    # Before anything is committed: a turn that is refused here leaves nothing behind.
+    reserved = await _reserve(usage, db, principal, begun, offered, request, now)
+    begun.turn.capped_by_usage = reserved.capped
+    try:
+        await db.commit()
+    except Exception:
+        await usage.release(reserved, now=now)  # the turn never started
+        raise
+
+    request = replace(request, max_output_tokens=reserved.max_output_tokens)
+    chunks = _stream(begun, offered, request, new_id(), resources.database, clock, usage, reserved)
     return StreamingResponse(chunks, media_type=ui_stream.MEDIA_TYPE, headers=ui_stream.HEADERS)
 
 
@@ -218,6 +249,63 @@ async def _begin(
         raise Problem(409, "This id is already in use. Choose another.") from None
 
 
+async def _reserve(
+    usage: UsageLimits,
+    db: AsyncSession,
+    principal: Principal,
+    begun: Begun,
+    offered: OfferedModel,
+    request: ChatRequest,
+    now: datetime,
+) -> Reserved:
+    """Hold the credits the turn may cost, or say as a problem why it can't run.
+
+    The hold lasts as long as a turn may stay `running`: one that outlives it is given
+    up on, and gets nothing counted.
+    """
+    try:
+        return await usage.reserve(
+            db,
+            Account(principal.user_id, is_guest=principal.is_guest),
+            begun.turn.id,
+            model=offered.name,
+            prompt_tokens=prompt_tokens(request.messages),
+            max_output_tokens=offered.max_output_tokens,
+            hold_for=turns.STALE_AFTER,
+            now=now,
+        )
+    except UsageUnavailableError:
+        raise Problem(503, UNAVAILABLE) from None
+    except LimitReachedError as reached:
+        raise _limit_reached(reached, now) from None
+
+
+def _limit_reached(reached: LimitReachedError, now: datetime) -> Problem:
+    """The 429 for a turn that doesn't fit: which window is full, and when it starts
+    over. The words are for a person; the members beside them are for a page that
+    wants to count down, or to offer a model that costs nothing."""
+    window = reached.window  # `session` or `week`: the word reads as it is
+    if reached.resets_at is None:
+        return Problem(
+            429,
+            f"This message alone needs more than your plan allows in a {window}.",
+            window=window,
+            resets_at=None,
+            alternatives=reached.alternatives,
+        )
+    seconds = max(1, math.ceil((reached.resets_at - now).total_seconds()))
+    return Problem(
+        429,
+        f"You've reached your usage limit for this {window}. It resets in {in_words(seconds)}.",
+        headers={"Retry-After": str(seconds)},
+        retry_after=seconds,
+        window=window,
+        # Written as every other moment in this API is: in UTC, ending in `Z`.
+        resets_at=reached.resets_at.isoformat().replace("+00:00", "Z"),
+        alternatives=reached.alternatives,
+    )
+
+
 async def _stream(
     begun: Begun,
     offered: OfferedModel,
@@ -225,6 +313,8 @@ async def _stream(
     answer_id: uuid.UUID,
     open_session: async_sessionmaker[AsyncSession],
     clock: Callable[[], datetime],
+    usage: UsageLimits,
+    reserved: Reserved,
 ) -> AsyncIterator[bytes]:
     """The turn as server-sent events, from `start` to `[DONE]`."""
     turn = begun.turn
@@ -254,21 +344,23 @@ async def _stream(
         answer_id=answer_id,
         open_session=open_session,
         clock=clock,
+        usage=usage,
+        reserved=reserved,
     )
     async with aclosing(steps):
         async for step in steps:
             if not isinstance(step, Ended):
                 yield ui_stream.event(ui_stream.for_step(step))
                 continue
-            ended = metadata(
-                _ended(running, step.ending, step.at), step.at, written=bool(step.ending.parts)
-            )
+            ended = metadata(_ended(running, step), step.at, written=bool(step.ending.parts))
             if step.ending.status == "failed":
                 # The details first: the chunk after them ends the stream for the reader.
                 yield ui_stream.event({"type": "message-metadata", "messageMetadata": ended})
                 explanation = answering.EXPLANATIONS[step.ending.error or "internal_error"]
                 yield ui_stream.event({"type": "error", "errorText": explanation})
             else:
+                for warning in step.warnings:
+                    yield ui_stream.event(ui_stream.usage_warning(warning.bucket, warning.percent))
                 yield ui_stream.event({"type": "finish-step"})
                 reason = ui_stream.FINISH_REASONS.get(step.ending.finish_reason or "", "other")
                 yield ui_stream.event(
@@ -277,8 +369,9 @@ async def _stream(
     yield ui_stream.DONE
 
 
-def _ended(running: TurnOut, ending: Ending, at: datetime) -> TurnOut:
+def _ended(running: TurnOut, ended: Ended) -> TurnOut:
     """The turn as it was recorded, without reading it back."""
+    ending = ended.ending
     usage, timings = ending.usage, ending.timings
     return running.model_copy(
         update={
@@ -291,6 +384,7 @@ def _ended(running: TurnOut, ending: Ending, at: datetime) -> TurnOut:
             "load_ms": timings.load_ms if timings else None,
             "prompt_ms": timings.prompt_ms if timings else None,
             "generation_ms": timings.generation_ms if timings else None,
-            "finished_at": at,
+            "credits": ended.credits,
+            "finished_at": ended.at,
         }
     )

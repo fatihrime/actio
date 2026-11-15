@@ -6,7 +6,7 @@ The Postgres and Valkey servers come from the conftest.py at the repository's ro
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Iterable, Iterator
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -30,6 +30,7 @@ from actio.core import schema
 from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
 from actio.identity.passwords import Passwords
+from actio.usage.plans import Plans, PlansFile
 from actio_fakellm.app import create_app as create_fake_llm
 from actio_llm import ChatProvider, ChatRequest, StreamEvent
 
@@ -157,6 +158,63 @@ async def catalog() -> AsyncIterator[Catalog]:
         yield built
 
 
+def plans_for_tests(
+    *,
+    guest: tuple[int, int] | None = (1_000_000, 10_000_000),
+    account: tuple[int, int] | None = (1_000_000, 10_000_000),
+    free: bool = False,
+    min_answer_tokens: int = 16,
+    models: Iterable[str] = ("standard",),
+) -> Plans:
+    """Prices and plans for the app under test.
+
+    A model costs a credit a token, read or written, so what a turn costs is its tokens
+    added up. `free=True` makes it cost nothing. `guest` and `account` are what each may
+    use in a session and in a week, or `None` for no limits; by default far more than a
+    test uses. `models` are the models to price: the one that nearly every catalog here
+    offers, unless a test offers others.
+    """
+
+    def plan(title: str, allowance: tuple[int, int] | None) -> dict[str, Any]:
+        if allowance is None:
+            return {"title": title}
+        return {"title": title, "session_credits": allowance[0], "week_credits": allowance[1]}
+
+    price = 0 if free else 1_000_000
+    return Plans(
+        PlansFile.model_validate(
+            {
+                "guests": "guest",
+                "accounts": "member",
+                "session_hours": 5,
+                "week_resets": "MON 00:00 UTC",
+                "min_answer_tokens": min_answer_tokens,
+                "prices": {name: {"input": price, "output": price} for name in models},
+                "plans": {"guest": plan("Guest", guest), "member": plan("Member", account)},
+            }
+        )
+    )
+
+
+class PlansWith(Protocol):
+    def __call__(
+        self,
+        *,
+        guest: tuple[int, int] | None = ...,
+        account: tuple[int, int] | None = ...,
+        free: bool = ...,
+        min_answer_tokens: int = ...,
+        models: Iterable[str] = ...,
+    ) -> Plans: ...
+
+
+@pytest.fixture
+def plans_with() -> PlansWith:
+    """Call it for plans with limits a test can reach: `plans_with(guest=(1_000, 10_000))`
+    lets a guest use 1,000 credits a session and 10,000 a week. See `plans_for_tests`."""
+    return plans_for_tests
+
+
 class ScriptedModel:
     """A model that says exactly what a test tells it to, and remembers what it was asked.
 
@@ -259,6 +317,7 @@ class StartApp(Protocol):
         address: str = "127.0.0.1",
         passwords: Passwords | None = None,
         catalog: Catalog | None = None,
+        plans: Plans | None = None,
     ) -> Awaitable[httpx.AsyncClient]: ...
 
 
@@ -272,8 +331,8 @@ async def start_app(
     the app's public address, so it keeps cookies as a browser there would. The app
     reads the time from `clock`, and takes the ids of the turns and answers it creates
     from `server_ids`. `address` is the network address the app sees the requests come
-    from. `passwords` replaces the cheap password hasher, to watch it, and `catalog`
-    the fake models.
+    from. `passwords` replaces the cheap password hasher, to watch it, `catalog` the
+    fake models, and `plans` the usage limits, which are otherwise out of reach.
     """
     fake_models = catalog
     async with AsyncExitStack() as stack:
@@ -284,11 +343,14 @@ async def start_app(
             address: str = "127.0.0.1",
             passwords: Passwords | None = None,
             catalog: Catalog | None = None,
+            plans: Plans | None = None,
         ) -> httpx.AsyncClient:
+            offered = catalog or fake_models
             app = create_app(
                 settings,
                 passwords=passwords or cheap_passwords(),
-                catalog=catalog or fake_models,
+                catalog=offered,
+                plans=plans or plans_for_tests(models=[model.name for model in offered]),
             )
             app.dependency_overrides[get_clock] = lambda: lambda: clock.now
             app.dependency_overrides[get_new_id] = lambda: server_ids
@@ -325,7 +387,7 @@ async def api(start_app: StartApp, settings: Settings, migrated: str) -> httpx.A
 
 
 class Serve(Protocol):
-    def __call__(self, catalog: Catalog) -> Awaitable[str]: ...
+    def __call__(self, catalog: Catalog, *, plans: Plans | None = None) -> Awaitable[str]: ...
 
 
 @pytest.fixture
@@ -342,8 +404,13 @@ async def serve(
     assert migrated
     running: list[tuple[uvicorn.Server, asyncio.Task[None]]] = []
 
-    async def start(catalog: Catalog) -> str:
-        app = create_app(settings, passwords=cheap_passwords(), catalog=catalog)
+    async def start(catalog: Catalog, *, plans: Plans | None = None) -> str:
+        app = create_app(
+            settings,
+            passwords=cheap_passwords(),
+            catalog=catalog,
+            plans=plans or plans_for_tests(models=[model.name for model in catalog]),
+        )
         app.dependency_overrides[get_clock] = lambda: lambda: clock.now
         app.dependency_overrides[get_new_id] = lambda: server_ids
         server = uvicorn.Server(
@@ -366,7 +433,7 @@ async def serve(
 
 class Served(Protocol):
     def __call__(
-        self, *script: Any, thinking: bool = True
+        self, *script: Any, thinking: bool = True, plans: Plans | None = None
     ) -> Awaitable[tuple[ScriptedModel, str]]: ...
 
 
@@ -375,16 +442,18 @@ def served(serve: Serve) -> Served:
     """Call with a script to get a model that follows it, and the address of a served
     app that offers only that model."""
 
-    async def make(*script: Any, thinking: bool = True) -> tuple[ScriptedModel, str]:
+    async def make(
+        *script: Any, thinking: bool = True, plans: Plans | None = None
+    ) -> tuple[ScriptedModel, str]:
         model = ScriptedModel(*script)
-        return model, await serve(catalog_of(model, thinking=thinking))
+        return model, await serve(catalog_of(model, thinking=thinking), plans=plans)
 
     return make
 
 
 class Scripted(Protocol):
     def __call__(
-        self, *script: Any, thinking: bool = True
+        self, *script: Any, thinking: bool = True, plans: Plans | None = None
     ) -> Awaitable[tuple[ScriptedModel, httpx.AsyncClient]]: ...
 
 
@@ -394,9 +463,13 @@ def scripted(start_app: StartApp, settings: Settings, migrated: str) -> Scripted
     app that offers only that model."""
     assert migrated
 
-    async def make(*script: Any, thinking: bool = True) -> tuple[ScriptedModel, httpx.AsyncClient]:
+    async def make(
+        *script: Any, thinking: bool = True, plans: Plans | None = None
+    ) -> tuple[ScriptedModel, httpx.AsyncClient]:
         model = ScriptedModel(*script)
-        browser = await start_app(settings, catalog=catalog_of(model, thinking=thinking))
+        browser = await start_app(
+            settings, catalog=catalog_of(model, thinking=thinking), plans=plans
+        )
         await browser.post("/api/session/guest")
         return model, browser
 

@@ -9,7 +9,7 @@ import importlib
 
 from actio.core.database import Base
 
-MODULES = ("actio.chat.models", "actio.identity.models")
+MODULES = ("actio.chat.models", "actio.identity.models", "actio.usage.models")
 
 for _name in MODULES:
     importlib.import_module(_name)

@@ -1,0 +1,29 @@
+# The prices and plans of the end-to-end test stack (`make e2e`).
+#
+# compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API
+# reads this file in place of config/plans.toml. The fake model counts a word as a
+# token, and a credit here is one of its words, read or written.
+#
+# The limits are far above what a test uses: every test is a new guest, with a whole
+# allowance to itself.
+
+guests = "guest"
+accounts = "free"
+
+session_hours = 5
+week_resets = "MON 00:00 UTC"
+min_answer_tokens = 256
+
+[prices.standard]
+input = 1_000_000
+output = 1_000_000
+
+[plans.guest]
+title = "Guest"
+session_credits = 100_000
+week_credits = 400_000
+
+[plans.free]
+title = "Free"
+session_credits = 400_000
+week_credits = 2_000_000

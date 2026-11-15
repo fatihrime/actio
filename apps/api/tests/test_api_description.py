@@ -70,6 +70,7 @@ async def test_operations_are_named_after_their_routes(description: dict[str, An
     assert names["POST /api/session/guest"] == "start_guest_session"
     assert names["POST /api/conversations/{conversation_id}/turns"] == "start_turn"
     assert names["GET /api/models"] == "list_models"
+    assert names["GET /api/usage"] == "get_usage"
     assert len(set(names.values())) == len(names)
 
 

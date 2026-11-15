@@ -7,12 +7,16 @@ from fastapi import FastAPI
 
 from actio import __version__
 from actio.api import catalog as catalog_routes
-from actio.api import conversations, health, identity, problems, turns
+from actio.api import conversations, health, identity, problems, turns, usage
 from actio.api.same_origin import SameOriginOnly
 from actio.catalog import Catalog, open_catalog
 from actio.core.resources import open_resources
 from actio.core.settings import Settings
 from actio.identity.passwords import Passwords
+from actio.usage.limits import UsageLimits
+from actio.usage.plans import Plans
+from actio.usage.plans import load as load_plans
+from actio_quota.engine import ValkeyQuota
 
 DESCRIPTION = """\
 Actio's HTTP API, which its web app is built on.
@@ -24,6 +28,8 @@ Actio's HTTP API, which its web app is built on.
   see the `Problem` schema. A request that changes something, sent by a page on another
   site, is answered 403.
 - **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`.
+- **Usage is limited** per session and per week. `GET /api/usage` says how much is
+  left, and a question that no longer fits is answered 429, with when it will.
 """
 
 
@@ -32,20 +38,37 @@ def create_app(
     *,
     passwords: Passwords | None = None,
     catalog: Catalog | None = None,
+    plans: Plans | None = None,
 ) -> FastAPI:
     """The application. Without `settings`, they are read from the environment.
 
-    Tests replace two parts: `passwords`, with a cheap hasher, and `catalog`, with models
-    served by a fake. Without `catalog`, the models file is read when the app starts,
-    and a mistake in it stops the app from starting.
+    Tests replace three parts: `passwords`, with a cheap hasher, `catalog`, with models
+    served by a fake, and `plans`, with limits a test can reach. Without them, the
+    models file and the plans file are read when the app starts, and a mistake in
+    either stops the app from starting.
     """
     settings = settings or Settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with AsyncExitStack() as stack:
-            app.state.resources = await stack.enter_async_context(open_resources(settings))
-            app.state.catalog = catalog or await stack.enter_async_context(open_catalog(settings))
+            resources = await stack.enter_async_context(open_resources(settings))
+            offered = catalog
+            if offered is None:
+                offered = await stack.enter_async_context(open_catalog(settings))
+            # Every model on offer must have a price, wherever the plans come from.
+            names = [model.name for model in offered]
+            if plans is None:
+                priced = load_plans(settings.plans_file, models=names)
+            else:
+                priced = plans.require_prices_for(names)
+            app.state.resources = resources
+            app.state.catalog = offered
+            app.state.usage = UsageLimits(
+                # Beside the rate limits' keys, under the same prefix.
+                ValkeyQuota(resources.valkey, prefix=f"{settings.valkey_prefix}:q"),
+                priced,
+            )
             yield
 
     app = FastAPI(
@@ -71,4 +94,5 @@ def create_app(
     app.include_router(conversations.router)
     app.include_router(turns.router)
     app.include_router(catalog_routes.router)
+    app.include_router(usage.router)
     return app

@@ -100,6 +100,9 @@ select = [
     "RUF",     # Ruff's own rules
 ]
 ignore = ["E501"]  # the formatter owns line length
+# Turkish's dotless i is a letter of its own here, not a mistyped `i`: Actio is tested
+# with Turkish text.
+allowed-confusables = ["ı"]
 
 [tool.ruff.lint.per-file-ignores]
 # pytest is built on assert; passwords in tests are made up; seeded random is fine there.
@@ -173,9 +176,10 @@ containers = ["actio"]
 # `api` is the HTTP interface. `tables` lists the domain modules' tables for the
 # migrations. Below them come the domain modules, then `core`. `chat` is above
 # `identity` because a conversation belongs to an account: its table points at theirs.
-# `catalog`, the models on offer, and `identity` have nothing to do with each other,
-# which `|` says: neither imports the other.
-layers = ["cli", "app", "api", "tables", "chat", "catalog | identity", "core"]
+# It is above `usage` because a turn is paid for: recording one writes the ledger too.
+# `catalog`, the models on offer, `identity` and `usage` have nothing to do with each
+# other, which `|` says: none imports another.
+layers = ["cli", "app", "api", "tables", "chat", "catalog | identity | usage", "core"]
 # Every module directly under `actio` must be given a layer above, so a new one can't
 # skip the question of where it belongs.
 exhaustive = true
@@ -186,6 +190,6 @@ broken_contract_guidance = "A lower layer can't import a higher one. Move the sh
 id = "web-framework-only-in-the-api"
 name = "core and the domain modules never import the web framework"
 type = "forbidden"
-source_modules = ["actio.core", "actio.catalog", "actio.chat", "actio.identity"]
+source_modules = ["actio.core", "actio.catalog", "actio.chat", "actio.identity", "actio.usage"]
 forbidden_modules = ["fastapi", "starlette", "uvicorn"]
 broken_contract_guidance = "Processes that serve no HTTP use these modules too. HTTP belongs in actio.api."

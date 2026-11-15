@@ -89,6 +89,12 @@ class TurnOut(BaseModel):
     load_ms: int | None
     prompt_ms: int | None
     generation_ms: int | None
+    credits: int | None
+    """What the turn cost you, in credits: see `GET /api/usage`. Empty while it runs,
+    and for a turn that cost nothing: one that failed, or produced nothing."""
+    capped_by_usage: bool
+    """Whether a usage limit left the answer less room than the model allows. With the
+    `finish_reason` `length`, that is why the answer was cut."""
     started_at: datetime
     finished_at: datetime | None
 
@@ -107,6 +113,8 @@ class TurnOut(BaseModel):
             load_ms=turn.load_ms,
             prompt_ms=turn.prompt_ms,
             generation_ms=turn.generation_ms,
+            credits=turn.credits,
+            capped_by_usage=turn.capped_by_usage,
             started_at=turn.created_at,
             finished_at=turn.finished_at,
         )

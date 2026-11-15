@@ -16,6 +16,7 @@ from actio.core.settings import Settings
 from actio.identity import sessions
 from actio.identity.passwords import Passwords
 from actio.identity.sessions import Principal
+from actio.usage.limits import UsageLimits
 
 
 def get_settings(request: Request) -> Settings:
@@ -68,7 +69,15 @@ def get_catalog(request: Request) -> Catalog:
     return catalog
 
 
+def get_usage_limits(request: Request) -> UsageLimits:
+    usage: UsageLimits = request.app.state.usage
+    return usage
+
+
 Models = Annotated[Catalog, Depends(get_catalog)]
+Usage = Annotated[UsageLimits, Depends(get_usage_limits)]
+"""The usage limits: what an answer may cost its account. Not to be confused with
+`Limits` (`actio.api.rate_limits`), which counts how often something is tried."""
 Database = Annotated[AsyncSession, Depends(get_database)]
 Now = Annotated[datetime, Depends(get_now)]
 Clock = Annotated[Callable[[], datetime], Depends(get_clock)]

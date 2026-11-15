@@ -20,11 +20,14 @@ from actio_llm import (
     ChatRequest,
     Finish,
     FinishReason,
+    Message,
     Ollama,
     ReasoningDelta,
+    System,
     TextDelta,
     User,
 )
+from actio_llm.estimate import prompt_tokens
 
 pytestmark = pytest.mark.anyio
 
@@ -155,3 +158,44 @@ async def test_the_mlx_engine_reads_a_long_prompt_in_full_and_the_adapter_bounds
     assert last.reason is FinishReason.LENGTH
     assert last.usage is not None
     assert last.usage.output_tokens == 256  # the adapter's limit, since the engine has none
+
+
+PROSE = (
+    "A derailleur is the mechanism that moves a bicycle's chain from one sprocket to "
+    "another. When the rider shifts, a cable pulls it sideways against a spring. "
+) * 6
+TURKISH = (
+    "Vites değiştirici, bisiklet zincirini bir dişliden diğerine taşıyan mekanizmadır. "
+    "Sürücü vites değiştirdiğinde bir tel, mekanizmayı yaya karşı yana doğru çeker. "
+) * 6
+NUMBERS = '{"id": 48213, "prices": [1250.00, 99.95, 14999], "sku": "VC-2026-11-0042"}, ' * 12
+CODE = (
+    "def fits(used: int, reserved: int, cost: int, limit: int) -> bool:\n"
+    "    return used + reserved + cost <= limit\n\n"
+) * 8
+
+
+@pytest.mark.parametrize("text", [PROSE, TURKISH, NUMBERS, CODE], ids=["prose", "tr", "json", "py"])
+async def test_the_guess_at_a_prompts_tokens_is_near_the_servers_count(
+    live_url: str, text: str
+) -> None:
+    """The usage limits hold credits for a prompt before any server has counted it.
+
+    How near the guess must come is pinned loosely: tokenizers differ between models.
+    What it must never do again is what counting bytes did: come out at under half for
+    a page of numbers.
+    """
+    messages: list[Message] = [System("You are a helpful assistant."), User(text)]
+    request = ChatRequest(
+        model=MODEL, messages=messages, context_window=CONTEXT, max_output_tokens=1
+    )
+
+    async with (
+        httpx2.AsyncClient(base_url=live_url) as client,
+        aclosing(Ollama(client).stream(request)) as events,
+    ):
+        last = [event async for event in events][-1]
+
+    assert isinstance(last, Finish)
+    assert last.usage is not None
+    assert 0.6 < prompt_tokens(messages) / last.usage.input_tokens < 1.6

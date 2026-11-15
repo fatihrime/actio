@@ -302,6 +302,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Usage
+         * @description Your plan, and how much of each of its limits you have used.
+         */
+        get: operations["get_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -481,6 +501,13 @@ export interface components {
             /** New Password */
             new_password: string;
         };
+        /** PlanOut */
+        PlanOut: {
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+        };
         /**
          * Readiness
          * @description What is missing, by name. Never why: a failure's details go to the log, because
@@ -589,6 +616,10 @@ export interface components {
             prompt_ms: number | null;
             /** Generation Ms */
             generation_ms: number | null;
+            /** Credits */
+            credits: number | null;
+            /** Capped By Usage */
+            capped_by_usage: boolean;
             /**
              * Started At
              * Format: date-time
@@ -612,12 +643,39 @@ export interface components {
              */
             thinking: boolean;
         };
+        /** UsageOut */
+        UsageOut: {
+            plan: components["schemas"]["PlanOut"];
+            /** Windows */
+            windows: components["schemas"]["WindowOut"][];
+        };
+        /**
+         * WindowOut
+         * @description One limit: so many credits, until the window starts over.
+         */
+        WindowOut: {
+            /**
+             * Name
+             * @enum {string}
+             */
+            name: "session" | "week";
+            /** Limit */
+            limit: number;
+            /** Used */
+            used: number;
+            /** Reserved */
+            reserved: number;
+            /** Resets At */
+            resets_at: string | null;
+        };
         /**
          * Problem
          * @description An error, as RFC 9457 problem details. Every error this API answers looks like
          *     this. Some carry more members: `errors` (422: what is wrong with the request, and
-         *     where), `retry_after` (429: seconds to wait), `model` and `model_status` (503: the
-         *     model that can't answer), `turn_id` and `turn_status` (409: the turn in the way).
+         *     where), `retry_after` (429: seconds to wait), `window`, `resets_at` and
+         *     `alternatives` (429: the usage limit that is reached, when it starts over, and the
+         *     models that cost nothing), `model` and `model_status` (503: the model that can't
+         *     answer), `turn_id` and `turn_status` (409: the turn in the way).
          */
         Problem: {
             /** Type */
@@ -1309,7 +1367,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Too many messages. `Retry-After` says how long to wait. */
+            /** @description Too many messages in a short time, or a usage limit is reached. `Retry-After` says how long to wait. For a usage limit, `window` names the one that is full, `resets_at` says when it starts over, and `alternatives` lists the models that cost nothing. */
             429: {
                 headers: {
                     [name: string]: unknown;
@@ -1318,7 +1376,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The model can't answer right now: `model_status` says why. Or messages can't be counted right now. */
+            /** @description The model can't answer right now: `model_status` says why. Or messages, or usage, can't be counted right now. */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1349,6 +1407,44 @@ export interface operations {
             };
             /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_usage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageOut"];
+                };
+            };
+            /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Usage can't be read right now. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

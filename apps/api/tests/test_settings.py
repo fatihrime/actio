@@ -135,6 +135,16 @@ def test_the_models_file_and_ollama_can_be_elsewhere(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.usefixtures("stores")
+def test_prices_and_plans_are_in_the_file_beside_the_models_unless_told_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().plans_file == Path("config/plans.toml")
+
+    monkeypatch.setenv("ACTIO_PLANS_FILE", "/app/config/plans.toml")
+    assert Settings().plans_file == Path("/app/config/plans.toml")
+
+
+@pytest.mark.usefixtures("stores")
 @pytest.mark.parametrize(
     "url", ["127.0.0.1:11434", "ollama", "ftp://ollama:11434", "http://ollama:11434/api", ""]
 )

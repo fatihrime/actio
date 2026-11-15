@@ -122,11 +122,33 @@ Every failure is an `LLMError`. The subclasses answer what a caller has to decid
 
 Deadlines (`Timeouts`) apply to connecting, to the first chunk, and to the gap between chunks. They time each read from Ollama, never the caller's own work between two chunks.
 
+## A guess at token counts
+
+Sometimes nobody has counted. Before a request is sent, its prompt has no count yet. A stream that is closed early ends without a `Finish`, and some servers report no counts at all. For those cases `actio_llm.estimate` guesses, without any model's tokenizer:
+
+```python
+from actio_llm import System, User, prompt_tokens, tokens_in
+
+tokens_in("1,250.00 TL")  # 9: six digits, two marks, and "TL"
+prompt = [System("You are a helpful assistant."), User("Hello")]
+prompt_tokens(prompt)  # 31, with what a chat template writes around the two messages
+```
+
+- **Three rules:** a digit is a token, a punctuation mark is a token, and everything else is four bytes to a token. White space is free.
+- **Measured against two models' own counts,** for whole prompts, as guess ÷ count:
+
+  | | English | Turkish | Python | Japanese | JSON full of numbers |
+  |---|---|---|---|---|---|
+  | `qwen3.5:4b` | 1.05 | 0.90 | 1.11 | 1.26 | 1.06 |
+  | `granite4:micro` | 1.05 | 0.70 | 1.16 | 0.66 | 1.47 |
+
+- **It can be a third out either way,** because tokenizers differ. Counting bytes alone, at three to a token, came out at 0.46 for the JSON: under half. A caller that must not come out short adds its own margin, and uses the provider's count when one arrives.
+
 ## Not here yet
 
 - **Images and structured output** (a JSON schema for the answer). They arrive with the features that use them.
 - **Warm-up, unloading and pulling models.** They arrive with the model manager.
-- **A token estimate.** A stream that is closed early ends without a `Finish`, and some servers report no token counts. In both cases the caller has to count, and the counter isn't written yet.
+- **A guess that learns.** The estimate uses the same rules for every model. Correcting it per model, from the counts providers report, comes with the router.
 - **A router** that picks a provider, falls back to another and retries. The errors above are shaped for it.
 
 ## Tests
@@ -137,7 +159,7 @@ make test-live                  # the same requests, sent to a real Ollama serve
 ```
 
 - **Recorded exchanges.** `tests/fixtures/ollama/` holds real responses from an Ollama server, one file per request. The tests replay them, and fail if the adapter no longer sends exactly the recorded request.
-- **Live mode.** `make test-live` needs `granite4:micro` on the server. It also runs what a recording can't show: that closing a stream frees the server.
+- **Live mode.** `make test-live` needs `granite4:micro` on the server. It also runs what a recording can't show: that closing a stream frees the server, and that the guess at a prompt's tokens stays near the server's count.
   - Set `ACTIO_TEST_OLLAMA_THINKING_MODEL` to a model that can reason, to test reasoning against it too.
   - Set `ACTIO_TEST_OLLAMA_MLX_MODEL` to a model that runs on the MLX engine, to pin that engine's behaviour. On an Apple Silicon Mac, `qwen3.5:4b` serves for both.
   - Add `ACTIO_RECORD_OLLAMA=1` to save the server's answers as the new recordings, after an Ollama upgrade.

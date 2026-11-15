@@ -11,11 +11,14 @@ It is a stream of server-sent events. Each event is one JSON object, a "chunk", 
     data: {"type":"text-start","id":"text-1"}
     data: {"type":"text-delta","id":"text-1","delta":"…"}
     data: {"type":"text-end","id":"text-1"}
+    data: {"type":"data-usage-warning","data":{"window":"session","percent":75},"transient":true}
     data: {"type":"finish-step"}
     data: {"type":"finish","finishReason":"stop","messageMetadata":{…}}
     data: [DONE]
 
-The names and fields were read from version 7.0.169 of the `ai` package. A test in
+The `data-usage-warning` line is there only when the answer took its account past a
+share of a usage limit. The names and fields were read from version 7.0.169 of the `ai`
+package. A test in
 `apps/web` parses recorded streams with that package itself, so a chunk it wouldn't
 accept fails there.
 """
@@ -51,6 +54,20 @@ def event(chunk: Mapping[str, Any]) -> bytes:
     return (
         b"data: " + json.dumps(chunk, separators=(",", ":"), ensure_ascii=False).encode() + b"\n\n"
     )
+
+
+def usage_warning(window: str, percent: int) -> dict[str, Any]:
+    """The chunk that says a usage window has just passed `percent` of its limit.
+
+    A data part of Actio's own: the library hands it to the page as it arrives. It is
+    `transient`, so it doesn't become part of the message. It is sent once per window
+    and share, just before the stream finishes.
+    """
+    return {
+        "type": "data-usage-warning",
+        "data": {"window": window, "percent": percent},
+        "transient": True,
+    }
 
 
 def for_step(step: Step) -> dict[str, str]:

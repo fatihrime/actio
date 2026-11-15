@@ -2,6 +2,7 @@
 
 - `chat`: the neutral chat format every adapter speaks.
 - `errors`: why a model call failed.
+- `estimate`: a guess at a text's tokens, for when no provider has counted them.
 - `ollama`: the adapter for Ollama's native API.
 - `openai_compatible`: the adapter for servers that speak OpenAI's Chat Completions API.
 - `wire`: reading a streamed answer under deadlines, shared by the adapters.
@@ -38,6 +39,7 @@ from actio_llm.errors import (
     UnsupportedFeatureError,
     UnsupportedServerError,
 )
+from actio_llm.estimate import prompt_tokens, tokens_in
 from actio_llm.ollama import LocalModel, ModelInfo, Ollama
 from actio_llm.openai_compatible import OpenAICompatible
 from actio_llm.wire import Timeouts
@@ -74,4 +76,6 @@ __all__ = [
     "UnsupportedServerError",
     "Usage",
     "User",
+    "prompt_tokens",
+    "tokens_in",
 ]

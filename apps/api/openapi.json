@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Actio",
-    "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** Everything but the health checks needs a session, a guest's included.\n  It lives in a cookie: start one with `POST /api/session/guest`. Without one the\n  answer is 401.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. A request that changes something, sent by a page on another\n  site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`.\n",
+    "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** Everything but the health checks needs a session, a guest's included.\n  It lives in a cookie: start one with `POST /api/session/guest`. Without one the\n  answer is 401.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. A request that changes something, sent by a page on another\n  site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`.\n- **Usage is limited** per session and per week. `GET /api/usage` says how much is\n  left, and a question that no longer fits is answered 429, with when it will.\n",
     "version": "0.0.0"
   },
   "paths": {
@@ -817,7 +817,7 @@
             }
           },
           "429": {
-            "description": "Too many messages. `Retry-After` says how long to wait.",
+            "description": "Too many messages in a short time, or a usage limit is reached. `Retry-After` says how long to wait. For a usage limit, `window` names the one that is full, `resets_at` says when it starts over, and `alternatives` lists the models that cost nothing.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -827,7 +827,7 @@
             }
           },
           "503": {
-            "description": "The model can't answer right now: `model_status` says why. Or messages can't be counted right now.",
+            "description": "The model can't answer right now: `model_status` says why. Or messages, or usage, can't be counted right now.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -870,6 +870,48 @@
           },
           "401": {
             "description": "No session, or it has ended. Start one with `POST /api/session/guest`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Get Usage",
+        "description": "Your plan, and how much of each of its limits you have used.",
+        "operationId": "get_usage",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session, or it has ended. Start one with `POST /api/session/guest`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Usage can't be read right now.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1321,6 +1363,24 @@
         ],
         "title": "PasswordChange"
       },
+      "PlanOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "PlanOut"
+      },
       "Readiness": {
         "properties": {
           "status": {
@@ -1566,6 +1626,21 @@
             ],
             "title": "Generation Ms"
           },
+          "credits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credits"
+          },
+          "capped_by_usage": {
+            "type": "boolean",
+            "title": "Capped By Usage"
+          },
           "started_at": {
             "type": "string",
             "format": "date-time",
@@ -1598,6 +1673,8 @@
           "load_ms",
           "prompt_ms",
           "generation_ms",
+          "credits",
+          "capped_by_usage",
           "started_at",
           "finished_at"
         ],
@@ -1662,9 +1739,75 @@
         "type": "object",
         "title": "TurnRequest"
       },
+      "UsageOut": {
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/PlanOut"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/WindowOut"
+            },
+            "type": "array",
+            "title": "Windows"
+          }
+        },
+        "type": "object",
+        "required": [
+          "plan",
+          "windows"
+        ],
+        "title": "UsageOut"
+      },
+      "WindowOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "session",
+              "week"
+            ],
+            "title": "Name"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "used": {
+            "type": "integer",
+            "title": "Used"
+          },
+          "reserved": {
+            "type": "integer",
+            "title": "Reserved"
+          },
+          "resets_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resets At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "limit",
+          "used",
+          "reserved",
+          "resets_at"
+        ],
+        "title": "WindowOut",
+        "description": "One limit: so many credits, until the window starts over."
+      },
       "Problem": {
         "additionalProperties": true,
-        "description": "An error, as RFC 9457 problem details. Every error this API answers looks like\nthis. Some carry more members: `errors` (422: what is wrong with the request, and\nwhere), `retry_after` (429: seconds to wait), `model` and `model_status` (503: the\nmodel that can't answer), `turn_id` and `turn_status` (409: the turn in the way).",
+        "description": "An error, as RFC 9457 problem details. Every error this API answers looks like\nthis. Some carry more members: `errors` (422: what is wrong with the request, and\nwhere), `retry_after` (429: seconds to wait), `window`, `resets_at` and\n`alternatives` (429: the usage limit that is reached, when it starts over, and the\nmodels that cost nothing), `model` and `model_status` (503: the model that can't\nanswer), `turn_id` and `turn_status` (409: the turn in the way).",
         "properties": {
           "type": {
             "title": "Type",
