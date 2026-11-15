@@ -111,3 +111,14 @@ About 60 ms of the first two is the password being hashed ([ADR 0010](0010-accou
     - a second factor, passkeys, logging in through another provider ([ADR 0010](0010-accounts-with-a-password.md));
     - a list of the browsers an account is logged in from.
 - **How to reverse it:** two functions decide what happens after a change of session, `enter` and `startOver` in `components/chat/chat-app.tsx`. Made to load the page instead, they give option 1, and holding things under the session becomes unnecessary. The forms themselves wouldn't change.
+
+## Revisions
+
+### 2026-11-15: the models are held under the session too
+
+The decision says that "everything read from the API is held under the session it was read in". One thing was not: the list of models, which the chat held under a fixed name.
+
+- **What went wrong.** A session that ends takes everything the page had read with it, the models among it. The library that holds what was read doesn't ask again for something it was told two seconds ago, and under a fixed name the models were that. So after signing up or logging in within two seconds of the page's start, the page had no models until the window was next returned to: no switch for reasoning, and no line saying which model answers. Questions were still answered.
+- **Why it surfaced only now.** A person takes longer than two seconds to fill in a form, and no test looked at anything of the models after a change of session. The offer of a model that costs nothing does depend on them ([ADR 0021](0021-usage-limits-in-the-page.md)), and its test in a real browser signs up at once.
+- **The fix.** The models are held under the session, and read anew for each. A component test signs up at once and looks for the switch; it failed before.
+- **What it costs:** one more request at each change of session.

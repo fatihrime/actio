@@ -151,3 +151,25 @@ That makes 26 tests, in about 18 seconds. Each test signs up under an address ma
 **The overlay raises two more limits:** sign-ups and logins per network address. The decision above raised two "because every test is a new guest, and all of them come from one address"; the same holds for accounts.
 
 - **Not raised: password attempts per email address.** Every test has an address of its own, so it has that limit to itself, as a person would. A test of the containers' rules holds the overlay to exactly this.
+
+### 2026-11-15: the usage limits, with a limit within reach and a model for nothing
+
+**One more file of tests,** `usage.spec.ts`, for the usage limits in the page ([ADR 0021](0021-usage-limits-in-the-page.md)). Only the whole stack counts credits, refuses a question and names a model that costs nothing:
+
+- a guest's meter starts empty, and has counted the first answer;
+- an account asks two long questions, is told that half of its session is used, and has the third refused: with the time left, nothing more sent, and the fake under its second name to carry on with. That model answers the refused question, the counts stay as they were, and a reload shows the same counts;
+- a question that leaves little room is answered as far as the room goes, and the page says that the limit is why.
+
+That makes 29 tests, in about 18 seconds.
+
+**The stack's two files changed for it** (`deploy/e2e/config/`). The decision above said the models file "offers the fake under the same name, `standard`"; it now offers it twice.
+
+- **The fake a second time, as `local`,** which the plans file prices at nothing. The API then names it in a refusal.
+- **An account may use 500 credits a session,** at a credit a word: two or three long questions. A guest's 100,000 are out of reach, as every other test needs. So a test of the limits signs up first, and no test has to share an allowance.
+- **The smallest answer worth giving is 64 words there,** not 256, so that 500 credits can be asked something at all.
+- **A test in the API's suite holds the two files to this,** so that a change to them fails there, in a second, and not here.
+
+**The numbers in the tests are measured, with room to spare.** What a question costs on this stack is exact: the fake counts words.
+
+- **Two questions of 40 words cost 106 and 187 credits.** The third would have 227 words to read, and 207 credits are left. With questions of 30 or of 50 words the same two fit and the third doesn't; only the share that is passed differs.
+- **An answer is cut for a question of 190 to 280 words.** At 180 the whole answer fits, and at 290 the question alone is more than the plan allows. The test asks 220.

@@ -192,3 +192,14 @@ The first of them had no test at first. Listing the mistakes to plant showed the
     - a limit on how many answers one account has written at once, and a hold that is renewed while a long answer is written: with turns that run apart from their request;
     - removing old rows from the ledger, and an account's own from it when the account is deleted.
 - **How to reverse it:** the turn's code calls four things: `reserve`, `record`, `settle` and `release` (`actio.usage.limits`). Limits kept somewhere else, or none at all, change what those four do, and the ledger stays as the record of what was used.
+
+## Revisions
+
+### 2026-11-15: the page shows the limits
+
+"Not done yet" began with the page, which showed none of this. It does now: a meter, the limit that is reached with the time left, the model that costs nothing, and the shares passed on the way ([ADR 0021](0021-usage-limits-in-the-page.md)).
+
+- **Nothing in the API changed for it.** The page reads `GET /api/usage`, and learns of a limit from the 429 described above.
+- **Two tests were added here,** because the page's tests count on them:
+    - a refusal names the model that costs nothing, and that model then answers the same question, for no credits. Until now only the limits below the API were tested for that;
+    - the refusal itself is recorded as a file, `limit_reached.json`, beside the recorded streams ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md)). Its `window`, `resets_at` and `alternatives` are in no generated type, so the page's tests answer with the real document.
