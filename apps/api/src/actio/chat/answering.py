@@ -1,14 +1,20 @@
 """Following a model's answer as it streams, and making sure the turn gets recorded.
 
-`answer` asks a model and yields what it writes, as `Step`s: a part of the answer
-opens, grows, closes. Its last item is `Ended`, after the turn was written to the
-database. Whatever happens on the way, the turn doesn't stay `running`:
+`answer` asks a model and hands on what it writes, as `Step`s: a part of the answer
+opens, grows, closes. It returns `Ended`, after the turn was written to the database.
+Whatever happens on the way, the turn doesn't stay `running`:
 
 - the model finishes: `completed`, with the whole answer;
 - the model fails: `failed`, with a short code for what went wrong, and whatever it
   had written until then;
-- whoever was listening leaves: `stopped`, with what had arrived. Closing the stream
-  also closes the connection to the model, which stops generating.
+- the turn is halted (`Halt`): `stopped`, when whoever asked stopped it, or
+  `interrupted`, when the process is shutting down. Either way with what had arrived.
+  Halting closes the connection to the model, which stops generating.
+
+Nobody has to be listening. A turn runs apart from the request that started it
+(`actio.chat.running`), and a reader who leaves ends nothing. So while a turn runs, it
+says every few seconds that it is alive, and renews the hold on its credits: see
+`_beat`.
 
 Recording a turn also settles what it cost. Credits were held for it before it started
 (`actio.usage.limits`). What it used goes into the usage ledger in the transaction that
@@ -18,9 +24,10 @@ Nothing here knows about HTTP, or about the format a browser reads: `actio.api.t
 turns the steps into that.
 """
 
+import asyncio
 import logging
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
@@ -119,8 +126,7 @@ class Closed:
 
 @dataclass(frozen=True, slots=True)
 class Ended:
-    """The turn is over and recorded. Always the last item, when there is one: someone
-    who stopped listening gets none."""
+    """The turn is over and recorded."""
 
     ending: Ending
     at: datetime
@@ -196,6 +202,29 @@ class Answer:
 # --- Running a turn -------------------------------------------------------------------
 
 
+class Halt:
+    """The way to end one turn before its model has finished.
+
+    Two things end a turn early: whoever asked stops it, or the process that writes it
+    is shutting down. Either calls the turn's `Halt`, from any task. The model's stream
+    is closed at whatever it was waiting for, and the turn is recorded with what had
+    arrived: as `stopped`, or as `interrupted`.
+    """
+
+    def __init__(self) -> None:
+        self.scope = anyio.CancelScope()
+        """What a halt cancels: `answer` waits for the model inside it."""
+        self.reason: Literal["stopped", "interrupted"] | None = None
+        """Why the turn was halted, once it was."""
+
+    def __call__(self, reason: Literal["stopped", "interrupted"]) -> None:
+        """Halt the turn. The first reason given is the one recorded: a turn that was
+        stopped stays stopped when the process shuts down a moment later."""
+        if self.reason is None:
+            self.reason = reason
+            self.scope.cancel()
+
+
 async def answer(
     offered: OfferedModel,
     request: ChatRequest,
@@ -207,48 +236,69 @@ async def answer(
     clock: Callable[[], datetime],
     usage: UsageLimits,
     reserved: Reserved,
-) -> AsyncGenerator[Step | Ended]:
-    """Ask the model, yield its answer step by step, and record the turn at the end.
+    emit: Callable[[Step], Awaitable[None]],
+    halt: Halt,
+    on_beat: Callable[[], Awaitable[None]] | None = None,
+) -> Ended:
+    """Ask the model, hand its answer to `emit` step by step, and record the turn at
+    the end.
 
     The turn was started before (`turns.ask`), and `reserved` holds the credits it may
     cost. This writes its outcome, and what it used, in a transaction of its own, from
-    `open_session`. It yields `Ended` once that is done: whoever reads that far can rely
-    on the answer being stored, and counted.
+    `open_session`. It returns once that is done: whoever is told that the turn has
+    ended can rely on the answer being stored, and counted.
+
+    `halt` ends it early. `on_beat` is called with every beat, after the turn has said
+    that it is alive: for whatever else has to be kept while the turn runs. Neither it
+    nor `emit` may raise.
     """
     collected = Answer()
     ending: Ending | None = None
+    beats = asyncio.create_task(_beat(open_session, turn_id, clock, usage, reserved, on_beat))
     try:
-        async with aclosing(offered.chat.stream(request)) as events:
-            async for event in events:
-                for step in collected.take(event):
-                    yield step
-        if collected.finish is None:
+        # Only waiting for the model can be halted. A step that has come is handed on
+        # whole, so what readers were shown is what gets stored.
+        with halt.scope:
+            async with aclosing(offered.chat.stream(request)) as events:
+                async for event in events:
+                    for step in collected.take(event):
+                        with anyio.CancelScope(shield=True):
+                            await emit(step)
+        if collected.finish is not None:
+            ending = Ending(
+                "completed",
+                collected.parts,
+                finish_reason=collected.finish.reason.value,
+                usage=collected.finish.usage,
+                timings=collected.finish.timings,
+            )
+        elif halt.reason is not None:
+            ending = Ending(halt.reason, collected.parts)
+            for step in collected.close():
+                await emit(step)
+        else:
             raise StreamInterruptedError("the model's answer ended without saying why")
-        ending = Ending(
-            "completed",
-            collected.parts,
-            finish_reason=collected.finish.reason.value,
-            usage=collected.finish.usage,
-            timings=collected.finish.timings,
-        )
     except LLMError as error:
         logger.warning("turn %s: the model failed (%s: %s)", turn_id, type(error).__name__, error)
-        for step in collected.close():
-            yield step
         ending = Ending("failed", collected.parts, error=code_for(error))
+        for step in collected.close():
+            await emit(step)
     except Exception:
         ending = Ending("failed", collected.parts, error="internal_error")
         raise
     except BaseException:
-        # Cancelled, or closed from outside: whoever was listening has left.
-        ending = Ending("stopped", collected.parts)
+        # Cancelled from outside, without a `Halt`: the process is going down faster
+        # than it could say so.
+        ending = Ending("interrupted", collected.parts)
         raise
     finally:
+        beats.cancel()
         if ending is not None:
-            # Shielded: when the listener left, this task is being cancelled, and an
-            # unshielded write would be cancelled with it, leaving the turn `running`.
+            # Shielded: if this task is being cancelled, an unshielded write would be
+            # cancelled with it, leaving the turn `running`.
             finished = clock()
             with anyio.CancelScope(shield=True):
+                await asyncio.wait({beats})  # so that no beat is written after the outcome
                 credits, warnings = await _record(
                     open_session,
                     conversation_id,
@@ -259,7 +309,48 @@ async def answer(
                     usage,
                     reserved,
                 )
-    yield Ended(ending, finished, credits, warnings)
+    return Ended(ending, finished, credits, warnings)
+
+
+async def _beat(
+    open_session: async_sessionmaker[AsyncSession],
+    turn_id: uuid.UUID,
+    clock: Callable[[], datetime],
+    usage: UsageLimits,
+    reserved: Reserved,
+    on_beat: Callable[[], Awaitable[None]] | None,
+) -> None:
+    """Say every `turns.BEAT` that the turn is alive, for as long as it runs.
+
+    Three things would otherwise run out under a long answer, each on purpose, because
+    each must not outlast a process that died:
+
+    - the turn itself, which is given up on when it has been silent (`turns.STALE_AFTER`);
+    - the hold on its credits (`UsageLimits.extend`);
+    - whatever `on_beat` keeps: what the turn streams.
+
+    A beat that fails is tried again at the next: one or two may be missed.
+    """
+    while True:
+        await asyncio.sleep(turns.BEAT.total_seconds())
+        now = clock()
+        try:
+            async with open_session() as db:
+                await turns.still_alive(db, turn_id, now=now)
+                await db.commit()
+        except (SQLAlchemyError, OSError) as error:
+            logger.warning(
+                "turn %s: couldn't say that it is alive (%s)", turn_id, type(error).__name__
+            )
+        await usage.extend(reserved, hold_for=turns.STALE_AFTER, now=now)
+        if on_beat is not None:
+            await on_beat()
+
+
+def _costs_nothing(ending: Ending) -> bool:
+    """Whether a turn that ended this way is free whatever it wrote: the fault was the
+    model's, or Actio's own."""
+    return ending.status in ("failed", "interrupted")
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,7 +367,8 @@ class _Used:
 def _used(ending: Ending, reserved: Reserved) -> _Used | None:
     """What to count for a turn that ended this way. `None`: nothing.
 
-    - **A failed turn costs nothing.** The fault was the model's, or Actio's own.
+    - **A failed turn costs nothing,** and neither does one that a shutdown
+      interrupted. The fault was the model's, or Actio's own.
     - **A provider's count is taken as it is.**
     - **Without one, what was written is counted by guess,** with the guess at the
       prompt that was made before the turn started. That is every stopped turn: a
@@ -285,7 +377,7 @@ def _used(ending: Ending, reserved: Reserved) -> _Used | None:
     - **A turn that wrote nothing, and has no count, costs nothing.** Nobody can say
       whether the model had even begun to read.
     """
-    if ending.status == "failed":
+    if _costs_nothing(ending):
         return None
     if ending.usage is not None:
         counted = ending.usage
@@ -328,10 +420,17 @@ async def _record(
                     estimated=used.estimated,
                     now=now,
                 )
-            await turns.finish(
+            recorded = await turns.finish(
                 db, conversation_id, turn_id, ending, answer_id=answer_id, now=now, credits=credits
             )
-            await db.commit()
+            if recorded == "left":
+                # The turn was given up on while it was still being written, and its
+                # answer isn't kept. An answer nobody gets isn't paid for either.
+                logger.warning("turn %s: it ended after it had been given up on", turn_id)
+                await db.rollback()
+                credits = None
+            else:
+                await db.commit()
     except (SQLAlchemyError, OSError) as error:
         # The turn stays `running` and is given up on later, as `interrupted`. Nothing
         # of it was written, so nothing is counted for it either.

@@ -21,7 +21,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, StringConstraints
 
-from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now
+from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now, Runner
 from actio.api.problems import Problem
 from actio.chat import conversations, tree, turns
 from actio.chat.conversations import TITLE_MAX, Cursor
@@ -74,8 +74,8 @@ class TurnOut(BaseModel):
     """Whether the model was asked to reason before answering."""
     status: TurnStatus
     """`running` while the answer is written. Then `completed`; `stopped`, because
-    whoever asked left; `failed`, because the model did; or `interrupted`, because the
-    server that was writing it is gone."""
+    whoever asked stopped it; `failed`, because the model did; or `interrupted`, because
+    the server that was writing it shut down, or is gone."""
     finish_reason: str | None
     """Why the model stopped, when it did by itself: `stop`, or `length` when it ran
     into the limit on an answer's size."""
@@ -91,7 +91,8 @@ class TurnOut(BaseModel):
     generation_ms: int | None
     credits: int | None
     """What the turn cost you, in credits: see `GET /api/usage`. Empty while it runs,
-    and for a turn that cost nothing: one that failed, or produced nothing."""
+    and for a turn that cost nothing: one that failed, was interrupted, or produced
+    nothing."""
     capped_by_usage: bool
     """Whether a usage limit left the answer less room than the model allows. With the
     `finish_reason` `length`, that is why the answer was cut."""
@@ -228,9 +229,16 @@ async def show_branch(
 
 
 @router.delete("/{conversation_id}", status_code=204, responses=NOT_YOURS)
-async def delete_conversation(conversation: OwnConversation, db: Database) -> None:
+async def delete_conversation(conversation: OwnConversation, db: Database, runner: Runner) -> None:
     """Delete the conversation and every message in it, on every branch. There is no
-    way back."""
+    way back.
+
+    An answer that is being written in it is stopped first: nobody could read it. What
+    it had used until then is counted, as for any answer that is stopped."""
+    writing = await turns.running_in(db, conversation)
+    if writing is not None:
+        await db.commit()  # the turn records itself, in a transaction of its own
+        await runner.stop(writing)
     await conversations.delete(db, conversation)
     await db.commit()
 

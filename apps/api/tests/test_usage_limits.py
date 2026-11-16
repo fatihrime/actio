@@ -600,21 +600,24 @@ async def test_a_turn_whose_outcome_cannot_be_written_is_not_counted(
     reserved = await reserve(limits, db, guest)
     offered = OfferedModel("standard", "Scripted", "openai-compatible", "m", 4096, 512, OneAnswer())
     nowhere = create_engine("postgresql://actio:unused@127.0.0.1:1/actio")
-    steps = answering.answer(
-        offered,
-        ChatRequest(model="m", messages=[User("What moves the chain?")]),
-        conversation_id=new_id(),
-        turn_id=reserved.id,
-        answer_id=new_id(),
-        open_session=create_session_factory(nowhere),
-        clock=lambda: NOON,
-        usage=limits,
-        reserved=reserved,
-    )
+
+    async def to_nobody(step: answering.Step) -> None:
+        pass
 
     with pytest.raises(SQLAlchemyError):
-        async for _ in steps:
-            pass
+        await answering.answer(
+            offered,
+            ChatRequest(model="m", messages=[User("What moves the chain?")]),
+            conversation_id=new_id(),
+            turn_id=reserved.id,
+            answer_id=new_id(),
+            open_session=create_session_factory(nowhere),
+            clock=lambda: NOON,
+            usage=limits,
+            reserved=reserved,
+            emit=to_nobody,
+            halt=answering.Halt(),
+        )
     await nowhere.dispose()
 
     assert "its outcome couldn't be recorded" in caplog.text

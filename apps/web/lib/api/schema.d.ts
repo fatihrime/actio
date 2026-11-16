@@ -227,6 +227,9 @@ export interface paths {
          * Delete Conversation
          * @description Delete the conversation and every message in it, on every branch. There is no
          *     way back.
+         *
+         *     An answer that is being written in it is stopped first: nobody could read it. What
+         *     it had used until then is counted, as for any answer that is stopped.
          */
         delete: operations["delete_conversation"];
         options?: never;
@@ -272,8 +275,60 @@ export interface paths {
         /**
          * Start Turn
          * @description Ask a model something, and stream its answer.
+         *
+         *     The answer is written whether or not this response is read to its end. To stop it,
+         *     cancel the turn: closing the connection doesn't.
          */
         post: operations["start_turn"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/conversations/{conversation_id}/turns/{turn_id}/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Follow Turn
+         * @description Read along with a turn that is being written: after a reload, after a lost
+         *     connection, or from another window.
+         *
+         *     The stream starts at the answer's first event, whenever it is joined, so that it
+         *     can be read by itself.
+         */
+        get: operations["follow_turn"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/conversations/{conversation_id}/turns/{turn_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Turn
+         * @description Stop a turn that is being written. What it had written is kept, and counted.
+         *
+         *     Answers once the turn is recorded, with the turn as it is then: `stopped`. A turn
+         *     that had ended already is left as it ended, and answered the same way. So is one
+         *     that this server can't stop, because the process that was writing it is gone: it
+         *     says `running` until it is given up on, a minute after it was last heard from.
+         */
+        post: operations["cancel_turn"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1376,8 +1431,115 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The model can't answer right now: `model_status` says why. Or messages, or usage, can't be counted right now. */
+            /** @description The model can't answer right now: `model_status` says why. Or messages, or usage, can't be counted right now, or an answer couldn't be read along with. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    follow_turn: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                turn_id: string;
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The answer that is being written, from its beginning, in the same format as the turn's own response. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": unknown;
+                };
+            };
+            /** @description Nothing is being written: the turn has ended. Read the conversation for what it left. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such conversation, or no such turn in it. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request doesn't have the expected form. `errors` lists what is wrong, and where. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cancel_turn: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                turn_id: string;
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TurnOut"];
+                };
+            };
+            /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such conversation, or no such turn in it. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request doesn't have the expected form. `errors` lists what is wrong, and where. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

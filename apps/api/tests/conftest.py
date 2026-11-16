@@ -7,7 +7,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Iterable, Iterator
-from contextlib import AsyncExitStack
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -26,6 +26,7 @@ from actio import catalog as catalogs
 from actio.api.dependencies import get_clock, get_new_id
 from actio.app import create_app
 from actio.catalog import Catalog, CatalogFile, OfferedModel
+from actio.chat import running as turn_runner
 from actio.core import schema
 from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
@@ -53,6 +54,14 @@ def _clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _no_patience_at_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An app that is closed while an answer is still being written gives it a moment to
+    finish. Under test it gives none: a test that leaves a model waiting for ever would
+    wait that moment out. The test of the moment itself sets its own."""
+    monkeypatch.setattr(turn_runner, "GRACE", timedelta(0))
 
 
 class Clock:
@@ -232,6 +241,9 @@ class ScriptedModel:
         self.requests: list[ChatRequest] = []
         self.started = asyncio.Event()
         """Set once the model has been asked: the turn is now running."""
+        self.waiting = asyncio.Event()
+        """Set while the model waits for an `asyncio.Event` of its script. Whatever it
+        yielded before has been taken by then: stored in the turn, and streamed."""
         self.closed = asyncio.Event()
         """Set when the answer's stream ends, whoever ended it."""
 
@@ -243,7 +255,9 @@ class ScriptedModel:
                 if isinstance(item, BaseException):
                     raise item
                 if isinstance(item, asyncio.Event):
+                    self.waiting.set()
                     await item.wait()
+                    self.waiting.clear()
                 else:
                     yield item
         finally:
@@ -267,6 +281,22 @@ def catalog_of(model: ChatProvider, *, thinking: bool = True, also: Iterable[str
         for name, title in titles.items()
     }
     return Catalog(offered, default="standard", thinking=dict.fromkeys(offered, thinking))
+
+
+class Offer(Protocol):
+    def __call__(self, *script: Any, thinking: bool = True) -> tuple[ScriptedModel, Catalog]: ...
+
+
+@pytest.fixture
+def offer() -> Offer:
+    """Call with a script to get a model that follows it, and the catalog that offers
+    only that model: for a test that starts the app itself, with `open_app`."""
+
+    def make(*script: Any, thinking: bool = True) -> tuple[ScriptedModel, Catalog]:
+        model = ScriptedModel(*script)
+        return model, catalog_of(model, thinking=thinking)
+
+    return make
 
 
 class ServerIds:
@@ -319,6 +349,63 @@ async def catalog_without_its_server() -> AsyncIterator[Catalog]:
         yield built
 
 
+class OpenApp(Protocol):
+    def __call__(
+        self,
+        settings: Settings,
+        *,
+        address: str = "127.0.0.1",
+        passwords: Passwords | None = None,
+        catalog: Catalog | None = None,
+        plans: Plans | None = None,
+    ) -> AbstractAsyncContextManager[httpx.AsyncClient]: ...
+
+
+@pytest.fixture
+def open_app(clock: Clock, catalog: Catalog, server_ids: ServerIds) -> OpenApp:
+    """Call with settings for an app that runs inside an `async with` block, which gives
+    an HTTP client wired straight to it. Leaving the block shuts the app down, as a
+    process that is told to stop does: for tests of what a shutdown does.
+
+    No server and no network: requests go to the app in process. The client's URL is
+    the app's public address, so it keeps cookies as a browser there would. The app
+    reads the time from `clock`, and takes the ids of the turns and answers it creates
+    from `server_ids`. `address` is the network address the app sees the requests come
+    from. `passwords` replaces the cheap password hasher, to watch it, `catalog` the
+    fake models, and `plans` the usage limits, which are otherwise out of reach.
+    """
+    fake_models = catalog
+
+    @asynccontextmanager
+    async def opened(
+        settings: Settings,
+        *,
+        address: str = "127.0.0.1",
+        passwords: Passwords | None = None,
+        catalog: Catalog | None = None,
+        plans: Plans | None = None,
+    ) -> AsyncIterator[httpx.AsyncClient]:
+        offered = catalog or fake_models
+        app = create_app(
+            settings,
+            passwords=passwords or cheap_passwords(),
+            catalog=offered,
+            plans=plans or plans_for_tests(models=[model.name for model in offered]),
+        )
+        app.dependency_overrides[get_clock] = lambda: lambda: clock.now
+        app.dependency_overrides[get_new_id] = lambda: server_ids
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app, client=(address, 50_000)),
+                base_url=settings.public_url,
+            ) as browser,
+        ):
+            yield browser
+
+    return opened
+
+
 class StartApp(Protocol):
     def __call__(
         self,
@@ -332,19 +419,9 @@ class StartApp(Protocol):
 
 
 @pytest.fixture
-async def start_app(
-    clock: Clock, catalog: Catalog, server_ids: ServerIds
-) -> AsyncIterator[StartApp]:
-    """Call with settings to get an HTTP client wired straight to a started app.
-
-    No server and no network: requests go to the app in process. The client's URL is
-    the app's public address, so it keeps cookies as a browser there would. The app
-    reads the time from `clock`, and takes the ids of the turns and answers it creates
-    from `server_ids`. `address` is the network address the app sees the requests come
-    from. `passwords` replaces the cheap password hasher, to watch it, `catalog` the
-    fake models, and `plans` the usage limits, which are otherwise out of reach.
-    """
-    fake_models = catalog
+async def start_app(open_app: OpenApp) -> AsyncIterator[StartApp]:
+    """Call with settings to get an HTTP client wired straight to a started app, which
+    runs until the test is over. See `open_app` for what it is given."""
     async with AsyncExitStack() as stack:
 
         async def start(
@@ -355,20 +432,9 @@ async def start_app(
             catalog: Catalog | None = None,
             plans: Plans | None = None,
         ) -> httpx.AsyncClient:
-            offered = catalog or fake_models
-            app = create_app(
-                settings,
-                passwords=passwords or cheap_passwords(),
-                catalog=offered,
-                plans=plans or plans_for_tests(models=[model.name for model in offered]),
-            )
-            app.dependency_overrides[get_clock] = lambda: lambda: clock.now
-            app.dependency_overrides[get_new_id] = lambda: server_ids
-            await stack.enter_async_context(app.router.lifespan_context(app))
             return await stack.enter_async_context(
-                httpx.AsyncClient(
-                    transport=httpx.ASGITransport(app=app, client=(address, 50_000)),
-                    base_url=settings.public_url,
+                open_app(
+                    settings, address=address, passwords=passwords, catalog=catalog, plans=plans
                 )
             )
 

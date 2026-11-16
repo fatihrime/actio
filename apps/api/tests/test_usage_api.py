@@ -11,12 +11,10 @@ How the limits themselves behave, below the API, is in `test_usage_limits.py`.
 
 import asyncio
 import json
-import uuid
-from collections.abc import Callable
+from datetime import timedelta
 from typing import Any
 
 import httpx
-import httpx2
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
@@ -24,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from valkey.asyncio import Valkey
 
 from actio.api.rate_limits import in_words
+from actio.chat import turns
 from actio.chat.models import Conversation, Message, Turn
 from actio.core.ids import new_id
 from actio.core.settings import Settings
@@ -546,128 +545,151 @@ async def test_passing_a_share_of_a_limit_is_announced_once(scripted: Any, plans
     }
 
 
-# --- Readers who leave, over a real connection ----------------------------------------
+# --- Answers that are stopped, and answers that take long -----------------------------
 
 
-class Incoming:
-    """A response that is still arriving. Its content can be read only once, so what
-    has come so far is kept between looks."""
-
-    def __init__(self, response: httpx2.Response) -> None:
-        self._pieces = response.aiter_text()
-        self._seen = ""
-
-    async def until(self, marker: str) -> None:
-        """Read on until `marker` has arrived."""
-        async with asyncio.timeout(PATIENCE_S):
-            while marker not in self._seen:
-                try:
-                    self._seen += await anext(self._pieces)
-                except StopAsyncIteration:
-                    raise AssertionError(f"it ended without {marker!r}: {self._seen!r}") from None
-
-
-async def once(
-    browser: httpx2.AsyncClient, url: str, ready: Callable[[dict[str, Any]], bool]
-) -> dict[str, Any]:
-    """What `url` answers, as soon as `ready` says it is worth looking at."""
-    async with asyncio.timeout(PATIENCE_S):
-        while True:
-            found: dict[str, Any] = (await browser.get(url)).json()
-            if ready(found):
-                return found
-            await asyncio.sleep(0.01)
-
-
-def nothing_held(found: dict[str, Any]) -> bool:
-    return all(window["reserved"] == 0 for window in found["windows"])
-
-
-async def asking(browser: httpx2.AsyncClient, address: str, conversation: uuid.UUID) -> Any:
-    """A new guest's open request that asks something: use it with `async with`."""
-    assert (await browser.post(f"{address}/api/session/guest")).status_code == 201
-    message = {"id": str(new_id()), "parts": [{"type": "text", "text": "Tell me something."}]}
-    return browser.stream(
-        "POST", f"{address}/api/conversations/{conversation}/turns", json={"message": message}
-    )
+async def stop(chat: Chat) -> dict[str, Any]:
+    """Stop the answer that is being written in a conversation. Returns its turn, as it
+    was recorded."""
+    writing = (await chat.client.get(chat.path)).json()["unanswered"]
+    stopped = await chat.client.post(f"{chat.path}/turns/{writing['id']}/cancel")
+    assert stopped.status_code == 200, stopped.text
+    turn: dict[str, Any] = stopped.json()
+    return turn
 
 
 async def test_a_stopped_answer_is_counted_by_guess_for_what_had_arrived(
-    served: Any, db: AsyncSession
+    scripted: Any, db: AsyncSession
 ) -> None:
     """Stopping an answer at its last word doesn't make it free. Nor does the model get
     to say what it used: a stream that is closed never sends its count."""
     never = asyncio.Event()
-    model, address = await served(
+    model, browser = await scripted(
         ReasoningDelta("Let me think."),
         TextDelta("Half an answer"),
         never,
         TextDelta(" that nobody will read."),
         used(read=40, written=9),
     )
-    async with httpx2.AsyncClient(timeout=PATIENCE_S) as browser:
-        async with await asking(browser, address, new_id()) as response:
-            await Incoming(response).until('"delta":"Half an answer"')
-            # Leaving the block closes the connection, with the answer unfinished.
-        await asyncio.wait_for(model.closed.wait(), PATIENCE_S)
-        after = await once(browser, f"{address}/api/usage", nothing_held)
+    chat = Chat(browser)
+    asked = asyncio.create_task(chat.ask("Tell me something."))
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
+
+    stopped = await stop(chat)
+    after = await windows(browser)  # asked right after: the stop is counted already
+    await asyncio.wait_for(asked, PATIENCE_S)  # a stream that didn't end would wait for ever
 
     guessed = (
         prompt_tokens(model.requests[0].messages)
         + tokens_in("Let me think.")
         + tokens_in("Half an answer")
     )
-    assert [(w["name"], w["used"]) for w in after["windows"]] == [
-        ("session", guessed),
-        ("week", guessed),
-    ]
+    assert (stopped["status"], stopped["credits"]) == ("stopped", guessed)
+    assert (after["session"][:2], after["week"][:2]) == ((guessed, 0), (guessed, 0))
     [entry] = await ledger(db)
     assert (entry.credits, entry.estimated) == (guessed, True)
-    [turn] = (await db.scalars(select(Turn))).all()
-    assert (turn.status, turn.credits) == ("stopped", guessed)
+    assert turn_of(asked.result()) == stopped  # whoever read along was told the same
 
 
 async def test_an_answer_stopped_before_its_first_word_costs_nothing(
-    served: Any, db: AsyncSession
+    scripted: Any, db: AsyncSession
 ) -> None:
     never = asyncio.Event()
-    model, address = await served(never, TextDelta("Too late."), used(read=40, written=2))
-    async with httpx2.AsyncClient(timeout=PATIENCE_S) as browser:
-        async with await asking(browser, address, new_id()) as response:
-            await Incoming(response).until('"type":"start-step"')
-            await asyncio.wait_for(model.started.wait(), PATIENCE_S)
-        await asyncio.wait_for(model.closed.wait(), PATIENCE_S)
-        after = await once(browser, f"{address}/api/usage", nothing_held)
+    model, browser = await scripted(never, TextDelta("Too late."), used(read=40, written=2))
+    chat = Chat(browser)
+    asked = asyncio.create_task(chat.ask("Tell me something."))
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
 
-    assert [(w["used"], w["reserved"]) for w in after["windows"]] == [(0, 0), (0, 0)]
+    stopped = await stop(chat)
+    after = await windows(browser)
+    await asyncio.wait_for(asked, PATIENCE_S)
+
+    assert (stopped["status"], stopped["credits"]) == ("stopped", None)
+    assert (after["session"][:2], after["week"][:2]) == ((0, 0), (0, 0))
     assert await ledger(db) == []
-    [turn] = (await db.scalars(select(Turn))).all()
-    assert (turn.status, turn.credits) == ("stopped", None)
 
 
-async def test_an_answer_whose_conversation_was_deleted_meanwhile_is_still_counted(
-    served: Any, db: AsyncSession
+async def test_deleting_a_conversation_stops_its_answer_which_is_counted_like_any_stopped_one(
+    scripted: Any, db: AsyncSession
 ) -> None:
-    """What was used was used, whatever became of the conversation."""
-    hold = asyncio.Event()
-    conversation = new_id()
-    _, address = await served(TextDelta("Half an "), hold, TextDelta("answer."), used(40, 4))
-    async with httpx2.AsyncClient(timeout=PATIENCE_S) as browser:
-        async with await asking(browser, address, conversation) as response:
-            incoming = Incoming(response)
-            await incoming.until("Half an ")
-            deleted = await browser.delete(
-                f"{address}/api/conversations/{conversation}",
-                headers={"Origin": "http://localhost:8080"},
-            )
-            hold.set()
-            await incoming.until("[DONE]")
-        after = await once(browser, f"{address}/api/usage", nothing_held)
+    """What was used was used, whatever became of the conversation. And an answer
+    nobody can read any more isn't written to its end at its account's cost."""
+    never = asyncio.Event()
+    model, browser = await scripted(
+        TextDelta("Half an "), never, TextDelta("answer."), used(read=40, written=4)
+    )
+    chat = Chat(browser)
+    asked = asyncio.create_task(chat.ask("Tell me something."))
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
 
+    deleted = await browser.delete(chat.path)
+    after = await windows(browser)
+    await asyncio.wait_for(asked, PATIENCE_S)
+
+    guessed = prompt_tokens(model.requests[0].messages) + tokens_in("Half an ")
     assert deleted.status_code == 204
-    assert after["windows"][0]["used"] == 44
-    assert [entry.credits for entry in await ledger(db)] == [44]
+    assert after["session"][:2] == (guessed, 0)
+    assert [(entry.credits, entry.estimated) for entry in await ledger(db)] == [(guessed, True)]
     assert await count(db, Turn) == 0
+
+
+async def test_the_credits_held_for_a_long_answer_stay_held_until_it_ends(
+    scripted: Any, db: AsyncSession, clock: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hold lasts a minute, so that a process that dies gives it back soon. An answer
+    that takes longer renews it with every beat."""
+    monkeypatch.setattr(turns, "BEAT", timedelta(milliseconds=10))
+    hold = asyncio.Event()
+    model, browser = await scripted(
+        TextDelta("A long "), hold, TextDelta("answer."), used(read=40, written=4)
+    )
+    asked = asyncio.create_task(Chat(browser).ask())
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
+    held = held_for_prompt(prompt_tokens(model.requests[0].messages)) + ROOM
+
+    during = []
+    for _ in range(8):  # six minutes, in steps shorter than a hold lasts
+        clock.advance(seconds=45)
+        async with asyncio.timeout(PATIENCE_S):
+            while True:
+                [turn] = (await db.scalars(select(Turn))).all()
+                await db.refresh(turn)
+                if turn.alive_at == clock.now:  # this moment's beat has been
+                    break
+                await asyncio.sleep(0.005)
+        during.append((await windows(browser))["session"][:2])
+    hold.set()
+    await asked
+
+    assert during == [(0, held)] * 8
+    assert (await windows(browser))["session"][:2] == (44, 0)
+
+
+async def test_what_was_held_for_a_turn_that_fell_silent_comes_back_by_itself(
+    scripted: Any, tight: Plans, clock: Any
+) -> None:
+    """The other side of it: without a beat, as when the process that writes the answer
+    is gone, the hold runs out a minute after it was last renewed, and the next question
+    has the room again. Here the process is only held up, and what its answer cost is
+    counted when it ends after all."""
+    hold = asyncio.Event()
+    model, browser = await scripted(
+        TextDelta("Half"), hold, TextDelta(" an answer."), used(read=40, written=4), plans=tight
+    )
+    asked = asyncio.create_task(Chat(browser).ask())
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
+    model.script = [TextDelta("A short answer."), used(read=40, written=4)]  # for the next ones
+
+    clock.advance(seconds=59)
+    while_held = await Chat(browser).ask()  # more than half of the session is held
+    clock.advance(seconds=1)  # no beat came meanwhile: under test they are 15 real seconds apart
+    afterwards = await Chat(browser).ask()
+    hold.set()
+    await asked
+
+    assert turn_of(while_held)["capped_by_usage"] is True
+    assert turn_of(afterwards)["capped_by_usage"] is False
+    assert (await windows(browser))["session"][:2] == (3 * 44, 0)
 
 
 # --- When the counters are lost -------------------------------------------------------

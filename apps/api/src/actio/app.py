@@ -1,5 +1,6 @@
 """Builds the FastAPI application. ``uvicorn --factory`` calls :func:`create_app`."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 
@@ -10,8 +11,11 @@ from actio.api import catalog as catalog_routes
 from actio.api import conversations, health, identity, problems, turns, usage
 from actio.api.same_origin import SameOriginOnly
 from actio.catalog import Catalog, open_catalog
+from actio.chat.events import TurnEvents
+from actio.chat.running import TurnRunner
 from actio.core.resources import open_resources
 from actio.core.settings import Settings
+from actio.core.signals import on_stop_signal
 from actio.identity.passwords import Passwords
 from actio.usage.limits import UsageLimits
 from actio.usage.plans import Plans
@@ -27,7 +31,9 @@ Actio's HTTP API, which its web app is built on.
 - **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):
   see the `Problem` schema. A request that changes something, sent by a page on another
   site, is answered 403.
-- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`.
+- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`. An
+  answer is written whether or not anyone reads along. It can be joined again, and
+  stopped, by the turn's id.
 - **Usage is limited** per session and per week. `GET /api/usage` says how much is
   left, and a question that no longer fits is answered 429, with when it will.
 """
@@ -69,6 +75,23 @@ def create_app(
                 ValkeyQuota(resources.valkey, prefix=f"{settings.valkey_prefix}:q"),
                 priced,
             )
+            app.state.turn_events = TurnEvents(
+                resources.valkey, prefix=f"{settings.valkey_prefix}:turn"
+            )
+            app.state.turn_runner = runner = TurnRunner()
+            # The web server tells the application to shut down only after the
+            # requests it was answering have ended. The answers being written have to
+            # hear it sooner, so that they end while their readers are still there.
+            loop = asyncio.get_running_loop()
+
+            def told_to_stop() -> None:
+                # Inside a signal handler: only a note for the loop is left here.
+                loop.call_soon_threadsafe(runner.stopping)
+
+            stack.callback(on_stop_signal(told_to_stop))
+            # Registered last, so it runs first on the way out: whatever is still being
+            # written is ended and recorded while the database is still open.
+            stack.push_async_callback(runner.drain)
             yield
 
     app = FastAPI(

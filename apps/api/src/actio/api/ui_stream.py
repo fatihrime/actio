@@ -21,6 +21,11 @@ share of a usage limit. The names and fields were read from version 7.0.169 of t
 package. A test in
 `apps/web` parses recorded streams with that package itself, so a chunk it wouldn't
 accept fails there.
+
+Between two events there can be a line that is no event, `: keep-alive`. A reader gets
+one whenever the turn has had nothing to say for a while, which keeps a proxy from
+closing a connection it takes for dead. The format calls it a comment, and whoever
+reads the stream skips it.
 """
 
 import json
@@ -38,6 +43,14 @@ HEADERS = {
 }
 
 DONE = b"data: [DONE]\n\n"
+
+KEEP_ALIVE = b": keep-alive\n\n"
+"""Sent to a reader while there is nothing to send: a comment, in the words of
+server-sent events. Readers skip it."""
+
+LOST = "The connection to this answer was lost. It may still be being written."
+"""What a reader is told when what the turn streams can no longer be read, while the
+turn itself may be running on. Whoever shows the conversation should read it again."""
 
 FINISH_REASONS = {
     "stop": "stop",

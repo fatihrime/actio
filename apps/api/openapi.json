@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Actio",
-    "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** Everything but the health checks needs a session, a guest's included.\n  It lives in a cookie: start one with `POST /api/session/guest`. Without one the\n  answer is 401.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. A request that changes something, sent by a page on another\n  site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`.\n- **Usage is limited** per session and per week. `GET /api/usage` says how much is\n  left, and a question that no longer fits is answered 429, with when it will.\n",
+    "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** Everything but the health checks needs a session, a guest's included.\n  It lives in a cookie: start one with `POST /api/session/guest`. Without one the\n  answer is 401.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. A request that changes something, sent by a page on another\n  site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`. An\n  answer is written whether or not anyone reads along. It can be joined again, and\n  stopped, by the turn's id.\n- **Usage is limited** per session and per week. `GET /api/usage` says how much is\n  left, and a question that no longer fits is answered 429, with when it will.\n",
     "version": "0.0.0"
   },
   "paths": {
@@ -624,7 +624,7 @@
           "conversations"
         ],
         "summary": "Delete Conversation",
-        "description": "Delete the conversation and every message in it, on every branch. There is no\nway back.",
+        "description": "Delete the conversation and every message in it, on every branch. There is no\nway back.\n\nAn answer that is being written in it is stopped first: nobody could read it. What\nit had used until then is counted, as for any answer that is stopped.",
         "operationId": "delete_conversation",
         "parameters": [
           {
@@ -755,7 +755,7 @@
           "conversations"
         ],
         "summary": "Start Turn",
-        "description": "Ask a model something, and stream its answer.",
+        "description": "Ask a model something, and stream its answer.\n\nThe answer is written whether or not this response is read to its end. To stop it,\ncancel the turn: closing the connection doesn't.",
         "operationId": "start_turn",
         "parameters": [
           {
@@ -827,7 +827,154 @@
             }
           },
           "503": {
-            "description": "The model can't answer right now: `model_status` says why. Or messages, or usage, can't be counted right now.",
+            "description": "The model can't answer right now: `model_status` says why. Or messages, or usage, can't be counted right now, or an answer couldn't be read along with.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request doesn't have the expected form. `errors` lists what is wrong, and where.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/conversations/{conversation_id}/turns/{turn_id}/stream": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Follow Turn",
+        "description": "Read along with a turn that is being written: after a reload, after a lost\nconnection, or from another window.\n\nThe stream starts at the answer's first event, whenever it is joined, so that it\ncan be read by itself.",
+        "operationId": "follow_turn",
+        "parameters": [
+          {
+            "name": "turn_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Turn Id"
+            }
+          },
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The answer that is being written, from its beginning, in the same format as the turn's own response.",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "401": {
+            "description": "No session, or it has ended. Start one with `POST /api/session/guest`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Nothing is being written: the turn has ended. Read the conversation for what it left."
+          },
+          "404": {
+            "description": "No such conversation, or no such turn in it.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request doesn't have the expected form. `errors` lists what is wrong, and where.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/conversations/{conversation_id}/turns/{turn_id}/cancel": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Cancel Turn",
+        "description": "Stop a turn that is being written. What it had written is kept, and counted.\n\nAnswers once the turn is recorded, with the turn as it is then: `stopped`. A turn\nthat had ended already is left as it ended, and answered the same way. So is one\nthat this server can't stop, because the process that was writing it is gone: it\nsays `running` until it is given up on, a minute after it was last heard from.",
+        "operationId": "cancel_turn",
+        "parameters": [
+          {
+            "name": "turn_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Turn Id"
+            }
+          },
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session, or it has ended. Start one with `POST /api/session/guest`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such conversation, or no such turn in it.",
             "content": {
               "application/problem+json": {
                 "schema": {

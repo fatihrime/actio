@@ -24,6 +24,17 @@ from actio.usage.plans import load as load_plans
 
 ROLES = ("api", "migrate")
 
+WAITS_FOR_REQUESTS_S = 25
+"""How long the web server waits, when it is told to stop, for the requests it is
+answering, before it cuts them off.
+
+The ones that last are the readers of answers being written. Those answers end by
+themselves: they are halted `GRACE` after the process was told to stop, and recorded
+within `LAST_WORDS` (`actio.chat.running`), and their readers with them. So this wait
+has to be the longer one, or a reader is cut off before being told how the answer
+ended. And whatever stops the process has to wait longer still: `stop_grace_period` in
+compose.yaml. Tests hold the three together."""
+
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="actio", description="Run an Actio process.")
@@ -59,6 +70,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         log_level=settings.log_level,
         server_header=False,  # don't advertise the server software
         forwarded_allow_ips=settings.forwarded_allow_ips,
+        timeout_graceful_shutdown=WAITS_FOR_REQUESTS_S,
         reload=args.reload,
         # Watch only this package, not the whole repository.
         reload_dirs=[str(Path(__file__).parent)] if args.reload else None,

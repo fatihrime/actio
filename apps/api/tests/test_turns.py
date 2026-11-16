@@ -75,12 +75,13 @@ async def test_finishing_a_turn_writes_the_answer_and_what_it_cost(db: AsyncSess
         timings=Timings(load_ms=1800, prompt_ms=120, generation_ms=75, total_ms=2000),
     )
 
-    turn = await turns.finish(
+    recorded = await turns.finish(
         db, begun.conversation.id, begun.turn.id, ending, answer_id=answer_id, now=later
     )
     await db.commit()
 
-    assert turn is not None
+    turn = begun.turn
+    assert recorded == "recorded"
     assert (turn.status, turn.finish_reason, turn.error) == ("completed", "stop", None)
     assert (turn.answer_id, turn.finished_at) == (answer_id, later)
     assert (turn.input_tokens, turn.cached_input_tokens, turn.output_tokens) == (11, 6, 3)
@@ -100,7 +101,7 @@ async def test_finishing_a_turn_writes_the_answer_and_what_it_cost(db: AsyncSess
 async def test_a_turn_that_produced_nothing_writes_no_answer(db: AsyncSession) -> None:
     begun = await asked(db)
 
-    turn = await turns.finish(
+    recorded = await turns.finish(
         db,
         begun.conversation.id,
         begun.turn.id,
@@ -109,7 +110,8 @@ async def test_a_turn_that_produced_nothing_writes_no_answer(db: AsyncSession) -
         now=NOON,
     )
 
-    assert turn is not None
+    turn = begun.turn
+    assert recorded == "recorded"
     assert (turn.status, turn.error, turn.answer_id) == ("failed", "model_unavailable", None)
     assert await count(db, Message) == 1  # the question, still without an answer
 
@@ -122,7 +124,7 @@ async def test_a_turn_that_was_given_up_on_stays_given_up_on(db: AsyncSession) -
     await turns.give_up_on_stale(db, begun.conversation.id, now=much_later)
     await db.commit()
 
-    turn = await turns.finish(
+    recorded = await turns.finish(
         db,
         begun.conversation.id,
         begun.turn.id,
@@ -131,23 +133,50 @@ async def test_a_turn_that_was_given_up_on_stays_given_up_on(db: AsyncSession) -
         now=much_later + timedelta(minutes=1),
     )
 
-    assert turn is not None
+    turn = begun.turn
+    assert recorded == "left"
     assert (turn.status, turn.finished_at, turn.answer_id) == ("interrupted", much_later, None)
     assert await count(db, Message) == 1
 
 
-async def test_a_turn_is_given_up_on_only_after_ten_minutes(db: AsyncSession) -> None:
+async def test_a_turn_is_given_up_on_only_after_a_minute_of_silence(db: AsyncSession) -> None:
     begun = await asked(db)
 
-    await turns.give_up_on_stale(
-        db, begun.conversation.id, now=NOON + timedelta(minutes=9, seconds=59)
-    )
+    await turns.give_up_on_stale(db, begun.conversation.id, now=NOON + timedelta(seconds=59))
     await db.refresh(begun.turn)
     before = begun.turn.status
-    await turns.give_up_on_stale(db, begun.conversation.id, now=NOON + timedelta(minutes=10))
+    await turns.give_up_on_stale(db, begun.conversation.id, now=NOON + timedelta(seconds=60))
     await db.refresh(begun.turn)
 
     assert (before, begun.turn.status) == ("running", "interrupted")
+
+
+async def test_a_turn_that_says_it_is_alive_is_not_given_up_on_however_long_it_takes(
+    db: AsyncSession,
+) -> None:
+    begun = await asked(db)
+
+    for minute in range(1, 31):
+        now = NOON + timedelta(minutes=minute)
+        await turns.still_alive(db, begun.turn.id, now=now - timedelta(seconds=20))
+        await turns.give_up_on_stale(db, begun.conversation.id, now=now)
+    await db.refresh(begun.turn)
+
+    assert begun.turn.status == "running"
+    assert begun.turn.alive_at == NOON + timedelta(minutes=29, seconds=40)
+
+
+async def test_a_turn_that_has_ended_no_longer_says_it_is_alive(db: AsyncSession) -> None:
+    """A beat that comes after the outcome must not touch it."""
+    begun = await asked(db)
+    await turns.finish(
+        db, begun.conversation.id, begun.turn.id, Ending("stopped"), answer_id=new_id(), now=NOON
+    )
+
+    await turns.still_alive(db, begun.turn.id, now=NOON + timedelta(seconds=15))
+    await db.refresh(begun.turn)
+
+    assert (begun.turn.status, begun.turn.alive_at) == ("stopped", NOON)
 
 
 async def test_finishing_a_turn_whose_conversation_is_gone_does_nothing(db: AsyncSession) -> None:
@@ -155,7 +184,7 @@ async def test_finishing_a_turn_whose_conversation_is_gone_does_nothing(db: Asyn
     await conversations.delete(db, begun.conversation)
     await db.commit()
 
-    turn = await turns.finish(
+    recorded = await turns.finish(
         db,
         begun.conversation.id,
         begun.turn.id,
@@ -164,7 +193,7 @@ async def test_finishing_a_turn_whose_conversation_is_gone_does_nothing(db: Asyn
         now=NOON,
     )
 
-    assert turn is None
+    assert recorded == "gone"
     assert (await count(db, Conversation), await count(db, Message), await count(db, Turn)) == (
         0,
         0,
@@ -203,8 +232,8 @@ async def test_the_last_turn_of_a_question_is_the_one_that_is_shown(db: AsyncSes
 
 INSERT_TURN = text(
     "INSERT INTO turns (id, conversation_id, question_id, model, thinking, status, created_at,"
-    " finished_at) VALUES (:id, :conversation, :question, 'standard', false, :status, now(),"
-    " :finished)"
+    " alive_at, finished_at) VALUES (:id, :conversation, :question, 'standard', false, :status,"
+    " now(), now(), :finished)"
 )
 
 

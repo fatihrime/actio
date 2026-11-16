@@ -43,6 +43,21 @@ def test_api_role_serves_the_app_factory_with_settings(monkeypatch: pytest.Monke
     assert kwargs["reload"] is False
 
 
+def test_the_server_is_told_how_long_to_wait_for_its_requests_when_it_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a limit it would wait for ever for a request that never ends, and be
+    killed in the end. How the limit fits the time answers get, and the time Docker
+    gives, is checked where all three are in view: deploy/tests."""
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *_args, **kwargs: calls.append(kwargs))
+
+    cli.main(["--role", "api"])
+
+    [kwargs] = calls
+    assert kwargs["timeout_graceful_shutdown"] == cli.WAITS_FOR_REQUESTS_S == 25
+
+
 def test_reload_watches_only_the_api_package(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(uvicorn, "run", lambda *_args, **kwargs: calls.append(kwargs))

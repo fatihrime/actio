@@ -819,11 +819,12 @@ async def test_a_conversation_read_while_its_answer_is_recorded_is_shown_whole(
     assert seen["current_leaf_id"] == seen["messages"][-1]["id"]
 
 
-async def test_a_turn_whose_server_died_is_given_up_on_after_ten_minutes(
+async def test_a_turn_whose_server_died_is_given_up_on_after_a_minute_of_silence(
     chat: Chat, db: AsyncSession, clock: Any
 ) -> None:
     """Nothing finishes a turn when the process that ran it is killed. Without this the
-    conversation could never be answered again."""
+    conversation could never be answered again. A turn that is being written says so
+    every few seconds: see `test_turns_running_api.py`."""
     me = uuid.UUID((await chat.client.get("/api/me")).json()["id"])
     question = new_id()
     left_running = await turns.ask(
@@ -840,7 +841,7 @@ async def test_a_turn_whose_server_died_is_given_up_on_after_ten_minutes(
     )
     await db.commit()
 
-    clock.advance(minutes=9, seconds=59)
+    clock.advance(seconds=59)
     too_early = await chat.turn({"answer_to": str(question)})
     still = (await chat.read())["unanswered"]["status"]
     clock.advance(seconds=1)
@@ -850,7 +851,7 @@ async def test_a_turn_whose_server_died_is_given_up_on_after_ten_minutes(
     assert too_early.status_code == 409
     assert still == "running"
     assert (noticed["id"], noticed["status"]) == (str(left_running.turn.id), "interrupted")
-    assert noticed["finished_at"] == "2026-11-10T12:10:00Z"
+    assert noticed["finished_at"] == "2026-11-10T12:01:00Z"
     assert again.status_code == 200
     assert await chat.texts() == [
         "Asked just before the server died",

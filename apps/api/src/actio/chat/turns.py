@@ -10,9 +10,10 @@ exist before a model is asked anything, in one transaction:
 So a question never exists without the turn that is answering it. Finishing a turn
 writes the answer, if the model produced anything, and how the turn ended.
 
-One turn runs at a time in a conversation. A turn whose process died would otherwise
-block its conversation for ever, so one that has been `running` for longer than any
-answer takes is given up on, as `interrupted`, the next time someone looks.
+One turn runs at a time in a conversation. While it runs, the process that writes its
+answer says every few seconds that it is still at it (`still_alive`). A turn whose
+process died would otherwise block its conversation for ever, so one that has been
+silent for too long is given up on, as `interrupted`, the next time someone looks.
 
 These functions never commit, and take the time as `now`.
 """
@@ -31,10 +32,14 @@ from actio.chat.models import Conversation, Message, Turn
 from actio.chat.parts import Part, TextPart
 from actio_llm import Timings, Usage
 
-STALE_AFTER = timedelta(minutes=10)
-"""A turn still `running` after this long is taken for dead. Longer than any answer
-takes: a model gets 90 seconds to start, and the longest answer allowed is a few
-thousand tokens."""
+BEAT = timedelta(seconds=15)
+"""How often a running turn says that it is alive."""
+
+STALE_AFTER = timedelta(seconds=60)
+"""A running turn that hasn't said it is alive for this long is taken for dead. Four
+beats: a process that is only slow, or a database that was away for a moment, misses
+one or two. It is also how long the credits held for a turn stay held without being
+renewed, and how long what it streams is kept."""
 
 TITLE_LENGTH = 60
 """A new conversation is named after its first question, cut to about this many
@@ -68,6 +73,10 @@ class IdTakenError(Exception):
     """The id chosen for a new conversation or a new message belongs to something else."""
 
 
+type Recorded = Literal["recorded", "left", "gone"]
+"""What became of a turn's outcome when it was written: see `finish`."""
+
+
 @dataclass(frozen=True, slots=True)
 class Begun:
     """A turn that has started, and what a model needs to answer it."""
@@ -85,7 +94,9 @@ class Begun:
 class Ending:
     """How a turn ended, and what it produced."""
 
-    status: Literal["completed", "stopped", "failed"]
+    status: Literal["completed", "stopped", "failed", "interrupted"]
+    """`stopped`: whoever asked stopped it. `interrupted`: the process that wrote it was
+    shutting down."""
     parts: list[Part] = field(default_factory=list)
     """What the model wrote, whole or not. Empty when it wrote nothing."""
     finish_reason: str | None = None
@@ -179,14 +190,19 @@ async def finish(
     answer_id: uuid.UUID,
     now: datetime,
     credits: int | None = None,
-) -> Turn | None:
+) -> Recorded:
     """Record how a turn ended, and write its answer if the model produced anything.
 
     `credits` is what the turn cost its account, when it cost something: the same
     number the usage ledger gets, in the same transaction.
 
-    Returns the turn, or `None` if its conversation was deleted meanwhile. A turn that
-    is no longer `running`, because it was given up on, is left as it is.
+    Says what became of it:
+
+    - `recorded`: the turn has its outcome now;
+    - `left`: the turn was no longer `running`, because it was given up on. It is left
+      as it is: its conversation may have moved on since, and an answer that turns up
+      after all is not slipped in behind everyone's back;
+    - `gone`: its conversation was deleted meanwhile, and the turn with it.
     """
     # The conversation first, then the turn: the same order in which a new turn takes
     # them, so the two can't wait for each other.
@@ -194,10 +210,12 @@ async def finish(
         select(Conversation).where(Conversation.id == conversation_id).with_for_update()
     )
     if conversation is None:
-        return None
+        return "gone"
     turn = await db.scalar(select(Turn).where(Turn.id == turn_id).with_for_update())
-    if turn is None or turn.status != "running":
-        return turn
+    if turn is None:
+        return "gone"
+    if turn.status != "running":
+        return "left"
     if ending.parts:
         await tree.append(
             db,
@@ -223,21 +241,47 @@ async def finish(
     turn.credits = credits
     turn.finished_at = now
     await db.flush()
-    return turn
+    return "recorded"
+
+
+async def still_alive(db: AsyncSession, turn_id: uuid.UUID, *, now: datetime) -> None:
+    """Say that a running turn is still being written. Whoever writes it calls this
+    every `BEAT`, so that nobody gives up on it."""
+    await db.execute(
+        update(Turn).where(Turn.id == turn_id, Turn.status == "running").values(alive_at=now)
+    )
 
 
 async def give_up_on_stale(db: AsyncSession, conversation_id: uuid.UUID, *, now: datetime) -> None:
-    """Mark the conversation's turn as `interrupted` if it has been running for longer
-    than any answer takes: the process that was writing it is gone."""
+    """Mark the conversation's turn as `interrupted` if it is running and hasn't said
+    so for `STALE_AFTER`: the process that was writing it is gone."""
     await db.execute(
         update(Turn)
         .where(
             Turn.conversation_id == conversation_id,
             Turn.status == "running",
-            Turn.created_at <= now - STALE_AFTER,
+            Turn.alive_at <= now - STALE_AFTER,
         )
         .values(status="interrupted", finished_at=now)
     )
+
+
+async def get(db: AsyncSession, conversation: Conversation, turn_id: uuid.UUID) -> Turn | None:
+    """The conversation's turn with this id, as the database has it now."""
+    found: Turn | None = await db.scalar(
+        select(Turn)
+        .where(Turn.conversation_id == conversation.id, Turn.id == turn_id)
+        .execution_options(populate_existing=True)
+    )
+    return found
+
+
+async def running_in(db: AsyncSession, conversation: Conversation) -> uuid.UUID | None:
+    """The turn that is being written in this conversation, if one is."""
+    found: uuid.UUID | None = await db.scalar(
+        select(Turn.id).where(Turn.conversation_id == conversation.id, Turn.status == "running")
+    )
+    return found
 
 
 async def that_wrote(
@@ -297,9 +341,7 @@ async def _create(
 
 async def _require_free(db: AsyncSession, conversation: Conversation, *, now: datetime) -> None:
     await give_up_on_stale(db, conversation.id, now=now)
-    running = await db.scalar(
-        select(Turn.id).where(Turn.conversation_id == conversation.id, Turn.status == "running")
-    )
+    running = await running_in(db, conversation)
     if running is not None:
         raise StillAnsweringError(running)
 
@@ -327,6 +369,7 @@ async def _begin(
         thinking=thinking,
         status="running",
         created_at=now,
+        alive_at=now,
     )
     db.add(turn)
     await db.flush()

@@ -10,6 +10,9 @@ A request that costs credits goes through three moments:
 3. **`settle`**, after that transaction is committed: the counters give back what was
    held and count what was used. A request that used nothing is `release`d instead.
 
+A hold lasts only so long. A request that is still running when it would run out
+renews it with **`extend`**.
+
 The ledger comes first on purpose. The counters live in Valkey, which keeps nothing on
 disk: when they are missing, they are rebuilt from the ledger, so nothing may reach the
 counters that the ledger doesn't hold.
@@ -279,6 +282,33 @@ class UsageLimits:
                 finished.outcome,
             )
         return finished.warnings
+
+    async def extend(self, reserved: Reserved, *, hold_for: timedelta, now: datetime) -> None:
+        """Keep what is held for a request that is still running, for `hold_for` from
+        now. A request that takes longer than its first hold calls this again and
+        again, so that the hold can be short: a process that dies stops calling, and
+        the credits come back soon after.
+
+        Doesn't raise. A hold that can't be renewed runs out, and what the request then
+        uses is still counted when it is settled.
+        """
+        try:
+            held = await self._engine.extend(
+                str(reserved.user_id),
+                str(reserved.id),
+                ttl_ms=hold_for // _MILLISECOND,
+                now_ms=to_ms(now),
+            )
+        except (ValkeyError, OSError) as error:
+            logger.warning(
+                "usage: the hold of reservation %s couldn't be renewed in Valkey (%s)",
+                reserved.id,
+                type(error).__name__,
+            )
+            return
+        if not held:
+            # The counters were lost and rebuilt while the request ran: see `settle`.
+            logger.info("usage: reservation %s was no longer held when it was renewed", reserved.id)
 
     async def release(self, reserved: Reserved, *, now: datetime) -> None:
         """Give back what was held for a request that used nothing. Doesn't raise: a

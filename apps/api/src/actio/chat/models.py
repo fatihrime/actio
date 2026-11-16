@@ -144,8 +144,8 @@ class Turn(Base):
     """Whether the model was asked to reason before answering."""
     status: Mapped[TurnStatus] = mapped_column(String)
     """`running` while the answer is written. Then how it ended: `completed`; `stopped`,
-    because whoever asked left; `failed`, because the model did; or `interrupted`,
-    because the process that was writing it is gone."""
+    because whoever asked stopped it; `failed`, because the model did; or `interrupted`,
+    because the process that was writing it shut down, or is gone."""
     finish_reason: Mapped[str | None]
     """Why the model stopped writing, for a completed turn: `stop`, `length`, …"""
     error: Mapped[str | None]
@@ -167,4 +167,8 @@ class Turn(Base):
     """Whether the answer was given less room than the model allows, because a usage
     limit was near. With the finish reason `length`, that is why it was cut."""
     created_at: Mapped[datetime]
+    alive_at: Mapped[datetime]
+    """When the process that writes the answer last said it was still at it: every few
+    seconds while the turn runs. A running turn that has been silent for too long is
+    taken for dead: see `actio.chat.turns.STALE_AFTER`."""
     finished_at: Mapped[datetime | None]

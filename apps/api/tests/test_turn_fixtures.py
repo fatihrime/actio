@@ -19,26 +19,36 @@ To record them again, after a change to the stream that is meant:
 and review the difference in the files.
 """
 
+import asyncio
 import json
 import os
+import re
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
 
+from actio.api import turns as turn_routes
+from actio.api import ui_stream
+from actio.chat import events
 from actio_llm import Finish, FinishReason, TextDelta, Usage
 
 pytestmark = pytest.mark.anyio
 
 FIXTURES = Path(__file__).parent / "fixtures" / "turns"
 RECORD = os.environ.get("ACTIO_RECORD_TURNS") == "1"
+PATIENCE_S = 5.0
+DONE = Finish(FinishReason.STOP, Usage(input_tokens=10, output_tokens=5))
 
 # What a browser would have chosen. The turn's and the answer's ids come from the
 # test's `server_ids`: 01900000-0000-7000-8000-000000000001 and …002.
 CONVERSATION = uuid.UUID("01900000-0000-7000-8000-0000000000c1")
 QUESTION = uuid.UUID("01900000-0000-7000-8000-0000000000a1")
+TURN = uuid.UUID("01900000-0000-7000-8000-000000000001")
 
 
 def as_recorded(name: str, produced: str) -> None:
@@ -120,6 +130,53 @@ async def test_an_answer_that_passes_half_of_a_usage_limit_streams_what_was_reco
     response = await turn(browser, "How much may I still ask?")
 
     as_recorded("usage_warning.sse", response.text)
+
+
+async def test_an_answer_that_was_stopped_streams_what_was_recorded(scripted: Any) -> None:
+    """What whoever reads along is sent when the answer is stopped: it ends as a whole
+    answer does, and the turn in its last chunk says that it was stopped."""
+    never = asyncio.Event()
+    model, browser = await scripted(TextDelta("One, two, "), TextDelta("three"), never)
+    asked = asyncio.create_task(turn(browser, "Count to a hundred."))
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
+
+    stopped = await browser.post(f"/api/conversations/{CONVERSATION}/turns/{TURN}/cancel")
+    response = await asyncio.wait_for(asked, PATIENCE_S)
+
+    assert stopped.status_code == 200, stopped.text
+    as_recorded("stopped.sse", response.text)
+
+
+async def test_an_answer_that_keeps_its_reader_waiting_streams_what_was_recorded(
+    served: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While the model is silent, the reader is sent a line that is no event, so that
+    nothing on the way closes the connection. The library has to skip it.
+
+    This one takes a real connection, to see the line arrive before the model goes on.
+    However many of these lines a silence brings, the file keeps one."""
+    monkeypatch.setattr(events, "TICK", timedelta(milliseconds=10))
+    monkeypatch.setattr(turn_routes, "KEEP_ALIVE_AFTER", timedelta(milliseconds=30))
+    hold = asyncio.Event()
+    _, address = await served(hold, TextDelta("Sorry to keep you "), TextDelta("waiting."), DONE)
+    message = {"id": str(QUESTION), "parts": [{"type": "text", "text": "Are you there?"}]}
+    keep_alive = ui_stream.KEEP_ALIVE.decode()
+
+    async with httpx2.AsyncClient(timeout=PATIENCE_S) as browser:
+        await browser.post(f"{address}/api/session/guest")
+        asking = browser.stream(
+            "POST", f"{address}/api/conversations/{CONVERSATION}/turns", json={"message": message}
+        )
+        async with asking as response, asyncio.timeout(PATIENCE_S):
+            arrived = ""
+            async for piece in response.aiter_text():
+                arrived += piece
+                if keep_alive in arrived:
+                    hold.set()
+
+    assert arrived.count(keep_alive) >= 1
+    silence = re.compile(f"({re.escape(keep_alive)})+")
+    as_recorded("keep_alive.sse", silence.sub(keep_alive, arrived))
 
 
 async def test_a_question_refused_at_a_usage_limit_answers_what_was_recorded(

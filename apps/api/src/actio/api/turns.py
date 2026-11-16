@@ -1,4 +1,4 @@
-"""The route that puts a question to a model and streams the answer back.
+"""The routes that put a question to a model, and let its answer be read and stopped.
 
 `POST /api/conversations/{id}/turns` does one of two things:
 
@@ -11,6 +11,15 @@ What goes wrong before a model is asked is an ordinary error: 404, 409, 422, 429
 Once the turn has started the answer is `200`, and everything else, the model's own
 failures included, comes in the stream (`actio.api.ui_stream`).
 
+The turn runs apart from that request (`actio.chat.running`). The request only reads
+along: what the turn writes goes to a stream of events that is kept while it runs
+(`actio.chat.events`), and the response follows that stream. Whoever leaves ends
+nothing, and can come back:
+
+- `GET /api/conversations/{id}/turns/{turn_id}/stream` reads along again, from the
+  answer's first event;
+- `POST /api/conversations/{id}/turns/{turn_id}/cancel` stops the turn.
+
 A turn costs credits, and an account has only so many per session and per week
 (`actio.usage`). Before a model is asked, the most the turn can cost is held. A turn
 that doesn't fit is answered 429, with the moment the limit starts over, and nothing of
@@ -21,30 +30,33 @@ browser does before it has heard from the server. The question's id also makes a
 repeated request harmless: the same message is never asked twice.
 """
 
+import logging
 import math
 import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import aclosing
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing, suppress
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Self
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from actio.api import ui_stream
-from actio.api.conversations import MessageMetadata, TurnOut
+from actio.api.conversations import MessageMetadata, OwnConversation, TurnOut
 from actio.api.dependencies import (
     NO_SESSION,
     AppResources,
     Clock,
     CurrentPrincipal,
     Database,
+    Events,
     Models,
     NewId,
     Now,
+    Runner,
     Usage,
 )
 from actio.api.problems import Problem
@@ -52,7 +64,8 @@ from actio.api.rate_limits import Limits, in_words
 from actio.api.usage import UNAVAILABLE
 from actio.catalog import OfferedModel, UnknownModelError
 from actio.chat import answering, context, tree, turns
-from actio.chat.answering import Ended
+from actio.chat.answering import Ended, Halt
+from actio.chat.events import EventsLostError, EventsUnavailableError, TurnEvents
 from actio.chat.parts import TextPart
 from actio.chat.turns import Begun
 from actio.identity.sessions import Principal
@@ -65,11 +78,25 @@ from actio.usage.limits import (
 )
 from actio_llm import ChatRequest, prompt_tokens
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["conversations"], responses=NO_SESSION)
 
 MAX_QUESTION_CHARS = 100_000
 """The longest question accepted, in characters. Far more than a small model can read;
 it is a bound on what gets stored, not a promise that a model will take it."""
+
+KEEP_ALIVE_AFTER = timedelta(seconds=15)
+"""How long a reader hears nothing before it is sent a line that says the connection is
+alive. A model that is being loaded can be silent for a minute, and a proxy on the way
+may close a connection that is."""
+
+CANT_BE_READ = "Answers can't be written right now. Try again in a moment."
+"""For the 503 when Valkey doesn't take what a turn streams: an answer nobody could
+read along with isn't started."""
+
+NO_SUCH_TURN: dict[int | str, dict[str, Any]] = {
+    404: {"description": "No such conversation, or no such turn in it."}
+}
 
 NOT_READY = {
     "missing": "This model isn't on its server yet.",
@@ -140,7 +167,8 @@ class TurnRequest(BaseModel):
         },
         503: {
             "description": "The model can't answer right now: `model_status` says why. "
-            "Or messages, or usage, can't be counted right now."
+            "Or messages, or usage, can't be counted right now, or an answer couldn't "
+            "be read along with."
         },
     },
 )
@@ -152,12 +180,17 @@ async def start_turn(
     catalog: Models,
     limits: Limits,
     usage: Usage,
+    events: Events,
+    runner: Runner,
     resources: AppResources,
     clock: Clock,
     now: Now,
     new_id: NewId,
 ) -> StreamingResponse:
-    """Ask a model something, and stream its answer."""
+    """Ask a model something, and stream its answer.
+
+    The answer is written whether or not this response is read to its end. To stop it,
+    cancel the turn: closing the connection doesn't."""
     try:
         offered = catalog.get(body.model)
     except UnknownModelError:
@@ -181,16 +214,107 @@ async def start_turn(
     )
     # Before anything is committed: a turn that is refused here leaves nothing behind.
     reserved = await _reserve(usage, db, principal, begun, offered, request, now)
-    begun.turn.capped_by_usage = reserved.capped
+    turn = begun.turn
+    turn.capped_by_usage = reserved.capped
+    answer_id = new_id()
+    # The stream begins before the turn does, with the turn as it starts. So whoever
+    # finds a turn running also finds a stream to follow.
+    start = {
+        "type": "start",
+        "messageId": str(answer_id),
+        "messageMetadata": _metadata(begun, answer_id, TurnOut.of(turn), turn.created_at),
+    }
+    try:
+        await events.open(turn.id, ui_stream.event(start))
+    except EventsUnavailableError:
+        await usage.release(reserved, now=now)
+        raise Problem(503, CANT_BE_READ) from None
     try:
         await db.commit()
     except Exception:
         await usage.release(reserved, now=now)  # the turn never started
+        await events.discard(turn.id)
         raise
 
     request = replace(request, max_output_tokens=reserved.max_output_tokens)
-    chunks = _stream(begun, offered, request, new_id(), resources.database, clock, usage, reserved)
-    return StreamingResponse(chunks, media_type=ui_stream.MEDIA_TYPE, headers=ui_stream.HEADERS)
+    runner.start(
+        turn.id,
+        lambda halt: _write(
+            begun,
+            offered,
+            request,
+            answer_id,
+            resources.database,
+            clock,
+            usage,
+            reserved,
+            _Outlet(events, turn.id),
+            halt,
+        ),
+    )
+    return _following(events, turn.id)
+
+
+@router.get(
+    # `OwnConversation` takes the conversation's id from the path.
+    "/api/conversations/{conversation_id}/turns/{turn_id}/stream",  # noqa: FAST003
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "The answer that is being written, from its beginning, in "
+            "the same format as the turn's own response.",
+            "content": {ui_stream.MEDIA_TYPE: {}},
+        },
+        204: {
+            "description": "Nothing is being written: the turn has ended. Read the "
+            "conversation for what it left."
+        },
+        **NO_SUCH_TURN,
+    },
+)
+async def follow_turn(
+    turn_id: uuid.UUID, conversation: OwnConversation, db: Database, events: Events, now: Now
+) -> Response:
+    """Read along with a turn that is being written: after a reload, after a lost
+    connection, or from another window.
+
+    The stream starts at the answer's first event, whenever it is joined, so that it
+    can be read by itself."""
+    await turns.give_up_on_stale(db, conversation.id, now=now)
+    turn = await turns.get(db, conversation, turn_id)
+    # Nothing more is read from the database: the connection isn't kept while the
+    # answer streams.
+    await db.commit()
+    if turn is None:
+        raise Problem(404, "This conversation has no such turn.")
+    if turn.status != "running":
+        return Response(status_code=204)
+    return _following(events, turn.id)
+
+
+@router.post(
+    "/api/conversations/{conversation_id}/turns/{turn_id}/cancel",  # noqa: FAST003 - as above
+    responses=NO_SUCH_TURN,
+)
+async def cancel_turn(
+    turn_id: uuid.UUID, conversation: OwnConversation, db: Database, runner: Runner, now: Now
+) -> TurnOut:
+    """Stop a turn that is being written. What it had written is kept, and counted.
+
+    Answers once the turn is recorded, with the turn as it is then: `stopped`. A turn
+    that had ended already is left as it ended, and answered the same way. So is one
+    that this server can't stop, because the process that was writing it is gone: it
+    says `running` until it is given up on, a minute after it was last heard from."""
+    if await turns.get(db, conversation, turn_id) is None:
+        raise Problem(404, "This conversation has no such turn.")
+    await db.commit()  # the turn records itself, in a transaction of its own
+    if not await runner.stop(turn_id):
+        await turns.give_up_on_stale(db, conversation.id, now=now)
+    turn = await turns.get(db, conversation, turn_id)
+    await db.commit()
+    if turn is None:  # the conversation was deleted meanwhile
+        raise Problem(404, "This conversation has no such turn.")
+    return TurnOut.of(turn)
 
 
 async def _begin(
@@ -306,7 +430,66 @@ def _limit_reached(reached: LimitReachedError, now: datetime) -> Problem:
     )
 
 
-async def _stream(
+def _metadata(
+    begun: Begun,
+    answer_id: uuid.UUID,
+    about: TurnOut,
+    created_at: datetime,
+    *,
+    written: bool = True,
+) -> dict[str, Any]:
+    """An answer's metadata, in the shape a message has in GET /api/conversations/{id}.
+    A turn that wrote nothing adds no version to the question's answers."""
+    versions = [*begun.earlier_answers, answer_id] if written else begun.earlier_answers
+    return MessageMetadata(
+        parent_id=begun.turn.question_id, created_at=created_at, versions=versions, turn=about
+    ).model_dump(mode="json")
+
+
+class _Outlet:
+    """Where a turn's chunks go: its stream of events, for as long as there is one.
+
+    A turn doesn't depend on being read. When Valkey doesn't take a chunk, or the
+    stream is gone, this stops sending and the turn runs on: its answer is recorded
+    all the same. A stream with a hole in it would be worse than none, so what is left
+    of it is deleted, and whoever was following is told that it was lost.
+    """
+
+    def __init__(self, events: TurnEvents, turn_id: uuid.UUID) -> None:
+        self._events = events
+        self._turn_id = turn_id
+        self._open = True
+
+    async def send(self, chunk: Mapping[str, Any]) -> None:
+        if self._open:
+            await self._put(self._events.append(self._turn_id, ui_stream.event(chunk)))
+
+    async def end(self) -> None:
+        """Send the stream's last line. Its readers stop there."""
+        if self._open:
+            await self._put(self._events.close(self._turn_id, ui_stream.DONE))
+
+    async def keep(self) -> None:
+        """Keep the stream while the turn runs: called with each of its beats."""
+        if self._open:
+            # If that fails, the next chunk finds out whether the stream is still there.
+            with suppress(EventsUnavailableError):
+                await self._events.keep(self._turn_id)
+
+    async def _put(self, putting: Awaitable[bool]) -> None:
+        try:
+            taken = await putting
+        except EventsUnavailableError:
+            taken = False
+        if not taken:
+            self._open = False
+            logger.warning(
+                "turn %s: what it streams can't be kept any more; it runs on unread", self._turn_id
+            )
+            await self._events.discard(self._turn_id)
+
+
+async def _write(
     begun: Begun,
     offered: OfferedModel,
     request: ChatRequest,
@@ -315,58 +498,81 @@ async def _stream(
     clock: Callable[[], datetime],
     usage: UsageLimits,
     reserved: Reserved,
-) -> AsyncIterator[bytes]:
-    """The turn as server-sent events, from `start` to `[DONE]`."""
+    out: _Outlet,
+    halt: Halt,
+) -> None:
+    """The turn itself: ask the model, and send what it writes as chunks, from
+    `start-step` to `[DONE]`. `start` was sent when the stream was opened.
+
+    This runs in a task of its own (`actio.chat.running`), whoever reads."""
     turn = begun.turn
-
-    def metadata(about: TurnOut, created_at: datetime, *, written: bool = True) -> dict[str, Any]:
-        # The same shape a message has in GET /api/conversations/{id}. A turn that wrote
-        # nothing adds no version to the question's answers.
-        versions = [*begun.earlier_answers, answer_id] if written else begun.earlier_answers
-        return MessageMetadata(
-            parent_id=turn.question_id, created_at=created_at, versions=versions, turn=about
-        ).model_dump(mode="json")
-
     running = TurnOut.of(turn)
-    yield ui_stream.event(
-        {
-            "type": "start",
-            "messageId": str(answer_id),
-            "messageMetadata": metadata(running, turn.created_at),
-        }
+    await out.send({"type": "start-step"})
+    try:
+        ended = await answering.answer(
+            offered,
+            request,
+            conversation_id=turn.conversation_id,
+            turn_id=turn.id,
+            answer_id=answer_id,
+            open_session=open_session,
+            clock=clock,
+            usage=usage,
+            reserved=reserved,
+            emit=lambda step: out.send(ui_stream.for_step(step)),
+            halt=halt,
+            on_beat=out.keep,
+        )
+    except Exception:
+        # Something of Actio's own failed. Readers are told, and read the conversation.
+        await out.send({"type": "error", "errorText": answering.EXPLANATIONS["internal_error"]})
+        await out.end()
+        raise
+    about = _metadata(
+        begun, answer_id, _ended(running, ended), ended.at, written=bool(ended.ending.parts)
     )
-    yield ui_stream.event({"type": "start-step"})
-    steps = answering.answer(
-        offered,
-        request,
-        conversation_id=turn.conversation_id,
-        turn_id=turn.id,
-        answer_id=answer_id,
-        open_session=open_session,
-        clock=clock,
-        usage=usage,
-        reserved=reserved,
+    if ended.ending.status == "failed":
+        # The details first: the chunk after them ends the stream for the reader.
+        await out.send({"type": "message-metadata", "messageMetadata": about})
+        explanation = answering.EXPLANATIONS[ended.ending.error or "internal_error"]
+        await out.send({"type": "error", "errorText": explanation})
+    else:
+        for warning in ended.warnings:
+            await out.send(ui_stream.usage_warning(warning.bucket, warning.percent))
+        await out.send({"type": "finish-step"})
+        reason = ui_stream.FINISH_REASONS.get(ended.ending.finish_reason or "", "other")
+        await out.send({"type": "finish", "finishReason": reason, "messageMetadata": about})
+    await out.end()
+
+
+def _following(events: TurnEvents, turn_id: uuid.UUID) -> StreamingResponse:
+    """The response that reads along with a turn."""
+    return StreamingResponse(
+        _read(events, turn_id), media_type=ui_stream.MEDIA_TYPE, headers=ui_stream.HEADERS
     )
-    async with aclosing(steps):
-        async for step in steps:
-            if not isinstance(step, Ended):
-                yield ui_stream.event(ui_stream.for_step(step))
-                continue
-            ended = metadata(_ended(running, step), step.at, written=bool(step.ending.parts))
-            if step.ending.status == "failed":
-                # The details first: the chunk after them ends the stream for the reader.
-                yield ui_stream.event({"type": "message-metadata", "messageMetadata": ended})
-                explanation = answering.EXPLANATIONS[step.ending.error or "internal_error"]
-                yield ui_stream.event({"type": "error", "errorText": explanation})
-            else:
-                for warning in step.warnings:
-                    yield ui_stream.event(ui_stream.usage_warning(warning.bucket, warning.percent))
-                yield ui_stream.event({"type": "finish-step"})
-                reason = ui_stream.FINISH_REASONS.get(step.ending.finish_reason or "", "other")
-                yield ui_stream.event(
-                    {"type": "finish", "finishReason": reason, "messageMetadata": ended}
-                )
-    yield ui_stream.DONE
+
+
+async def _read(events: TurnEvents, turn_id: uuid.UUID) -> AsyncIterator[bytes]:
+    """What a turn has streamed, and goes on to stream, as server-sent events: from
+    `start` to `[DONE]`, whenever the reading began."""
+    silent = timedelta(0)
+    try:
+        # Closed with this response: a reader who leaves stops asking Valkey at once.
+        async with aclosing(events.follow(turn_id)) as following:
+            async for event in following:
+                if event is not None:
+                    silent = timedelta(0)
+                    yield event
+                    continue
+                silent += events.tick
+                if silent >= KEEP_ALIVE_AFTER:
+                    silent = timedelta(0)
+                    yield ui_stream.KEEP_ALIVE
+    except (EventsLostError, EventsUnavailableError) as error:
+        # The turn may be running on. Its reader can't tell from here, and is told so.
+        logger.warning("turn %s: a reader lost its stream (%s)", turn_id, type(error).__name__)
+        yield ui_stream.event({"type": "error", "errorText": ui_stream.LOST})
+        yield ui_stream.DONE
 
 
 def _ended(running: TurnOut, ended: Ended) -> TurnOut:
