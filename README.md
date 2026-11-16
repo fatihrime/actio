@@ -4,7 +4,7 @@
 
 > A self-hostable, local-first AI platform: a ChatGPT/Claude-style assistant and an OpenAI- and Anthropic-compatible developer gateway, both governed by Claude-inspired usage limits whose correctness is tested.
 
-**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API holds conversations and streams a local model's answers, and there is a chat page on top of it: `make up`, open <http://localhost:8080>, and ask. Answers are formatted, with code, formulas and diagrams, and your conversations are listed beside the chat, to open, rename and delete. A guest can sign up and keep them, and log in again from anywhere. Every answer is held to usage limits, per session and per week, and the page shows them: a meter, the time left when a limit is reached, and a model that costs nothing to carry on with, where one is offered. This README grows with each phase, and nothing below counts as done until it ships with tests.
+**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API holds conversations and streams a local model's answers, and there is a chat page on top of it: `make up`, open <http://localhost:8080>, and ask. Answers are formatted, with code, formulas and diagrams, and your conversations are listed beside the chat, to open, rename and delete. A guest can sign up and keep them, and log in again from anywhere. Every answer is held to usage limits, per session and per week, and the page shows them: a meter, the time left when a limit is reached, and a model that costs nothing to carry on with, where one is offered. An answer is written at the server whether or not its page stays open, and only Stop ends it. This README grows with each phase, and nothing below counts as done until it ships with tests.
 
 **Documentation:** <https://fatihrime.github.io/actio/>: getting started, architecture, development and the decision records.
 
@@ -77,7 +77,7 @@ make dev         # starts the stack; open http://localhost:8080
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: repo, tooling, CI, docs | done |
-| 1 | Local chat + usage limits | in progress: the limits engine, the model client, the chat's API and the chat page, with formatted answers, a list of conversations and accounts, are done, and so are the usage limits, in the API and in the page; answers that outlive their request are next |
+| 1 | Local chat + usage limits | in progress: the limits engine, the model client, the chat's API and the chat page, with formatted answers, a list of conversations and accounts, are done, and so are the usage limits, in the API and in the page. Answers outlive their request in the API; a page that reads along again after a reload is next |
 | 2 | Model router + developer gateway | planned |
 | 3 | Core chat UX | planned |
 | 4 | Knowledge + web search | planned |

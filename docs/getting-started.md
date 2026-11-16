@@ -37,6 +37,7 @@ ollama pull qwen3.5:4b-q4_K_M
 Then open <http://localhost:8080> and ask something. No account is needed: a first visit starts a guest session, which lasts a day.
 
 - **The answer appears as it is written.** The first one takes a few seconds longer, while the model loads. **Stop** ends an answer early and keeps what was written.
+- **Only Stop ends an answer.** Reloading the page, closing it or losing the connection doesn't: the answer is written to its end at the server, and is there when you come back ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md)). An answer you no longer want still counts against your usage limits unless you stop it.
 - **Answers are formatted:** headings, tables, code in colour with a button to copy it, formulas, and diagrams. Try "derive the quadratic formula", or "draw a mermaid flowchart of making tea".
     - A link in an answer shows its address before it opens.
     - A picture an answer points at is not fetched, and HTML in an answer is shown as text. A model's words can come from anywhere, so they can't make your browser do things ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
@@ -45,7 +46,8 @@ Then open <http://localhost:8080> and ask something. No account is needed: a fir
 - **A conversation has an address,** `/c/…`, once its first question is sent: reload the page, or come back to it with the browser's Back button. **New chat** starts another.
 - **Your conversations are listed beside the chat,** the one you continued last on top, each under its first question.
     - The pencil renames one, and the bin deletes it, after asking: there is no way back.
-    - Opening another conversation while an answer is being written stops that answer, like **Stop** ([ADR 0018](adr/0018-the-list-of-conversations-is-the-servers.md)).
+    - You can open another conversation while an answer is being written. The answer goes on, and its conversation shows it when you return: as on its way, if it isn't done yet.
+    - Deleting a conversation stops the answer that is being written in it.
     - The button at the top left puts the list away. In a narrow window it brings the list up over the chat.
     - A guest's conversations last as long as the guest: a day.
 - **Sign up to keep them.** The account takes over what you did as a guest, and you are back where you were ([ADR 0019](adr/0019-accounts-in-the-one-screen.md)).
@@ -190,6 +192,15 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 
 **"You've reached your usage limit"**
 :   The session's allowance, or the week's, is used up: see [Usage limits](#usage-limits). The page says when it starts over, and counts down to it. On your own machine, raise the limits in `config/plans.toml`, or leave them out, and run `make up` or `make dev` again.
+
+**"The server was restarted while this answer was being written"**
+:   The API was stopped in the middle of an answer: by `make down`, by `make up` after a change, or by a saved file under `make dev`. It gives the answers being written 15 seconds to finish, then keeps what each had written and marks it interrupted. Such an answer costs nothing. **Try again** asks for it once more.
+
+**`make down` takes a quarter of a minute**
+:   An answer was being written: see the entry above. With none under way it takes a second or two.
+
+**"An answer to this is still being written", and it stays**
+:   The answer is being written at the server, and the page shows it when it is done. If the API was killed while writing it, nothing ever finishes it: the page notices a minute after the answer was last heard from, and offers to try again.
 
 **A question answers 503, "Usage can't be counted right now"**
 :   The API can't reach Valkey, where usage is counted, and refuses instead of answering uncounted. `/api/readyz` and `docker compose ps` show what is down.

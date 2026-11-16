@@ -35,6 +35,7 @@ flowchart LR
     - new guests, sign-ups and password attempts are rate-limited. Past a limit, the answer is 429 with a `Retry-After` header ([ADR 0011](adr/0011-rate-limits-as-token-buckets-in-valkey.md));
     - `GET /api/conversations` lists your conversations a page at a time, and `GET /api/conversations/{id}` returns one with its messages. `PATCH` renames it, `DELETE` deletes it, and `PUT …/branch` shows another version of a question or an answer ([ADR 0012](adr/0012-conversations-as-a-tree-of-messages.md));
     - `POST /api/conversations/{id}/turns` puts a question to a model and streams the answer back, piece by piece, in the format the AI SDK reads. The first question creates the conversation. The same route rewords an earlier question, or asks for another answer. Each turn is recorded: which model, how it ended, what it cost in tokens and time ([ADR 0014](adr/0014-turns-streamed-in-the-ai-sdks-format.md));
+    - a turn runs apart from the request that started it, in a task of its own. The request only reads along, and closing it ends nothing. `GET …/turns/{turn_id}/stream` reads along again from the answer's first event, and `POST …/turns/{turn_id}/cancel` stops the turn. Told to stop, the API gives the answers that are being written a moment, then records what is unfinished as interrupted ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md));
     - `GET /api/models` lists the models on offer, from `config/models.toml`, and says whether each can answer right now: `ready`, `missing` from its server, or its server `unreachable` ([ADR 0013](adr/0013-the-models-on-offer-are-a-file.md));
     - a turn costs credits, and an account has only so many per session and per week, from `config/plans.toml`. The most a turn can cost is held before a model is asked; a turn that doesn't fit is answered 429, with the moment the limit starts over. `GET /api/usage` says how much is used ([ADR 0020](adr/0020-usage-limits-on-turns.md)).
 - **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
@@ -44,6 +45,7 @@ flowchart LR
     - **The list of your conversations is beside the chat,** to open, rename and delete them. The page reads it from the API again after every turn, and never rearranges it by itself ([ADR 0018](adr/0018-the-list-of-conversations-is-the-servers.md)).
     - **Signing up, logging in and the account are places in the same screen,** at `/signup`, `/login` and `/account`. What the page has read for one session is dropped when that session ends, so the next one starts with nothing of it ([ADR 0019](adr/0019-accounts-in-the-one-screen.md)).
     - **An answer streams into the page** through the AI SDK's `useChat`. You can stop it, try a failed one again, reword a question that got no answer, and have the model show its reasoning.
+    - **Only Stop ends an answer:** the page then asks the API to stop the turn. Leaving the conversation, or the page, ends the reading and nothing else. Coming back shows the answer, or that it is still on its way.
     - **The server is the truth.** When an answer ends any other way than well, the page reads the conversation again and shows what is stored.
     - **The usage limits are the server's to count.** A meter under the list shows what the API said was used, read again after every turn. That a limit is reached, the page learns from a question being refused; it then says how long to wait, sends nothing meanwhile, and offers a model that costs nothing where there is one ([ADR 0021](adr/0021-usage-limits-in-the-page.md)).
     - **An answer is shown as the markdown it is written in:** headings, tables, coloured code, formulas and diagrams. It is a model's text, so it can do nothing else: HTML in it is shown as text, no picture is fetched, and a link opens only after you have seen its address ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
@@ -51,18 +53,19 @@ flowchart LR
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
     - Postgres holds six tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, the turns in which a model answered, and the usage ledger: what each turn used, in rows that are only ever added.
     - Valkey holds what is counted fast: the rate limits' counters, one number per client address or email address that has made an attempt lately, under a hashed name; and each account's usage counters, with the credits held for answers being written.
-    - Valkey keeps nothing on disk. After a restart the rate limits start full, and an account's usage counters are rebuilt from the ledger the next time they are needed.
+    - Valkey also holds what each running turn streams, in a stream of its own, so that an answer can be read by more than one reader and from its beginning. A stream is deleted a minute after its turn has ended.
+    - Valkey keeps nothing on disk. After a restart the rate limits start full, and an account's usage counters are rebuilt from the ledger the next time they are needed. An answer that was being written is finished unread, and stored as ever.
 
 Inside the API, the code is split into layers that only import downward, and a tool enforces it:
 
 | Layer | Holds |
 |---|---|
 | `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, which attempts are rate-limited, the error format. The only layer that knows the web framework |
-| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Tables and rules, with no HTTP |
+| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Running turns apart from their requests, and the stream of what each writes. Tables and rules, with no HTTP |
 | `actio.catalog` | The models on offer: reading `config/models.toml`, and asking a model's server about it |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
 | `actio.usage` | Usage limits: reading `config/plans.toml`, holding credits before a request and counting them after it through the [engine](reference/quota.md), and the ledger |
-| `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter, reading a file in `config/` |
+| `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter, reading a file in `config/`, hearing the signal that stops the process |
 
 | Path | Goes to |
 |---|---|
@@ -89,7 +92,7 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
-- **turns that outlive their request:** today an answer stops when its reader leaves, or opens another conversation. Later a turn runs on its own, and a reader who comes back picks the stream up again;
+- **a page that reads along again:** an answer already goes on when its reader leaves, and the API lets it be joined. The page doesn't yet: after a reload it waits for the answer to be done. Then a gate in front of a local model, which answers one question at a time, and a limit on how many answers one account has written at once;
 - **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them.
 
 ## Repository layout
