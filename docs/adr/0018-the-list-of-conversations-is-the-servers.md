@@ -141,3 +141,15 @@ Two smaller things:
 
 - **A guest's list being gone after a day,** under "Not done yet": the list says so underneath, with a link to sign up, which keeps it.
 - **"The defect below",** among the mistakes that were planted, points at nothing in this record. It is the one in [ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md)'s revision of the same day: a conversation that began on the page, shown empty when it was returned to.
+
+### 2026-11-16: leaving a conversation no longer stops its answer
+
+The decision said: "Leaving a conversation stops the answer that is being written in it", and called it the least good part of the step, and temporary. It is gone ([ADR 0022](0022-turns-that-run-apart-from-their-request.md)).
+
+- **Why it was so, and why it could change only now.** An answer lived inside the request that read it, so a page that stopped reading stopped the answer, whatever the page wanted. Since this step an answer is written at the server in a task of its own.
+- **What the page does now.** Opening another conversation ends the reading, and tells the server nothing. The answer is written to its end. Whoever comes back before that is shown that an answer is on its way, and gets it when it is done; the page looks every second and a half, as it already did for an answer asked for in another window. Reading along again while it is written is the next step.
+- **Deleting a conversation** on the page still ends its answer, but the API does it: it stops the turn before it deletes. The page sends the one request.
+- **What that costs.** An answer nobody reads is still paid for. Before, leaving was a way to stop, and now only Stop is.
+- **The list is read again** when the page finds that such an answer has ended, as after any turn: its conversation has moved to the top. The usage counts are read then too ([ADR 0021](0021-usage-limits-in-the-page.md)).
+- **"An answer doesn't go on without its reader",** under "Not done yet", is done. So is "switching away from an answer loses the rest of it", under "Harder".
+- **The tests that held the old behaviour were changed with it:** the component test of deleting a conversation with an answer under way, which now fails if the page asks to stop anything; and the end-to-end test of leaving, which now waits for the whole answer.

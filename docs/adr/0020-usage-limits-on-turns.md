@@ -203,3 +203,25 @@ The first of them had no test at first. Listing the mistakes to plant showed the
 - **Two tests were added here,** because the page's tests count on them:
     - a refusal names the model that costs nothing, and that model then answers the same question, for no credits. Until now only the limits below the API were tested for that;
     - the refusal itself is recorded as a file, `limit_reached.json`, beside the recorded streams ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md)). Its `window`, `resets_at` and `alternatives` are in no generated type, so the page's tests answer with the real document.
+
+### 2026-11-16: a hold that is renewed, and two more turns that cost nothing
+
+Turns now run apart from their requests ([ADR 0022](0022-turns-that-run-apart-from-their-request.md)). "Not done yet" named what that would bring here: "a hold that is renewed while a long answer is written". Four things changed in what is decided above.
+
+- **The hold lasts one minute, and is renewed every 15 seconds** while the answer is written (`UsageLimits.extend`). It was ten minutes, once. A process that dies stops renewing, and its credits are back a minute later instead of ten. An answer can now take longer than any fixed hold.
+- **"Stopped by its reader"** in the table of what is counted means a request to stop, where it meant a reader who left. Leaving stops nothing now, so an answer that nobody reads is written to its end and counted whole.
+- **Two more rows for that table,** both costing nothing:
+
+    | The turn | Costs |
+    |---|---|
+    | Interrupted by a shutdown | Nothing. What it had written is kept. Its reader didn't stop it: Actio did |
+    | Ended after it had been given up on | Nothing, and its answer isn't stored |
+
+    The second was charged before: its ledger row was written although its answer was dropped. It took a turn that outlived ten minutes to show, which no test did and no answer here ever took. With a turn given up on after one silent minute, it had to be right.
+
+- **A conversation deleted while it is answered** had its answer written to the end, for a conversation that was gone, and counted whole. The API now stops the turn before it deletes, so it is counted like any stopped one: by guess, for what it had written.
+
+Not changed: the order of ledger and counters, what a refusal says, and a hold that nobody settles still coming back by itself.
+
+- **Still not done:** a limit on how many answers one account has written at once, which comes with the gate in front of a local model; and settling a turn whose process died, which comes with the worker.
+- **Found on the way:** a hold that ran out still shows as `reserved` in `GET /api/usage` until the account's next question. The engine clears expired holds when it makes a new one ([ADR 0006](0006-usage-limits-engine.md)), not when it is only read. Nothing is refused for it, and the page's meter shows what was used.

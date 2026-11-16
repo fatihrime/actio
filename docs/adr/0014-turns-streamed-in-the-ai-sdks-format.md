@@ -172,3 +172,17 @@ The decision above says the model is shown the conversation "after one line that
 - **The record of a turn gained two things:** `credits`, what it cost, and `capped_by_usage`, whether a limit left its answer less room than the model allows.
 
 A stopped turn still has no token counts of its own. What it is charged is guessed from what it wrote, and the ledger marks the guess as one.
+
+### 2026-11-16: a turn no longer lives inside its request
+
+The decision said "Leaving stops the model", and "Not done yet" began with what follows from it: closing the page stops the answer, and a reader who reconnects can't pick the stream up again. [ADR 0022](0022-turns-that-run-apart-from-their-request.md) takes that decision back. The stream's format, the request, the record of a turn and the rules for a failed one stay as they are above.
+
+- **Why now.** It was always meant to be a step of its own. The decision above chose the simple arrangement first, to have a chat that works before a chat that survives a reload, and said so. With the list of conversations, leaving became something people do in the middle of an answer ([ADR 0018](0018-the-list-of-conversations-is-the-servers.md)).
+- **What changed in what is written above:**
+    - **"When the reader leaves, the model is stopped"** no longer holds. A turn runs in a task of its own, and a reader who leaves ends nothing. `stopped` now means that whoever asked stopped it, with a request for that.
+    - **The stream is read from Valkey,** by the request that started the turn like by anyone who joins later. `GET …/turns/{turn_id}/stream` answers with it from its first event.
+    - **"A turn that has been `running` for ten minutes is given up on"** is now a turn that hasn't said it is alive for one minute. A turn that is being written says so every 15 seconds, however long it takes.
+    - **`interrupted`** was only what a turn was called that had been given up on. A turn that a shutdown ended is recorded so too, by the process itself, and keeps what it had written.
+    - **"Nothing is sent while a model loads"** is done: a reader who hears nothing for 15 seconds is sent a line that is no event, and the library skips it.
+- **What is still not done,** of the list above: an answer is still stored only when it ends, so what a killed process had written is lost; a long conversation still fails where it should be shortened; nothing limits how many answers one account has written at once, or the size of a request.
+- **Two recordings were added** to the files that both sides test against: a stream that ends because its turn was stopped, and one with the line that keeps a silent connection open. The older recordings didn't change by a byte: the events are what they were, and only the way they travel is new.

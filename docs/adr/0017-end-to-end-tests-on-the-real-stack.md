@@ -173,3 +173,13 @@ That makes 29 tests, in about 18 seconds.
 
 - **Two questions of 40 words cost 106 and 187 credits.** The third would have 227 words to read, and 207 credits are left. With questions of 30 or of 50 words the same two fit and the third doesn't; only the share that is passed differs.
 - **An answer is cut for a question of 190 to 280 words.** At 180 the whole answer fits, and at 290 the question alone is more than the plan allows. The test asks 220.
+
+### 2026-11-16: an answer that outlives its page
+
+Turns run apart from their requests now ([ADR 0022](0022-turns-that-run-apart-from-their-request.md)), and what only the whole stack shows about that is tested here.
+
+- **"Leaving a conversation stops its answer",** in the list of 2026-11-14 above, was a test of what is no longer so. It now waits for the opposite: the answer that was left is whole when its conversation is opened again.
+- **One test more,** in `turns.spec.ts`: the page is reloaded in the middle of an answer, and the answer is whole afterwards. The fake model writes a word every 0.3 seconds there, so the answer takes longer than the reload.
+- **The test of Stop reads as before,** and tests more than before: that the page asks the API to stop, and that the API does. A page that only stopped reading would now show the whole answer after its reload.
+- **That makes 30 tests,** in about 20 seconds.
+- **Not tested here:** what a shutdown does to an answer. Stopping the stack's own API in the middle of a test would take the other tests with it. The API's suite sends a real stop signal to a real server with a reader connected, and the decision's "Measured" has the container stopped by hand.

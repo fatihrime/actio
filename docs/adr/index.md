@@ -32,5 +32,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0019](0019-accounts-in-the-one-screen.md) | Signing up and logging in happen in the one screen, and the page forgets a session that has ended | Accepted |
 | [0020](0020-usage-limits-on-turns.md) | Usage limits on turns: credits held before an answer, and the ledger written before the counters | Accepted |
 | [0021](0021-usage-limits-in-the-page.md) | Usage limits in the page: the server counts, and the page learns of a limit by being refused | Accepted |
+| [0022](0022-turns-that-run-apart-from-their-request.md) | Turns that run apart from their request: a stream to read along with, and a way to stop | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.

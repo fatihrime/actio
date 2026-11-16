@@ -161,3 +161,13 @@ Two more things changed with the list:
 - **`ChatApp` now reads from the address what to show:** a conversation, or one of `/login`, `/signup` and `/account`.
 - **A conversation that began on the page is read from the server again after any of these was shown,** not only after another conversation. The rule of the revision above is the same; what can take a conversation's place on the page is more.
 - **"A first visit starts a guest session" still holds,** for every address. What is new is that the session can change during a page's life, and that the page then forgets what it had read.
+
+### 2026-11-16: Stop is a request, and leaving is not a stop
+
+An answer is now written at the server in a task of its own, whether or not a page reads it ([ADR 0022](0022-turns-that-run-apart-from-their-request.md)). Two sentences above no longer hold.
+
+- **"Right after a stop the server may not have recorded it yet, so the page asks again shortly until it has."** Closing the connection was the stop, and the page then waited for the server to notice: up to ten looks, 300 ms apart. Now the page stops reading, reads the conversation, and asks the API to stop the turn that it says is running. The API answers once that is recorded, so the next look at the conversation is the last. The waiting loop is gone.
+- **Why the page reads the conversation before it stops anything.** It doesn't always know the turn: an answer of which nothing has arrived yet has told the page no id. The server knows what is running. So Stop goes one way, whatever has arrived.
+- **The chat library ends its reading whenever its component leaves the page,** and reports that the same way as a Stop. The page tells the two apart by remembering that Stop was pressed, and forgets it once the library is done: an answer that ended by itself at that moment must not leave a stop waiting for the next one.
+- **"An answer that is being written elsewhere"** is now also, and mostly, the page's own answer after a reload or a look at another conversation. The page still looks every second and a half until it is done, and then reads the list and the usage counts, which changed without it. Reading along again is the next step.
+- **The rule itself stands:** after anything but a clean end, the page shows what the server has. A stream that ends cleanly and says "stopped" is a clean end, and needs no second look.

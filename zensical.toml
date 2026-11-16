@@ -44,6 +44,7 @@ nav = [
     { "0019. Accounts in the one screen" = "adr/0019-accounts-in-the-one-screen.md" },
     { "0020. Usage limits on turns" = "adr/0020-usage-limits-on-turns.md" },
     { "0021. Usage limits in the page" = "adr/0021-usage-limits-in-the-page.md" },
+    { "0022. Turns that run apart from their request" = "adr/0022-turns-that-run-apart-from-their-request.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]
