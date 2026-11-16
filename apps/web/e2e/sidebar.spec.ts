@@ -149,7 +149,7 @@ test("a long list is read a page at a time", async ({ chat, page }) => {
   ).toHaveCount(0);
 });
 
-test("leaving a conversation stops the answer that was being written in it", async ({
+test("an answer is written on while another conversation is open, and is whole on coming back", async ({
   chat,
   page,
 }) => {
@@ -166,15 +166,16 @@ test("leaving a conversation stops the answer that was being written in it", asy
   await chat.listed.filter({ hasText: "Another conversation." }).click();
   await expect(chat.answers).toHaveText("Echo: Another conversation.");
 
-  // An answer needs someone to read it, for now. What had arrived was kept, and
-  // the question can be asked again.
+  // Nobody is reading the slow answer now. It is written all the same: whoever
+  // comes back finds it on its way, or done, and in the end whole.
   await slow.click();
-  await expect(
-    page.getByText("This answer was stopped before it was finished."),
-  ).toBeVisible();
-  await expect(chat.answers).toContainText("Echo: one two");
-  await expect(chat.answers).not.toContainText("twelve");
-  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  await expect(chat.answers).toHaveText(
+    "Echo: one two three four five six seven eight nine ten eleven twelve",
+    { timeout: 15_000 },
+  );
+  await chat.answered();
+  await expect(page.getByText(/stopped before it was finished/)).toBeHidden();
+  await expect(page.getByText(/still being written/)).toBeHidden();
 });
 
 test.describe("in a narrow window", () => {

@@ -22,6 +22,7 @@ import { ask, open } from "@/tests/open";
 import { recorded, RECORDED } from "@/tests/recorded";
 
 const TURNS = "POST /api/conversations/*/turns";
+const CANCEL = "POST /api/conversations/*/turns/*/cancel";
 const CONVERSATION = "GET /api/conversations/*";
 const SECOND_ANSWER = "01900000-0000-7000-8000-000000000004";
 
@@ -441,7 +442,7 @@ describe("an answer that doesn't arrive whole", () => {
       .on(TURNS, heldAfter("answer.sse", 5))
       .on(
         CONVERSATION,
-        // Asked right after the stop, the server hasn't recorded it yet.
+        // The page has stopped reading. At the server the answer is written on.
         (call) =>
           json(200, kept(call, { status: "running", finish_reason: null })),
         (call) =>
@@ -449,11 +450,16 @@ describe("an answer that doesn't arrive whole", () => {
             200,
             kept(call, { status: "stopped", finish_reason: null }, "Echo: Why"),
           ),
+      )
+      // So the page stops the turn, and the API answers once that is recorded.
+      .on(CANCEL, () =>
+        json(200, turn({ status: "stopped", finish_reason: null })),
       );
     const user = open();
 
     await ask(user, "Why is the sky blue?");
     await screen.findByText(/^Echo:/);
+    const usageRead = api.to("GET /api/usage").length;
     await user.click(screen.getByRole("button", { name: "Stop" }));
 
     expect(api.to(TURNS)[0]?.signal?.aborted).toBe(true);
@@ -464,7 +470,128 @@ describe("an answer that doesn't arrive whole", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Echo: Why")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    // The turn that was stopped is the one the conversation said was running.
+    expect(api.to(CANCEL).map((call) => call.path)).toEqual([
+      `/api/conversations/${conversationOf(api.to(TURNS)[0])}/turns/${RECORDED.turn}/cancel`,
+    ]);
     expect(api.to(CONVERSATION)).toHaveLength(2);
+    // A stopped answer is paid for as far as it got: the counts are read after it.
+    expect(api.to("GET /api/usage").length).toBeGreaterThan(usageRead + 1);
+  });
+
+  it("shows an answer that was stopped from elsewhere as it ended, without asking again", async () => {
+    // Another window stopped it, or the conversation was deleted there. The stream
+    // this page was reading ends as a whole answer's does, and says how in its last
+    // chunk. Nothing more is read: a request for the conversation would have no
+    // answer here, and fail the test.
+    fakeApi().on(TURNS, () => streamed("stopped.sse"));
+    const user = open();
+
+    await ask(user, "Count to a hundred.");
+
+    expect(
+      await screen.findByText(
+        "This answer was stopped before it was finished.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "Actio" })).toHaveTextContent(
+      "One, two, three",
+    );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+  });
+
+  it("stops an answer of which nothing has arrived yet, by what the server says is running", async () => {
+    // The page has heard nothing of the turn: not even its id. The server has it.
+    const running = "01900000-0000-7000-8000-0000000000f1";
+    const api = fakeApi();
+    const unanswered = (call: Call, status: "running" | "stopped") =>
+      conversation(
+        conversationOf(call),
+        [question(sentQuestion(api), "Why is the sky blue?")],
+        turn({ id: running, status, finish_reason: null, credits: null }),
+      );
+    api
+      .on(TURNS, heldAfter("answer.sse", 0))
+      .on(
+        CONVERSATION,
+        (call) => json(200, unanswered(call, "running")),
+        (call) => json(200, unanswered(call, "stopped")),
+      )
+      .on(CANCEL, () =>
+        json(
+          200,
+          turn({ id: running, status: "stopped", finish_reason: null }),
+        ),
+      );
+    const user = open();
+
+    await ask(user, "Why is the sky blue?");
+    await user.click(await screen.findByRole("button", { name: "Stop" }));
+
+    expect(
+      await screen.findByText(
+        "This answer was stopped before it was finished.",
+      ),
+    ).toBeInTheDocument();
+    expect(api.to(CANCEL).map((call) => call.path.split("/")[5])).toEqual([
+      running,
+    ]);
+    expect(screen.getByRole("article", { name: "You" })).toHaveTextContent(
+      "Why is the sky blue?",
+    );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+  });
+
+  it("says so when an answer couldn't be stopped, and goes on looking for its end", async () => {
+    const api = fakeApi();
+    const writing = (call: Call) =>
+      conversation(
+        conversationOf(call),
+        [question(sentQuestion(api), "Why is the sky blue?")],
+        turn({ status: "running", finish_reason: null }),
+      );
+    api
+      .on(TURNS, heldAfter("answer.sse", 5))
+      .on(
+        CONVERSATION,
+        (call) => json(200, writing(call)),
+        (call) =>
+          json(
+            200,
+            conversation(conversationOf(call), [
+              question(sentQuestion(api), "Why is the sky blue?"),
+              answer(
+                RECORDED.answer,
+                "Echo: Why is the sky blue?",
+                sentQuestion(api),
+              ),
+            ]),
+          ),
+      )
+      .on(CANCEL, () =>
+        problem(503, "This can't be done right now. Try again in a moment."),
+      );
+    const user = open();
+
+    await ask(user, "Why is the sky blue?");
+    await screen.findByText(/^Echo:/);
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+
+    expect(
+      await screen.findByText(
+        "This can't be done right now. Try again in a moment.",
+      ),
+    ).toBeInTheDocument();
+    // The answer was written to its end after all, and the page finds it.
+    expect(
+      await screen.findByText(
+        "Echo: Why is the sky blue?",
+        {},
+        { timeout: 4000 },
+      ),
+    ).toBeInTheDocument();
+    expect(api.to(CANCEL)).toHaveLength(1);
   });
 
   it("sends the next question after a message the server has, however soon it is sent", async () => {

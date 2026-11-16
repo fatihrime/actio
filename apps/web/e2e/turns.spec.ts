@@ -1,6 +1,7 @@
 // The ways an answer can end other than well, through the whole stack: stopped by the
 // reader, refused by the model's server, broken off half-way. After each, the page
-// shows what the server kept, and a reload shows the same.
+// shows what the server kept, and a reload shows the same. And the one thing that
+// doesn't end an answer: its reader going away.
 import { expect, test } from "./chat";
 
 test("Stop ends an answer, and what was written is kept", async ({
@@ -27,6 +28,28 @@ test("Stop ends an answer, and what was written is kept", async ({
   await page.reload();
   await expect(chat.answers).toHaveText(kept);
   await expect(stopped).toBeVisible();
+});
+
+test("an answer is written to its end when the page that asked is gone", async ({
+  chat,
+  page,
+}) => {
+  await chat.open();
+  await chat.ask(
+    "[[pace: 0.3]] one two three four five six seven eight nine ten eleven twelve",
+  );
+  await expect(chat.answers).toContainText("three");
+
+  // A reload ends the page, and with it the reading. Nothing stops the answer.
+  await page.reload();
+
+  await expect(chat.questions).toHaveCount(1);
+  await expect(chat.answers).toHaveText(
+    "Echo: one two three four five six seven eight nine ten eleven twelve",
+    { timeout: 15_000 },
+  );
+  await chat.answered();
+  await expect(page.getByText(/stopped before it was finished/)).toBeHidden();
 });
 
 test("a model that fails is said so, and the question can be tried again or reworded", async ({

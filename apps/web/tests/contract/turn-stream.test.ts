@@ -197,6 +197,54 @@ describe("a recorded turn, read by the ai package", () => {
     ]);
   });
 
+  it("reads an answer that was stopped as an answer that ended, and says so in the metadata", async () => {
+    const { states, errors } = await replay("stopped.sse");
+
+    // Not an error: the stream ends as a whole answer's does, with a reason of its own.
+    expect(errors).toEqual([]);
+    expect((await chunksOf("stopped.sse")).at(-1)).toMatchObject({
+      type: "finish",
+      finishReason: "other",
+    });
+    expect(last(states).parts).toEqual([
+      { type: "step-start" },
+      { type: "text", text: "One, two, three", state: "done" },
+    ]);
+    expect(last(states).metadata?.turn).toMatchObject({
+      status: "stopped",
+      finish_reason: null,
+      error: null,
+      output_tokens: null,
+    });
+    // What it had written is paid for, by the API's guess.
+    expect(last(states).metadata?.turn.credits).toBeGreaterThan(0);
+  });
+
+  it("skips the line that keeps a silent connection open", async () => {
+    // The API sends it while a model says nothing: after `start-step` in this
+    // recording, where the model was held.
+    expect(recorded("keep_alive.sse")).toContain("\n\n: keep-alive\n\n");
+
+    const { states, errors } = await replay("keep_alive.sse");
+    const chunks = await chunksOf("keep_alive.sse");
+
+    expect(errors).toEqual([]);
+    expect(chunks.map((chunk) => chunk.type)).toEqual([
+      "start",
+      "start-step",
+      "text-start",
+      "text-delta",
+      "text-delta",
+      "text-end",
+      "finish-step",
+      "finish",
+    ]);
+    expect(last(states).parts).toEqual([
+      { type: "step-start" },
+      { type: "text", text: "Sorry to keep you waiting.", state: "done" },
+    ]);
+  });
+
   it("reports a model that can't be reached as an error, with the turn's outcome", async () => {
     const { states, errors } = await replay("model_unavailable.sse");
 

@@ -225,6 +225,25 @@ export async function deleteConversation(id: string): Promise<void> {
   );
 }
 
+/** Stop the answer that a turn is writing. The API answers once the stop is recorded,
+ * with the turn as it is then: what it had written is kept. A turn that had ended
+ * already is answered the same way, as it ended. */
+export async function cancelTurn(
+  conversationId: string,
+  turnId: string,
+): Promise<Turn> {
+  return answered(
+    await api().POST(
+      "/api/conversations/{conversation_id}/turns/{turn_id}/cancel",
+      {
+        params: {
+          path: { conversation_id: conversationId, turn_id: turnId },
+        },
+      },
+    ),
+  );
+}
+
 /** `fetch` for a streamed answer: a refusal is thrown as the problem it is, instead
  * of being handed on as a response nobody can read. */
 export async function fetchStream(

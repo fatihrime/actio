@@ -4,12 +4,17 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  answer,
+  conversation,
   fakeApi,
+  heldAfter,
   json,
   listed,
   problem,
+  question,
   streamed,
   summary,
+  turn,
 } from "@/tests/fake-api";
 import type { Call } from "@/tests/fake-api";
 import { ask, open } from "@/tests/open";
@@ -566,29 +571,11 @@ describe("deleting a conversation", () => {
     expect(titles()).toEqual(["Flat tyres", "Bread without yeast"]);
   });
 
-  it("stops the answer that was being written in it", async () => {
+  it("leaves it to the server to stop the answer that was being written in it", async () => {
     const api = fakeApi();
     api
-      .on(TURNS, ({ signal }) => {
-        // An answer that begins, and then takes its time.
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            const begun = recorded("answer.sse").split("\n\n").slice(0, 5);
-            controller.enqueue(
-              new TextEncoder().encode(begun.join("\n\n") + "\n\n"),
-            );
-            signal?.addEventListener("abort", () => {
-              controller.error(new DOMException("Aborted", "AbortError"));
-            });
-          },
-        });
-        return new Response(body, {
-          headers: {
-            "content-type": "text/event-stream; charset=utf-8",
-            "x-vercel-ai-ui-message-stream": "v1",
-          },
-        });
-      })
+      // An answer that begins, and then takes its time.
+      .on(TURNS, heldAfter("answer.sse", 5))
       .on(LIST, () =>
         json(
           200,
@@ -597,9 +584,10 @@ describe("deleting a conversation", () => {
           ),
         ),
       )
-      .on(DELETE, deleted)
-      // What the page that was left asks, to learn what was kept of the answer.
-      .on(CONVERSATION, () => problem(404, "No such conversation."));
+      // The API stops the answer of a conversation it deletes. So the page asks for
+      // nothing more: a request to stop the turn, or to read the conversation, would
+      // have no answer here, and fail the test.
+      .on(DELETE, deleted);
     const user = open();
     await ask(user, "Why is the sky blue?");
     await screen.findByText(/^Echo:/);
@@ -610,7 +598,7 @@ describe("deleting a conversation", () => {
     await user.click(screen.getByRole("button", { name: "Delete" }));
 
     await screen.findByText("What would you like to know?");
-    expect(api.to(TURNS)[0]?.signal?.aborted).toBe(true);
+    expect(api.to(TURNS)[0]?.signal?.aborted).toBe(true); // the page stopped reading
     expect(window.location.pathname).toBe("/");
     expect(screen.getByLabelText("Message")).toHaveValue("");
   });
@@ -664,6 +652,86 @@ describe("deleting a conversation", () => {
     expect(
       within(theList()).queryByText(/can't be reached/),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("opening another conversation while an answer is being written", () => {
+  it("lets the answer be written on, and finds it on coming back", async () => {
+    const api = fakeApi();
+    const asked = () => conversationOf(api.to(TURNS)[0]);
+    let looks = 0;
+    api
+      // An answer that begins, and then takes its time: longer than its reader stays.
+      .on(TURNS, heldAfter("answer.sse", 5))
+      .on(LIST, () =>
+        json(
+          200,
+          listed([
+            ...api
+              .to(TURNS)
+              .map((call) => summary(conversationOf(call), "Sky")),
+            tyres,
+          ]),
+        ),
+      )
+      .on(CONVERSATION, (call) => {
+        if (conversationOf(call) === TYRES) {
+          return json(
+            200,
+            conversation(TYRES, [
+              question("q-tyres", "How do I fix a flat tyre?"),
+              answer("a-tyres", "With a patch.", "q-tyres"),
+            ]),
+          );
+        }
+        // The one that was left: still being written at the first look, done at
+        // the second.
+        looks += 1;
+        const sent = (api.to(TURNS)[0]?.body as { message: { id: string } })
+          .message.id;
+        return json(
+          200,
+          looks === 1
+            ? conversation(
+                asked(),
+                [question(sent, "Why is the sky blue?")],
+                turn({ status: "running", finish_reason: null }),
+              )
+            : conversation(asked(), [
+                question(sent, "Why is the sky blue?"),
+                answer(RECORDED.answer, "Echo: Why is the sky blue?", sent),
+              ]),
+        );
+      });
+    const user = open();
+    await ask(user, "Why is the sky blue?");
+    await screen.findByText(/^Echo:/);
+
+    await user.click(await screen.findByRole("link", { name: "Flat tyres" }));
+    expect(await screen.findByText("With a patch.")).toBeInTheDocument();
+    // The page stopped reading the answer. It asked nobody to stop writing it: a
+    // request for that would have no answer here, and fail the test.
+    expect(api.to(TURNS)[0]?.signal?.aborted).toBe(true);
+    const usageRead = api.to("GET /api/usage").length;
+
+    await user.click(screen.getByRole("link", { name: "Sky" }));
+
+    expect(
+      await screen.findByText(/An answer to this is still being written/),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Echo: Why is the sky blue?",
+        {},
+        { timeout: 4000 },
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    expect(looks).toBe(2);
+    // It ended while nobody was reading it: what it cost is read now.
+    await waitFor(() => {
+      expect(api.to("GET /api/usage").length).toBeGreaterThan(usageRead);
+    });
   });
 });
 

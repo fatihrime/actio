@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Notice, NoticeButton } from "@/components/notice";
 import { LimitReached, UsagePassed } from "@/components/usage/limit";
-import { ApiProblem, getConversation } from "@/lib/api/client";
+import { ApiProblem, cancelTurn, getConversation } from "@/lib/api/client";
 import type { Conversation, Model, Turn } from "@/lib/api/client";
 import { fromStored, hasContent, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
@@ -29,12 +29,22 @@ import { Message, Waiting } from "./message";
 const SETUP_GUIDE = "https://fatihrime.github.io/actio/getting-started/#models";
 const THINKING_KEY = "actio.thinking";
 
-/** How long the server may take to record that an answer was stopped, before the
- * page asks it again. */
-const SETTLE_MS = 300;
-const SETTLE_TRIES = 10;
-/** How often to look whether an answer being written elsewhere is done. */
+/** How often to look whether an answer that is being written, and not read here, is
+ * done. */
 const ELSEWHERE_MS = 1500;
+
+/** The conversation as the server has it, or nothing when it has none: its first
+ * question never arrived. */
+async function readConversation(id: string): Promise<Conversation | null> {
+  try {
+    return await getConversation(id);
+  } catch (error) {
+    if (error instanceof ApiProblem && error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
 
 /** One conversation: its messages, and the box to continue it.
  *
@@ -42,6 +52,10 @@ const ELSEWHERE_MS = 1500;
  * into them as it arrives. The server keeps the conversation itself, so when a turn
  * ends in any way but well (stopped, failed, refused, connection lost), the page asks
  * the server what it has and shows that, instead of guessing.
+ *
+ * An answer is written at the server whether or not this page reads it (ADR 0022).
+ * Leaving the conversation ends the reading, and nothing else. Only Stop ends the
+ * answer: the page then tells the server to stop the turn.
  *
  * What answers cost is the server's to count too. A question refused at a usage limit
  * is handed to `usage`, which holds the limit until it starts over: nothing is sent
@@ -94,6 +108,10 @@ export function Chat({
   // Counts what the person did. Something the server said about an earlier state is
   // dropped when it arrives after the next action.
   const actions = useRef(0);
+  // Whether the person pressed Stop, and the turn is still to be stopped for it. The
+  // library reports the same end of reading when this conversation leaves the page,
+  // and then the answer is to go on.
+  const stopping = useRef(false);
   const { scroller, content, away, follow } = useFollow();
   const box = useRef<HTMLTextAreaElement>(null);
 
@@ -125,8 +143,15 @@ export function Chat({
         // However the turn ended, what it cost is the server's to say. So is what is
         // left after a question that was refused.
         usage.refresh();
-        if (isAbort || isError) {
-          void resync({ settle: isAbort });
+        if (isAbort) {
+          // The reading ended here. The answer ends only if the person stopped it:
+          // when the conversation left the page instead, it is written on.
+          if (stopping.current) {
+            stopping.current = false;
+            void resync({ stop: true });
+          }
+        } else if (isError) {
+          void resync({ stop: false });
         }
       },
     });
@@ -141,52 +166,60 @@ export function Chat({
     }
   }, [arriving, onActivity]);
 
-  /** Ask the server what it has of this conversation, and show that. */
+  const refreshUsage = usage.refresh;
+  /** Ask the server what it has of this conversation, and show that. With `stop`, an
+   * answer that is still being written is stopped first: the person asked for it.
+   * Says whether an answer is being written after all that, or nothing when the
+   * server couldn't be asked, or its answer came too late to matter. */
   const resync = useCallback(
-    async ({ settle }: { settle: boolean }) => {
+    async ({ stop }: { stop: boolean }): Promise<boolean | undefined> => {
       const action = actions.current;
-      for (let attempt = 1; ; attempt++) {
-        let conversation: Conversation | null;
-        try {
-          conversation = await getConversation(id);
-        } catch (error) {
-          if (!(error instanceof ApiProblem && error.status === 404)) {
-            setProblem(error);
-            return;
-          }
-          conversation = null; // its first question never arrived
-        }
-        if (action !== actions.current) {
-          return;
-        }
-        // Just after a stop, the server may not have recorded it yet.
-        const recording =
-          settle &&
-          conversation?.unanswered?.status === "running" &&
-          attempt < SETTLE_TRIES;
-        if (!recording) {
-          const last = sent.current;
-          sent.current = null;
-          setMessages(
-            conversation === null ? [] : fromStored(conversation.messages),
-          );
-          setOpen(conversation?.unanswered ?? null);
-          if (conversation !== null) {
-            setExists(true);
-          }
-          const arrived =
-            last === null ||
-            (conversation?.messages.some((message) => message.id === last.id) ??
-              false);
-          if (!arrived) {
-            setText((current) => (current === "" ? last.text : current));
-          }
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      let conversation: Conversation | null;
+      try {
+        conversation = await readConversation(id);
+      } catch (error) {
+        setProblem(error);
+        return undefined;
       }
+      const writing = conversation?.unanswered;
+      if (stop && writing?.status === "running") {
+        try {
+          // The API answers once the stop is recorded: what the conversation says
+          // after that is how the answer ended, and what was kept of it.
+          await cancelTurn(id, writing.id);
+          conversation = await readConversation(id);
+          // A stopped answer is counted for what it wrote, and is the conversation's
+          // newest message now.
+          refreshUsage();
+          onActivity();
+        } catch (error) {
+          // It couldn't be stopped, so it is written on. The page says both: what
+          // went wrong, and below, that an answer is still on its way.
+          setProblem(error);
+        }
+      }
+      if (action !== actions.current) {
+        return undefined;
+      }
+      const last = sent.current;
+      sent.current = null;
+      setMessages(
+        conversation === null ? [] : fromStored(conversation.messages),
+      );
+      setOpen(conversation?.unanswered ?? null);
+      if (conversation !== null) {
+        setExists(true);
+      }
+      const arrived =
+        last === null ||
+        (conversation?.messages.some((message) => message.id === last.id) ??
+          false);
+      if (!arrived) {
+        setText((current) => (current === "" ? last.text : current));
+      }
+      return conversation?.unanswered?.status === "running";
     },
-    [id, setMessages],
+    [id, setMessages, refreshUsage, onActivity],
   );
 
   function send() {
@@ -256,23 +289,29 @@ export function Chat({
     }
   }, [exists, answered, onExists]);
 
-  // An answer that wasn't asked for from here can't be followed from here yet. Another
-  // window started it; or this page did, then showed another conversation, which
-  // stops an answer, and came back before the server had recorded that. Look again
-  // until it is over.
+  // An answer that is being written, and that this page isn't reading: it can't be
+  // read along with from here yet. Another window asked for it; or this page did,
+  // then showed another conversation, and came back before the answer was done. Look
+  // again until it is over.
   const elsewhere = !answering && open?.status === "running";
   useEffect(() => {
     if (!elsewhere) {
       return;
     }
-    const timer = setTimeout(
-      () => void resync({ settle: false }),
-      ELSEWHERE_MS,
-    );
+    const timer = setTimeout(() => {
+      void resync({ stop: false }).then((writing) => {
+        if (writing === false) {
+          // It ended without this page reading it: what it cost, and where its
+          // conversation stands in the list, were not read since either.
+          refreshUsage();
+          onActivity();
+        }
+      });
+    }, ELSEWHERE_MS);
     return () => {
       clearTimeout(timer);
     };
-  }, [elsewhere, open, resync]);
+  }, [elsewhere, open, resync, refreshUsage, onActivity]);
 
   const last = messages.at(-1);
   const turn = last?.role === "assistant" ? turnOf(last) : open;
@@ -424,7 +463,17 @@ export function Chat({
           text={text}
           onText={setText}
           onSend={send}
-          onStop={() => void stop()}
+          onStop={() => {
+            // The page stops reading at once. When the library has said so, the turn
+            // is stopped at the server (`onFinish`, `resync`).
+            stopping.current = true;
+            void stop().finally(() => {
+              // If the answer had just ended by itself, nothing was there to stop,
+              // and nobody took the note. It must not wait for the next answer: that
+              // one would be stopped by merely leaving its conversation.
+              stopping.current = false;
+            });
+          }}
           answering={answering}
           blocked={blocked}
           thinking={
