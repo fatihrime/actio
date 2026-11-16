@@ -117,6 +117,13 @@ services:
       - ./config:/app/config:ro
     networks: [edge, backend]
     mem_limit: 512m
+    # Told to stop, the API first lets the answers that are being written come to an
+    # end: they get 15 seconds, and what is unfinished then is halted and recorded as
+    # interrupted, while its readers are still connected. The web server itself waits
+    # up to 25 seconds for the requests it is answering. Docker's own patience is 10
+    # seconds, and would kill the API in the middle of that. See
+    # docs/adr/0022-turns-that-run-apart-from-their-request.md.
+    stop_grace_period: 35s
     depends_on:
       migrate:
         condition: service_completed_successfully

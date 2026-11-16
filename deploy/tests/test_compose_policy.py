@@ -12,10 +12,14 @@ import json
 import os
 import re
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from actio.chat.running import GRACE, LAST_WORDS
+from actio.cli import WAITS_FOR_REQUESTS_S
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILES = ["apps/api/Dockerfile", "apps/web/Dockerfile", "packages/fakellm/Dockerfile"]
@@ -191,6 +195,30 @@ def test_a_rate_limit_set_in_env_reaches_the_api(limit: str) -> None:
 
     assert api_environment(**{limit: "3/day"})[limit] == "3/day"
     assert api_environment()[limit] is None  # left out: the API's own default applies
+
+
+def test_the_api_is_given_the_time_it_takes_to_end_its_answers(stack: dict[str, Any]) -> None:
+    """Told to stop, the API doesn't drop the answers that are being written. It gives
+    them a moment to finish, then halts what is left and records it as interrupted,
+    while their readers are still connected. Three waits have to fit inside each other
+    for that:
+
+    - the answers' own: `GRACE`, and `LAST_WORDS` to record them;
+    - the web server's, for the requests it is answering, readers among them. Longer
+      than the first, or a reader is cut off before the answer has ended;
+    - Docker's, `stop_grace_period`, after which it kills the container: ten seconds
+      unless the file says otherwise. Longer than the second and one more recording,
+      or a turn is left `running` with what it had written lost.
+
+    See ADR 0022."""
+    answers_take = GRACE + LAST_WORDS
+    server_waits = timedelta(seconds=WAITS_FOR_REQUESTS_S)
+    written = re.fullmatch(r"(?:(\d+)m)?(?:(\d+)s)?", stack["services"]["api"]["stop_grace_period"])
+    assert written is not None, "written as minutes and seconds, such as 35s or 1m5s"
+    docker_waits = timedelta(minutes=int(written[1] or 0), seconds=int(written[2] or 0))
+
+    assert answers_take < server_waits
+    assert server_waits + LAST_WORDS < docker_waits
 
 
 def test_valkey_keeps_nothing_on_disk(stack: dict[str, Any]) -> None:
