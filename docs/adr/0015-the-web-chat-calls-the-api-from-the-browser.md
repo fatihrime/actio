@@ -171,3 +171,12 @@ An answer is now written at the server in a task of its own, whether or not a pa
 - **The chat library ends its reading whenever its component leaves the page,** and reports that the same way as a Stop. The page tells the two apart by remembering that Stop was pressed, and forgets it once the library is done: an answer that ended by itself at that moment must not leave a stop waiting for the next one.
 - **"An answer that is being written elsewhere"** is now also, and mostly, the page's own answer after a reload or a look at another conversation. The page still looks every second and a half until it is done, and then reads the list and the usage counts, which changed without it. Reading along again is the next step.
 - **The rule itself stands:** after anything but a clean end, the page shows what the server has. A stream that ends cleanly and says "stopped" is a clean end, and needs no second look.
+
+### 2026-11-17: the page reads along again
+
+"The page still looks every second and a half until it is done… Reading along again is the next step", in the revision above, has become this ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision of the same day):
+
+- **An answer that is being written, and that the page isn't reading, is read along with.** The page asks the library to join the turn's stream, by the turn's id, and the words arrive as they are written, with Stop, as for an answer the page asked for.
+- **The look every second and a half is the fallback,** for a turn whose stream can't be read: gone, refused, or lost on the way. The page tries once for each turn, and doesn't try that turn again while its conversation is on the page.
+- **The rule above still holds:** a joined stream that ends in an error is no clean end, and the page reads the conversation.
+- **One notice no longer stays until it is dismissed:** the one that said the server can't be reached when the page's own answer broke off. The page then reads along with that answer again, and the notice goes once the page reads along with an answer: that one, or a later one. Every other notice stays as before.

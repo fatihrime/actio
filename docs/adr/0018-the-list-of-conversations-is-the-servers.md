@@ -153,3 +153,12 @@ The decision said: "Leaving a conversation stops the answer that is being writte
 - **The list is read again** when the page finds that such an answer has ended, as after any turn: its conversation has moved to the top. The usage counts are read then too ([ADR 0021](0021-usage-limits-in-the-page.md)).
 - **"An answer doesn't go on without its reader",** under "Not done yet", is done. So is "switching away from an answer loses the rest of it", under "Harder".
 - **The tests that held the old behaviour were changed with it:** the component test of deleting a conversation with an answer under way, which now fails if the page asks to stop anything; and the end-to-end test of leaving, which now waits for the whole answer.
+
+### 2026-11-17: coming back reads along
+
+"The page looks every second and a half… Reading along again while it is written is the next step", in the revision above, is done ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision of the same day).
+
+- **Whoever comes back before the answer is done reads along with it:** the words written so far at once, the rest as they are written, and Stop to end it.
+- **The look every second and a half is left for an answer whose stream can't be read.**
+- **The list and the usage counts are read again** when the answer ends, as before.
+- **The tests of coming back were changed with it:** the component test now reads along, and the end-to-end test sees the answer arrive, with Stop offered, before it is whole.

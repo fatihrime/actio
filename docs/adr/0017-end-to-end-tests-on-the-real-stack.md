@@ -183,3 +183,13 @@ Turns run apart from their requests now ([ADR 0022](0022-turns-that-run-apart-fr
 - **The test of Stop reads as before,** and tests more than before: that the page asks the API to stop, and that the API does. A page that only stopped reading would now show the whole answer after its reload.
 - **That makes 30 tests,** in about 20 seconds.
 - **Not tested here:** what a shutdown does to an answer. Stopping the stack's own API in the middle of a test would take the other tests with it. The API's suite sends a real stop signal to a real server with a reader connected, and the decision's "Measured" has the container stopped by hand.
+
+### 2026-11-17: the page reads along again
+
+The revision above said the page "looks every second and a half" for an answer it isn't reading, and that reading along again was the next step. The page now joins the turn's stream ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision of the same day), and the tests that waited for a whole answer now watch it arrive.
+
+- **The reload in the middle of an answer** (`turns.spec.ts`): after the reload, the words written so far are on the page while Stop is offered and the last word is not, and then the whole answer. A page that only looked would show nothing of the answer until it was done.
+- **Coming back from another conversation** (`sidebar.spec.ts`): the same, with Stop offered while the answer is written.
+- **The answer in these two is twenty words at half a second each,** where it was twelve at 0.3. The page has to be back and reading along before the answer ends, or the join is answered 204 and the test fails on a page that did nothing wrong. Twenty words leave about eight seconds for that, which a slow runner shouldn't use up.
+- **One test more,** in `turns.spec.ts`: a second tab of the same browser opens the conversation while its answer is written, reads along, and stops it. Both tabs then say that it was stopped and show the same words, and a reload shows them still. Two readers told the same thing by the server are what only the whole stack shows.
+- **That makes 31 tests.**

@@ -244,3 +244,69 @@ Two of them showed gaps in the tests first, which were closed:
     - **running turns in the worker** changes who calls `TurnRunner.start`. The stream, the two routes and the page stay as they are: they never read from the turn itself;
     - **another place for the events** than Valkey is another `actio.chat.events`;
     - **stopping on leave again** would be the page's choice: it can call the stop route when it stops reading.
+
+## Revisions
+
+### 2026-11-17: the page reads along again
+
+The page joins a turn's stream now. "The page doesn't read along again", under "Not done yet", is done, and the third point of "The page, in this step", that coming back looks every second and a half, is overtaken.
+
+**What the page does now.** When the conversation it shows says that an answer is being written, and the page isn't reading it, the page asks for that turn's stream: after a reload, on coming back from another conversation, in a second window, and after its own reading broke off while the server can still be reached. The words arrive as they are written, from the answer's first event, and Stop works as for an answer the page asked for itself.
+
+- **While the stream is asked for,** the page shows what it shows right after a question was sent: the question, and the wait for the model. The box is blocked, as it is while an answer is written elsewhere.
+- **A stream that ends cleanly** brings the turn with its last chunk, however the turn ended: completed, stopped elsewhere, interrupted. Nothing more is read.
+- **Nothing to join,** a 204, means that the turn ended between the read and the join. The page reads the conversation again and shows what it left, and reads the usage counts and the list again.
+- **When the join can't be made,** or the stream it reads ends in an error, lost or broken off, the page reads the conversation again. If the same turn is still running, the page does what it did before this revision: it says that an answer is still being written, blocks the box, and looks every second and a half until the turn is over.
+
+**Decided:**
+
+- **The page joins by hand, with the turn's id.** The library can join by itself whenever its component appears (`useChat({ resume: true })`), asking for a stream that the conversation alone names. Actio's streams are a turn's, and the page already knows from the conversation whether anything is being written. So nothing is asked when nothing is being written, which is nearly always.
+- **One try for each running turn, each time the conversation is shown. If it doesn't work, the old way.** A stream that is gone stays gone: asking again would go in a circle. A look costs one read of the conversation, and always comes to an end. A request that the page itself gave up doesn't count as the try: React's StrictMode, which Next.js runs in development, starts a component's effects, undoes them and starts them again, and only the second request is read.
+- **A join that fails says nothing by itself.** The read of the conversation that follows says what is wrong if something is: the server can't be reached, the session has ended, the conversation is gone.
+- **The notice of a reading that broke off goes once the page reads along again.** When the page's own answer broke off with the connection, the page said that the server can't be reached. Then it reached the server twice, read the conversation and joined, and the notice was no longer true, under an answer that went on arriving. It goes once a join's stream is being read, whichever turn's, and at the latest when that reading ends. Only that notice goes, the one set for the error that broke the reading, and only for a reading that had begun, whose answer carried its turn: a Stop that was refused or never sent, a session that ended, a read that failed, and a question that never reached the server keep theirs. So does the break, for as long as no join gets to read.
+- **Stop is offered once the library reads,** not while the stream is still being asked for. Before the stream has begun the library has nothing to stop, and that moment is one round trip long.
+- **After a Stop that the API refused,** the conversation says that the turn is still running, and the page reads along with it again, where it used to look every second and a half: it hasn't tried to join that turn yet. The refusal stays on the page. An answer that was itself read along with is looked for instead.
+
+**Measured:** on the same MacBook Pro (M1 Pro, 16 GB), 2026-11-17, through the proxy of `make up`, with the default model (`qwen3.5:4b-q4_K_M`), in a headless Chromium.
+
+**A page that comes back:**
+
+- **Reloaded with 25 words of an answer on it,** the page showed the question and 35 words of the answer 0.33 s after the reload began, with Stop. A second and a half later it showed 84 words, and at the end all 295, the same as stored. No notice said that an answer was still being written. Before this revision, in "Measured" above, the page said so, and showed the whole answer 8.1 s later.
+- **A second window opened on the conversation while its answer was being written** showed its first words after 0.25 s, 25 at once. A second later both windows showed 56 words.
+- **Stop pressed in that second window:** both windows said that the answer was stopped 0.13 s later, with the same 59 words, and showed the same after a reload.
+- **Left for another conversation with 15 words on the page, and opened again a second and a half later,** the page showed 68 words 0.09 s after the click. Nothing asked the server to stop. At the end it showed all 314, the same as stored.
+- **The page's own connection broken in the middle of an answer,** with 60 words on the page, by a small proxy in front of the stack that cut that one connection while everything else went through: the page read along again 0.05 s later, with 62 words. The notice that the server can't be reached was on the page for about that long, seen at 0.03 s and gone by 0.05 s. At the end the page showed all 308 words, the same as stored.
+- **In each of these the page asked once to join:** no second try, and no look.
+
+**Seventeen mistakes were planted,** one at a time, in a copy of the tree, to see the tests fail. The numbers are of component tests; the end-to-end tests were run against the first mistake too:
+
+| The mistake | Tests that failed |
+|---|---|
+| The page never reads along, and only looks | 19, and of the end-to-end tests the three about reading along |
+| The join asks at the library's own address, named by the conversation alone | 6 |
+| The turn's id goes into the address as it is written | 1 |
+| Whatever ends the reading stops the answer, leaving the conversation too | 4 |
+| A turn that couldn't be read along with is never looked at again | 3 |
+| A stream that ends in an error is joined again, as often as the server says the turn is running | 1 |
+| A join that the page itself gave up counts as the one try | 2 |
+| After an answer was read along with, its turn is still taken for one that nobody reads | 8 |
+| A join that fails is shown as a problem of its own | 3 |
+| After a 204 the usage counts and the list are not read again | 1 |
+| What the server says about an earlier state is shown after the next question | 2 |
+| Nothing shows that an answer is on its way while the join is asked for | 5 |
+| A question can be sent while the join is asked for | 1 |
+| The notice of a broken reading stays while the answer is read along with again | 1 |
+| The same notice stays when the join's stream was read whole at once | 1 |
+| A join takes away any notice that the server can't be reached | 2 |
+| A question that never reached the server counts as a reading that broke off | 1 |
+
+**One test tested less than its name said,** found while the notice was built. The component tests break a stream with a helper, `brokenAfter`, which queued the stream's first events and made the stream fail at once. A stream that fails drops whatever is still queued, so the page never read those events: "the page's own answer breaks off" had been a stream that broke before it began, and its answer never carried its turn. The helper now makes the stream fail only once its events have been read, and the test reads along with an answer that had begun.
+
+**Every end-to-end test six times over, two at a time: 186 of 186 passed.**
+
+**Still not done:**
+
+- **the page doesn't keep trying while the server can't be reached.** A look that fails stops the looking; a reload starts it again;
+- **there is no Stop while the page only looks;**
+- **a conversation that is already open in one window isn't told of an answer asked for in another.** It learns of it the next time it reads the conversation;
+- **a join is still sent the whole answer so far,** as "a reader can't go on from the middle", above, says.
