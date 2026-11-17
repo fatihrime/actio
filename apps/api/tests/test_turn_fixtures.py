@@ -31,10 +31,12 @@ from typing import Any
 import httpx
 import httpx2
 import pytest
+from valkey.asyncio import Valkey
 
 from actio.api import turns as turn_routes
 from actio.api import ui_stream
 from actio.chat import events
+from actio.core.settings import Settings
 from actio_llm import Finish, FinishReason, TextDelta, Usage
 
 pytestmark = pytest.mark.anyio
@@ -145,6 +147,31 @@ async def test_an_answer_that_was_stopped_streams_what_was_recorded(scripted: An
 
     assert stopped.status_code == 200, stopped.text
     as_recorded("stopped.sse", response.text)
+
+
+async def test_reading_along_with_a_turn_whose_stream_is_gone_streams_what_was_recorded(
+    scripted: Any, settings: Settings, valkey_url: str
+) -> None:
+    """What whoever joins is sent when the turn's stream is gone while the turn runs on,
+    as after a restart of Valkey: an error in the API's words, and the end. The page
+    then reads the conversation instead."""
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("Half an "), hold, TextDelta("answer."), DONE)
+    asked = asyncio.create_task(turn(browser, "Say half an answer."))
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
+
+    async with Valkey.from_url(valkey_url) as valkey:
+        await valkey.delete(f"{settings.valkey_prefix}:turn:{TURN}")
+    joined = await asyncio.wait_for(
+        browser.get(f"/api/conversations/{CONVERSATION}/turns/{TURN}/stream"), PATIENCE_S
+    )
+    # The turn is written to its end all the same.
+    hold.set()
+    await asyncio.wait_for(asked, PATIENCE_S)
+    await asyncio.wait_for(model.closed.wait(), PATIENCE_S)
+
+    assert joined.status_code == 200, joined.text
+    as_recorded("lost.sse", joined.text)
 
 
 async def test_an_answer_that_keeps_its_reader_waiting_streams_what_was_recorded(
