@@ -49,6 +49,7 @@ testpaths = [
     "packages/llm/tests",
     "packages/quota/tests",
     "deploy/tests",
+    "scripts/tests",
 ]
 # importlib mode lets test files in different packages share names.
 addopts = ["--import-mode=importlib", "-ra"]

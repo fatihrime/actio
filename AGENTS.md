@@ -39,7 +39,8 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `deploy/caddy/` | Caddy config: one entry point routing `/api/*` and `/v1/*` to the API, the rest to the web app |
 | `deploy/tests/` | Policy tests for the containers: published ports, pinned images, networks, hardening |
 | `docs/` | The documentation site's pages (built by Zensical from `zensical.toml`), including the ADRs in `docs/adr/` |
-| `scripts/` | Developer scripts |
+| `scripts/` | Developer scripts. `read_only_git.py` is the check that keeps the reviewing agent's shell to git commands that only read, and `tests/` holds its tests |
+| `.claude/` | Claude Code's settings for this repository (`settings.json`), and the three agents its main session hands work to (`agents/`): a coder, a test-runner and a reviewer. How they work together is in `CLAUDE.md` |
 | `conftest.py` | Test fixtures shared by every suite: a throwaway Postgres and Valkey, from the images pinned in `compose.yaml` |
 
 ## Commands
