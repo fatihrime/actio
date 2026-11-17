@@ -13,7 +13,7 @@ This section is for the main session, which acts as the supervisor. The agents r
 
 | Role | Model and effort | What it does |
 |---|---|---|
-| supervisor: the main session | Fable 5.2, xhigh (`.claude/settings.json`) | Plans, delegates, verifies and makes the final call |
+| supervisor: the main session | The maintainer's choice for the session, as a rule Fable 5.2 at xhigh. Nothing in the repository sets it | Plans, delegates, verifies and makes the final call |
 | `coder` | Opus 5.5, xhigh | Implements one brief at a time. The only one that edits the repository's files |
 | `test-runner` | Haiku 5.5, medium | Runs the checks and reports what they printed |
 | `reviewer` | Opus 5.5, xhigh | Reviews the change against the step's requirements. Its shell runs read-only git commands and nothing else (`scripts/read_only_git.py`) |

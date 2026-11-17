@@ -10,8 +10,7 @@
 .env.*
 !.env.example
 *.pem
-# One person's own Claude Code settings and permission choices. The shared ones are
-# in .claude/settings.json.
+# One person's own Claude Code settings and permission choices.
 .claude/settings.local.json
 
 # --- Python ---
