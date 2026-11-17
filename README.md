@@ -77,7 +77,7 @@ make dev         # starts the stack; open http://localhost:8080
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: repo, tooling, CI, docs | done |
-| 1 | Local chat + usage limits | in progress: the limits engine, the model client, the chat's API and the chat page, with formatted answers, a list of conversations and accounts, are done, and so are the usage limits, in the API and in the page. Answers outlive their request in the API; a page that reads along again after a reload is next |
+| 1 | Local chat + usage limits | in progress: the limits engine, the model client, the chat's API and the chat page, with formatted answers, a list of conversations and accounts, are done, and so are the usage limits, in the API and in the page. Answers outlive their request, and the page reads along with one that is still being written, after a reload or from another window |
 | 2 | Model router + developer gateway | planned |
 | 3 | Core chat UX | planned |
 | 4 | Knowledge + web search | planned |

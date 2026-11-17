@@ -45,7 +45,8 @@ flowchart LR
     - **The list of your conversations is beside the chat,** to open, rename and delete them. The page reads it from the API again after every turn, and never rearranges it by itself ([ADR 0018](adr/0018-the-list-of-conversations-is-the-servers.md)).
     - **Signing up, logging in and the account are places in the same screen,** at `/signup`, `/login` and `/account`. What the page has read for one session is dropped when that session ends, so the next one starts with nothing of it ([ADR 0019](adr/0019-accounts-in-the-one-screen.md)).
     - **An answer streams into the page** through the AI SDK's `useChat`. You can stop it, try a failed one again, reword a question that got no answer, and have the model show its reasoning.
-    - **Only Stop ends an answer:** the page then asks the API to stop the turn. Leaving the conversation, or the page, ends the reading and nothing else. Coming back shows the answer, or that it is still on its way.
+    - **Only Stop ends an answer:** the page then asks the API to stop the turn. Leaving the conversation, or the page, ends the reading and nothing else.
+    - **An answer that is still being written is read along with** wherever the conversation is opened: after a reload, on coming back to it, in a second window. The page joins the turn's stream, from the answer's first word, and Stop works there too. When the stream can't be read, the page says that the answer is on its way, and looks until it is done ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md)).
     - **The server is the truth.** When an answer ends any other way than well, the page reads the conversation again and shows what is stored.
     - **The usage limits are the server's to count.** A meter under the list shows what the API said was used, read again after every turn. That a limit is reached, the page learns from a question being refused; it then says how long to wait, sends nothing meanwhile, and offers a model that costs nothing where there is one ([ADR 0021](adr/0021-usage-limits-in-the-page.md)).
     - **An answer is shown as the markdown it is written in:** headings, tables, coloured code, formulas and diagrams. It is a model's text, so it can do nothing else: HTML in it is shown as text, no picture is fetched, and a link opens only after you have seen its address ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
@@ -92,7 +93,7 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
-- **a page that reads along again:** an answer already goes on when its reader leaves, and the API lets it be joined. The page doesn't yet: after a reload it waits for the answer to be done. Then a gate in front of a local model, which answers one question at a time, and a limit on how many answers one account has written at once;
+- **a gate in front of a local model,** which answers one question at a time, and a limit on how many answers one account has written at once;
 - **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them.
 
 ## Repository layout
