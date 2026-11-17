@@ -1,11 +1,12 @@
 // How the page asks the API for an answer: what it posts, and how it reads the reply.
+// And how it reads along with an answer that is being written without it.
 //
 // The chat library (`ai`) would post the whole conversation to a route of its own
 // shape. Actio's API keeps the conversation itself, so the page sends only what is
 // new: the question, and the message it follows. See ADR 0014.
 import { DefaultChatTransport } from "ai";
 
-import { fetchStream, turnsUrl } from "@/lib/api/client";
+import { fetchStream, turnStreamUrl, turnsUrl } from "@/lib/api/client";
 import type { TurnRequest } from "@/lib/api/client";
 
 import type { ChatMessage } from "./messages";
@@ -63,6 +64,12 @@ export interface TurnOptions {
   model?: string;
 }
 
+/** What a caller passes to the library's `resumeStream`, as its `metadata`: the turn
+ * to read along with, by its id. */
+export interface JoinOptions {
+  turn: string;
+}
+
 /** The library's connection to one conversation's turns. */
 export function turnTransport(
   conversationId: string,
@@ -80,6 +87,18 @@ export function turnTransport(
           model: options?.model,
         }),
       };
+    },
+    // Joining a stream: the library would ask for one by the conversation alone. The
+    // API streams a turn, so the turn is named, and its stream is read from the
+    // answer's first event (ADR 0022).
+    prepareReconnectToStreamRequest: ({ requestMetadata }) => {
+      const turn = (requestMetadata as Partial<JoinOptions> | undefined)?.turn;
+      if (typeof turn !== "string") {
+        throw new Error(
+          "Only a turn can be read along with: no turn was named.",
+        );
+      }
+      return { api: turnStreamUrl(conversationId, turn) };
     },
   });
 }

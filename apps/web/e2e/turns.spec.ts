@@ -1,8 +1,13 @@
 // The ways an answer can end other than well, through the whole stack: stopped by the
 // reader, refused by the model's server, broken off half-way. After each, the page
 // shows what the server kept, and a reload shows the same. And the one thing that
-// doesn't end an answer: its reader going away.
-import { expect, test } from "./chat";
+// doesn't end an answer: its reader going away. Whoever comes back reads along.
+import { Chat, expect, test } from "./chat";
+
+/** Twenty words: at half a second each, an answer still on its way after a reload
+ * or a second window, with seconds to spare. */
+const TWENTY =
+  "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty";
 
 test("Stop ends an answer, and what was written is kept", async ({
   chat,
@@ -35,21 +40,61 @@ test("an answer is written to its end when the page that asked is gone", async (
   page,
 }) => {
   await chat.open();
-  await chat.ask(
-    "[[pace: 0.3]] one two three four five six seven eight nine ten eleven twelve",
-  );
+  await chat.ask(`[[pace: 0.5]] ${TWENTY}`);
   await expect(chat.answers).toContainText("three");
 
   // A reload ends the page, and with it the reading. Nothing stops the answer.
   await page.reload();
 
+  // The page that comes back reads along with it: what was written so far at once,
+  // and the rest as it is written.
   await expect(chat.questions).toHaveCount(1);
-  await expect(chat.answers).toHaveText(
-    "Echo: one two three four five six seven eight nine ten eleven twelve",
-    { timeout: 15_000 },
-  );
+  await expect(chat.stop).toBeVisible();
+  await expect(chat.answers).toContainText("Echo: one two three");
+  await expect(chat.answers).not.toContainText("twenty");
+  await expect(page.getByText(/still being written/)).toBeHidden();
+  await expect(chat.answers).toHaveText(`Echo: ${TWENTY}`, {
+    timeout: 20_000,
+  });
   await chat.answered();
   await expect(page.getByText(/stopped before it was finished/)).toBeHidden();
+});
+
+test("a second window reads along, and Stop there ends the answer in both", async ({
+  chat,
+  page,
+  context,
+}) => {
+  await chat.open();
+  await chat.ask(`[[pace: 0.5]] ${TWENTY}`);
+  await expect(chat.answers).toContainText("three");
+  await expect(page).toHaveURL(/\/c\//);
+
+  // The same browser, so the same session: another tab at the conversation's address.
+  const other = new Chat(await context.newPage());
+  const broken: string[] = [];
+  other.page.on("pageerror", (error) => broken.push(error.message));
+  await other.open(page.url());
+  await expect(other.stop).toBeVisible();
+  await expect(other.answers).toContainText("Echo: one two three");
+
+  await other.stop.click();
+
+  const stopped = (window: Chat) =>
+    window.page.getByText("This answer was stopped before it was finished.");
+  await expect(stopped(other)).toBeVisible();
+  await expect(stopped(chat)).toBeVisible();
+  await expect(other.send).toBeVisible();
+  await expect(chat.send).toBeVisible();
+  const kept = await other.answers.innerText();
+  expect(kept).toMatch(/^Echo: one two three/);
+  expect(kept).not.toContain("twenty");
+  await expect(chat.answers).toHaveText(kept);
+
+  await page.reload();
+  await expect(chat.answers).toHaveText(kept);
+  await expect(stopped(chat)).toBeVisible();
+  expect(broken, "errors in the second window's scripts").toEqual([]);
 });
 
 test("a model that fails is said so, and the question can be tried again or reworded", async ({

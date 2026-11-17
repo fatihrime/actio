@@ -261,3 +261,9 @@ export async function fetchStream(
 export function turnsUrl(conversationId: string): string {
   return `/api/conversations/${encodeURIComponent(conversationId)}/turns`;
 }
+
+/** The address of a turn's stream, to read along with an answer that is being written:
+ * from its first event, or nothing (204) when the turn has ended. */
+export function turnStreamUrl(conversationId: string, turnId: string): string {
+  return `${turnsUrl(conversationId)}/${encodeURIComponent(turnId)}/stream`;
+}

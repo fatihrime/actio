@@ -1,17 +1,21 @@
 // The chat, driven as a person would: through the page, against a fake API that
 // answers with the API's recorded streams (tests/fake-api.ts).
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import type { Conversation } from "@/lib/api/client";
 import { isId } from "@/lib/ids";
 import {
   answer,
+  brokenAfter,
   conversation,
   fakeApi,
   GUEST,
   heldAfter,
   json,
+  later,
   models,
+  nothing,
   problem,
   question,
   streamed,
@@ -23,7 +27,10 @@ import { recorded, RECORDED } from "@/tests/recorded";
 
 const TURNS = "POST /api/conversations/*/turns";
 const CANCEL = "POST /api/conversations/*/turns/*/cancel";
+const STREAM = "GET /api/conversations/*/turns/*/stream";
 const CONVERSATION = "GET /api/conversations/*";
+const LIST = "GET /api/conversations";
+const USAGE = "GET /api/usage";
 const SECOND_ANSWER = "01900000-0000-7000-8000-000000000004";
 
 /** What the page posted to start a turn. */
@@ -47,6 +54,42 @@ function conversationOf(call: Call | undefined): string {
 /** The id of the question the page sent in its first turn. */
 function sentQuestion(api: FakeApi): string {
   return posted(api.to(TURNS)[0]).message?.id ?? "";
+}
+
+/** The recorded conversation's question, while its answer is being written: by
+ * another window, or by this page before it was reloaded. */
+function beingWritten(): Conversation {
+  return conversation(
+    RECORDED.conversation,
+    [question(RECORDED.question, "Why is the sky blue?")],
+    turn({ status: "running", finish_reason: null, credits: null }),
+  );
+}
+
+/** The same conversation once the answer is written. */
+function written(text: string): Conversation {
+  return conversation(RECORDED.conversation, [
+    question(RECORDED.question, "Why is the sky blue?"),
+    answer(RECORDED.answer, text, RECORDED.question),
+  ]);
+}
+
+/** What the page says when a request found no server. */
+const UNREACHABLE =
+  "Actio's server can't be reached. Check that it is running, and your connection.";
+
+/** Where the page reads along with the recorded turn. */
+const RECORDED_STREAM = `/api/conversations/${RECORDED.conversation}/turns/${RECORDED.turn}/stream`;
+
+/** Give the page a moment with what has just arrived, when nothing is to change for
+ * it: whatever it does with an answer takes it milliseconds. */
+async function afterAMoment(): Promise<void> {
+  await act(
+    () =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 100);
+      }),
+  );
 }
 
 describe("a first visit", () => {
@@ -543,7 +586,7 @@ describe("an answer that doesn't arrive whole", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
-  it("says so when an answer couldn't be stopped, and goes on looking for its end", async () => {
+  it("says so when an answer couldn't be stopped, and reads along with it to its end", async () => {
     const api = fakeApi();
     const writing = (call: Call) =>
       conversation(
@@ -553,25 +596,12 @@ describe("an answer that doesn't arrive whole", () => {
       );
     api
       .on(TURNS, heldAfter("answer.sse", 5))
-      .on(
-        CONVERSATION,
-        (call) => json(200, writing(call)),
-        (call) =>
-          json(
-            200,
-            conversation(conversationOf(call), [
-              question(sentQuestion(api), "Why is the sky blue?"),
-              answer(
-                RECORDED.answer,
-                "Echo: Why is the sky blue?",
-                sentQuestion(api),
-              ),
-            ]),
-          ),
-      )
+      .on(CONVERSATION, (call) => json(200, writing(call)))
       .on(CANCEL, () =>
         problem(503, "This can't be done right now. Try again in a moment."),
-      );
+      )
+      // It is written on, and the page reads along with it again: from its start.
+      .on(STREAM, () => streamed("answer.sse"));
     const user = open();
 
     await ask(user, "Why is the sky blue?");
@@ -583,15 +613,19 @@ describe("an answer that doesn't arrive whole", () => {
         "This can't be done right now. Try again in a moment.",
       ),
     ).toBeInTheDocument();
-    // The answer was written to its end after all, and the page finds it.
     expect(
-      await screen.findByText(
-        "Echo: Why is the sky blue?",
-        {},
-        { timeout: 4000 },
-      ),
+      await screen.findByText("Echo: Why is the sky blue?"),
     ).toBeInTheDocument();
     expect(api.to(CANCEL)).toHaveLength(1);
+    expect(api.to(STREAM).map((call) => call.path)).toEqual([
+      `/api/conversations/${conversationOf(api.to(TURNS)[0])}/turns/${RECORDED.turn}/stream`,
+    ]);
+    expect(api.to(CONVERSATION)).toHaveLength(1);
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    // The refusal stays: the answer went on, which is what it says.
+    expect(
+      screen.getByText("This can't be done right now. Try again in a moment."),
+    ).toBeInTheDocument();
   });
 
   it("sends the next question after a message the server has, however soon it is sent", async () => {
@@ -858,45 +892,32 @@ describe("a conversation's address", () => {
     expect(screen.queryByText("Why is teh sky blue?")).not.toBeInTheDocument();
   });
 
-  it("waits for an answer that another window is writing", async () => {
-    const api = fakeApi().on(
-      CONVERSATION,
-      () =>
-        json(
-          200,
-          conversation(
-            RECORDED.conversation,
-            [question(RECORDED.question, "Why is the sky blue?")],
-            turn({ status: "running", finish_reason: null }),
-          ),
-        ),
-      () =>
-        json(
-          200,
-          conversation(RECORDED.conversation, [
-            question(RECORDED.question, "Why is the sky blue?"),
-            answer(
-              RECORDED.answer,
-              "Because of scattering.",
-              RECORDED.question,
-            ),
-          ]),
-        ),
-    );
+  it("reads along with an answer that another window is writing, to its end", async () => {
+    const reading = later(() => streamed("answer.sse"));
+    const api = fakeApi()
+      .on(CONVERSATION, () => json(200, beingWritten()))
+      .on(STREAM, reading.answer);
     const user = open(`/c/${RECORDED.conversation}`);
+    await screen.findByText("Waiting for the model…");
+    const usageRead = api.to(USAGE).length;
+    const listRead = api.to(LIST).length;
+
+    reading.release();
 
     expect(
-      await screen.findByText(/An answer to this is still being written/),
+      await screen.findByText("Echo: Why is the sky blue?"),
     ).toBeInTheDocument();
     await user.type(screen.getByLabelText("Message"), "And at sunset?");
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
-
-    expect(
-      await screen.findByText("Because of scattering.", {}, { timeout: 4000 }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Send" })).toBeEnabled();
     expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
-    expect(api.to(CONVERSATION)).toHaveLength(2);
+    // Nothing more is asked about that answer: it is here, and its turn with it.
+    expect(api.to(CONVERSATION)).toHaveLength(1);
+    expect(api.to(STREAM).map((call) => call.path)).toEqual([RECORDED_STREAM]);
+    // What it cost, and where its conversation stands in the list, are read again.
+    await waitFor(() => {
+      expect(api.to(USAGE).length).toBeGreaterThan(usageRead);
+    });
+    expect(api.to(LIST).length).toBeGreaterThan(listRead);
   });
 
   it("says when there is no such conversation, and offers a new one", async () => {
@@ -934,6 +955,479 @@ describe("a conversation's address", () => {
     expect(
       await screen.findByText("Echo: Why is the sky blue?"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("an answer that is being written, and that this page isn't reading", () => {
+  // Another window asked for it, or this page did and was then reloaded. The page
+  // reads along with it, once; when that can't be done, it looks every so often.
+
+  it("is shown as it arrives once the page reads along, and is written on when the page goes elsewhere", async () => {
+    const reading = later(heldAfter("answer.sse", 5));
+    const api = fakeApi()
+      .on(CONVERSATION, () => json(200, beingWritten()))
+      .on(STREAM, reading.answer);
+    const user = open(`/c/${RECORDED.conversation}`);
+    const log = () => screen.getByRole("log", { name: "Conversation" });
+
+    // While the stream is asked for: as right after a question was sent.
+    expect(
+      await screen.findByText("Waiting for the model…"),
+    ).toBeInTheDocument();
+    expect(log()).toHaveAttribute("aria-busy", "true");
+    await user.type(screen.getByLabelText("Message"), "And at sunset?");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+
+    reading.release();
+
+    expect(await screen.findByText(/^Echo: Why/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(log()).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByText("Waiting for the model…")).toBeNull();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    expect(api.to(STREAM).map((call) => call.path)).toEqual([RECORDED_STREAM]);
+
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+
+    expect(
+      await screen.findByText("What would you like to know?"),
+    ).toBeInTheDocument();
+    // The page stopped reading. It asked nobody to stop writing: a request for that
+    // would have no answer here, and fail the test. Nor did it look again.
+    expect(api.to(STREAM)[0]?.signal?.aborted).toBe(true);
+    expect(api.to(CONVERSATION)).toHaveLength(1);
+  });
+
+  it("is stopped by Stop, as the turn the server says is running, and shows what was kept", async () => {
+    const stopped = turn({ status: "stopped", finish_reason: null });
+    const api = fakeApi()
+      .on(
+        CONVERSATION,
+        () => json(200, beingWritten()),
+        // The page has stopped reading. At the server the answer is written on.
+        () => json(200, beingWritten()),
+        () =>
+          json(
+            200,
+            conversation(RECORDED.conversation, [
+              question(RECORDED.question, "Why is the sky blue?"),
+              answer(RECORDED.answer, "Echo: Why", RECORDED.question, stopped),
+            ]),
+          ),
+      )
+      .on(STREAM, heldAfter("answer.sse", 5))
+      .on(CANCEL, () => json(200, stopped));
+    const user = open(`/c/${RECORDED.conversation}`);
+    await screen.findByText(/^Echo:/);
+
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+
+    expect(api.to(STREAM)[0]?.signal?.aborted).toBe(true);
+    expect(
+      await screen.findByText(
+        "This answer was stopped before it was finished.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Echo: Why")).toBeInTheDocument();
+    expect(api.to(CANCEL).map((call) => call.path)).toEqual([
+      `/api/conversations/${RECORDED.conversation}/turns/${RECORDED.turn}/cancel`,
+    ]);
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    expect(api.to(STREAM)).toHaveLength(1);
+  });
+
+  it("is shown as it was left when it ended before the page could read along", async () => {
+    // The server answers that there is nothing to read along with any more.
+    const reading = later(nothing);
+    const api = fakeApi()
+      .on(
+        CONVERSATION,
+        () => json(200, beingWritten()),
+        () => json(200, written("Because of scattering.")),
+      )
+      .on(STREAM, reading.answer);
+    open(`/c/${RECORDED.conversation}`);
+    await screen.findByText("Waiting for the model…");
+    const usageRead = api.to(USAGE).length;
+    const listRead = api.to(LIST).length;
+
+    reading.release();
+
+    expect(
+      await screen.findByText("Because of scattering."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for the model…")).toBeNull();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
+    expect(api.to(CONVERSATION)).toHaveLength(2);
+    expect(api.to(STREAM)).toHaveLength(1);
+    // It ended without this page reading it: what it cost, and where its
+    // conversation stands in the list, are read now.
+    await waitFor(() => {
+      expect(api.to(USAGE).length).toBeGreaterThan(usageRead);
+    });
+    expect(api.to(LIST).length).toBeGreaterThan(listRead);
+  });
+
+  it("is looked for until it is done when its stream was lost, and not read along with again", async () => {
+    const api = fakeApi()
+      .on(
+        CONVERSATION,
+        () => json(200, beingWritten()),
+        () => json(200, beingWritten()),
+        () => json(200, written("Because of scattering.")),
+      )
+      .on(STREAM, () => streamed("lost.sse"));
+    open(`/c/${RECORDED.conversation}`);
+
+    expect(
+      await screen.findByText(/An answer to this is still being written/),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Because of scattering.", {}, { timeout: 4000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    // What the stream said is the conversation's to say, and the page read that.
+    expect(screen.queryByText(/connection to this answer was lost/)).toBeNull();
+    expect(api.to(STREAM)).toHaveLength(1);
+    expect(api.to(CONVERSATION)).toHaveLength(3);
+  });
+
+  it.each([
+    [
+      "refused",
+      () =>
+        problem(503, "This can't be done right now. Try again in a moment."),
+    ],
+    [
+      "lost on the way",
+      () => {
+        throw new TypeError("fetch failed");
+      },
+    ],
+  ])(
+    "is looked for until it is done when the stream was %s, and nothing is said of that",
+    async (_, failing) => {
+      const api = fakeApi()
+        .on(
+          CONVERSATION,
+          () => json(200, beingWritten()),
+          () => json(200, beingWritten()),
+          () => json(200, written("Because of scattering.")),
+        )
+        .on(STREAM, failing);
+      const user = open(`/c/${RECORDED.conversation}`);
+
+      expect(
+        await screen.findByText(/An answer to this is still being written/),
+      ).toBeInTheDocument();
+      // The box is blocked, as for any answer that is being written.
+      await user.type(screen.getByLabelText("Message"), "And at sunset?");
+      expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+      expect(
+        await screen.findByText(
+          "Because of scattering.",
+          {},
+          { timeout: 4000 },
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+      expect(screen.queryByText(/can't be done right now/)).toBeNull();
+      expect(screen.queryByText(/can't be reached/)).toBeNull();
+      expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+      expect(api.to(STREAM)).toHaveLength(1);
+    },
+  );
+
+  it("is shown as stopped when it was stopped elsewhere, without asking again", async () => {
+    // The stream ends as a whole answer's does, and says how in its last chunk. A
+    // read of the conversation would find it as running here, and say so.
+    const api = fakeApi()
+      .on(CONVERSATION, () => json(200, beingWritten()))
+      .on(STREAM, () => streamed("stopped.sse"));
+    open(`/c/${RECORDED.conversation}`);
+
+    expect(
+      await screen.findByText(
+        "This answer was stopped before it was finished.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "Actio" })).toHaveTextContent(
+      "One, two, three",
+    );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    expect(api.to(CONVERSATION)).toHaveLength(1);
+    expect(api.to(STREAM)).toHaveLength(1);
+  });
+
+  it("is read through the line that keeps a silent connection open", async () => {
+    const api = fakeApi()
+      .on(CONVERSATION, () => json(200, beingWritten()))
+      .on(STREAM, () => streamed("keep_alive.sse"));
+    open(`/c/${RECORDED.conversation}`);
+
+    expect(
+      await screen.findByText("Sorry to keep you waiting."),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    expect(api.to(CONVERSATION)).toHaveLength(1);
+  });
+
+  it("is this page's own, read along with again when its connection broke off", async () => {
+    const reading = later(() => streamed("answer.sse"));
+    const api = fakeApi();
+    api
+      // The first words arrive; then the network is gone for a moment.
+      .on(TURNS, () => brokenAfter("answer.sse", 5))
+      // The server is there again, and the answer is being written on.
+      .on(CONVERSATION, (call) =>
+        json(
+          200,
+          conversation(
+            conversationOf(call),
+            [question(sentQuestion(api), "Why is the sky blue?")],
+            turn({ status: "running", finish_reason: null }),
+          ),
+        ),
+      )
+      .on(STREAM, reading.answer);
+    const user = open();
+
+    await ask(user, "Why is the sky blue?");
+
+    // While the page asks to read along, the break is what it knows of.
+    expect(await screen.findByText(UNREACHABLE)).toBeInTheDocument();
+    expect(
+      await screen.findByText("Waiting for the model…"),
+    ).toBeInTheDocument();
+
+    reading.release();
+
+    expect(
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    // The server was reached after all: what the notice said is no longer true.
+    expect(screen.queryByText(UNREACHABLE)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(api.to(STREAM).map((call) => call.path)).toEqual([
+      `/api/conversations/${conversationOf(api.to(TURNS)[0])}/turns/${RECORDED.turn}/stream`,
+    ]);
+    expect(api.to(CONVERSATION)).toHaveLength(1);
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+  });
+
+  it("takes back what it said of a broken connection as soon as it reads along again", async () => {
+    const api = fakeApi();
+    api
+      .on(TURNS, () => brokenAfter("answer.sse", 5))
+      .on(CONVERSATION, (call) =>
+        json(
+          200,
+          conversation(
+            conversationOf(call),
+            [question(sentQuestion(api), "Why is the sky blue?")],
+            turn({ status: "running", finish_reason: null }),
+          ),
+        ),
+      )
+      // Read along with, and still being written.
+      .on(STREAM, heldAfter("answer.sse", 6));
+    const user = open();
+
+    await ask(user, "Why is the sky blue?");
+
+    expect(await screen.findByText(/^Echo: Why is/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(screen.queryByText(UNREACHABLE)).toBeNull();
+
+    // The page goes elsewhere, which ends the reading: the answer is written on.
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+    await screen.findByText("What would you like to know?");
+  });
+
+  it("is looked for after this page's own connection broke off, and the break is still said when it can't be read along with", async () => {
+    const api = fakeApi();
+    api
+      .on(TURNS, () => brokenAfter("answer.sse", 5))
+      .on(CONVERSATION, (call) =>
+        json(
+          200,
+          conversation(
+            conversationOf(call),
+            [question(sentQuestion(api), "Why is the sky blue?")],
+            turn({ status: "running", finish_reason: null }),
+          ),
+        ),
+      )
+      .on(STREAM, () =>
+        problem(503, "This can't be done right now. Try again in a moment."),
+      );
+    const user = open();
+
+    await ask(user, "Why is the sky blue?");
+
+    expect(
+      await screen.findByText(/An answer to this is still being written/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(UNREACHABLE)).toBeInTheDocument();
+    expect(api.to(STREAM)).toHaveLength(1);
+  });
+
+  it("keeps saying that a Stop couldn't be sent, while it reads along with the answer that went on", async () => {
+    const api = fakeApi();
+    api
+      .on(TURNS, heldAfter("answer.sse", 5))
+      .on(CONVERSATION, (call) =>
+        json(
+          200,
+          conversation(
+            conversationOf(call),
+            [question(sentQuestion(api), "Why is the sky blue?")],
+            turn({ status: "running", finish_reason: null }),
+          ),
+        ),
+      )
+      // The connection went away just then: the stop never reached the server.
+      .on(CANCEL, () => {
+        throw new TypeError("fetch failed");
+      })
+      .on(STREAM, () => streamed("answer.sse"));
+    const user = open();
+    await ask(user, "Why is the sky blue?");
+    await screen.findByText(/^Echo:/);
+
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+
+    expect(
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(UNREACHABLE)).toBeInTheDocument();
+    expect(api.to(CANCEL)).toHaveLength(1);
+    expect(api.to(STREAM)).toHaveLength(1);
+  });
+
+  it("keeps saying that a question didn't reach the server, while it reads along with one asked elsewhere", async () => {
+    const api = fakeApi()
+      .on(
+        CONVERSATION,
+        () => json(200, written("Because of scattering.")),
+        // Meanwhile another window asked, and its answer is being written.
+        () =>
+          json(
+            200,
+            conversation(
+              RECORDED.conversation,
+              [
+                question(RECORDED.question, "Why is the sky blue?"),
+                answer(
+                  RECORDED.answer,
+                  "Because of scattering.",
+                  RECORDED.question,
+                ),
+                question("q-other", "Why is grass green?", RECORDED.answer),
+              ],
+              turn({ status: "running", finish_reason: null }),
+            ),
+          ),
+      )
+      // This window's question never got to the server.
+      .on(TURNS, () => {
+        throw new TypeError("fetch failed");
+      })
+      .on(STREAM, () => streamed("answer.sse", SECOND_ANSWER));
+    const user = open(`/c/${RECORDED.conversation}`);
+    await screen.findByText("Because of scattering.");
+
+    await ask(user, "And at sunset?");
+
+    expect(
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Why is grass green?")).toBeInTheDocument();
+    expect(screen.getByLabelText("Message")).toHaveValue("And at sunset?");
+    expect(screen.getByText(UNREACHABLE)).toBeInTheDocument();
+    expect(api.to(STREAM)).toHaveLength(1);
+  });
+
+  it("is left alone when its conversation is left while the page asks to read along", async () => {
+    const reading = later(heldAfter("answer.sse", 5));
+    const api = fakeApi()
+      .on(CONVERSATION, () => json(200, beingWritten()))
+      .on(STREAM, reading.answer);
+    const user = open(`/c/${RECORDED.conversation}`);
+    await screen.findByText("Waiting for the model…");
+
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+    await screen.findByText("What would you like to know?");
+    // The stream arrives after the page went on: it is not read, and starts nothing.
+    reading.release();
+    await afterAMoment();
+
+    expect(api.to(STREAM)[0]?.signal?.aborted).toBe(true);
+    expect(api.to(CONVERSATION)).toHaveLength(1);
+    expect(screen.queryByRole("article")).toBeNull();
+  });
+
+  it("is read along with once React has run the page's effects twice, as it does in development", async () => {
+    const api = fakeApi()
+      .on(CONVERSATION, () => json(200, beingWritten()))
+      .on(STREAM, () => streamed("answer.sse"));
+    open(`/c/${RECORDED.conversation}`, { strict: true });
+
+    expect(
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    // The first request was given up when React undid the effects; the second read.
+    const [dropped, read, ...more] = api.to(STREAM);
+    expect(dropped?.signal?.aborted).toBe(true);
+    expect(read?.signal?.aborted).toBe(false);
+    expect(more).toEqual([]);
+    // Read when it was loaded, which StrictMode does twice too, and not since.
+    expect(api.to(CONVERSATION)).toHaveLength(2);
+  });
+
+  it("is forgotten when a question is asked before the server said how it stands", async () => {
+    // The stream of the answer was lost, and the page asks the server how it stands.
+    // That takes a while: meanwhile, a question is asked.
+    let tell: () => void = () => undefined;
+    const serverTold = new Promise<void>((resolve) => {
+      tell = resolve;
+    });
+    const api = fakeApi()
+      .on(
+        CONVERSATION,
+        () => json(200, beingWritten()),
+        async () => {
+          await serverTold;
+          return json(200, beingWritten());
+        },
+      )
+      .on(STREAM, () => streamed("lost.sse"))
+      .on(TURNS, () => streamed("cut_off.sse", SECOND_ANSWER));
+    const user = open(`/c/${RECORDED.conversation}`);
+    await waitFor(() => {
+      expect(api.to(CONVERSATION)).toHaveLength(2); // asked, and not yet told
+    });
+
+    await ask(user, "Count to five.");
+    await screen.findByText("One, two, three");
+    // What the server says about the earlier state arrives late, and changes nothing.
+    tell();
+    await afterAMoment();
+
+    expect(screen.getByText("One, two, three")).toBeInTheDocument();
+    expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    expect(api.to(STREAM)).toHaveLength(1);
+    expect(api.to(CONVERSATION)).toHaveLength(2);
   });
 });
 

@@ -260,6 +260,17 @@ describe("a recorded turn, read by the ai package", () => {
     expect(message.metadata?.versions).toEqual([]); // no answer was written
   });
 
+  it("reports a stream that is gone as an error, in the API's words, with nothing of the answer", async () => {
+    // What someone who reads along is sent when the turn runs on, and its stream can't
+    // be read any more. The page reads the conversation instead.
+    const { states, errors } = await replay("lost.sse");
+
+    expect(errors).toEqual([
+      "The connection to this answer was lost. It may still be being written.",
+    ]);
+    expect(states.flatMap((state) => state.parts)).toEqual([]);
+  });
+
   it("keeps the part of an answer that arrived before it broke off", async () => {
     const { states, errors } = await replay("broke_off.sse");
 

@@ -174,10 +174,55 @@ export function refused(
   });
 }
 
+/** An answer with nothing in it: 204. For a turn that has ended, there is nothing to
+ * read along with. */
+export function nothing(): Response {
+  return new Response(null, { status: 204 });
+}
+
 /** A recorded turn's events, as the API streams them. `answerId` gives the answer
  * another id than the recorded one, for a conversation's second answer. */
 export function streamed(name: string, answerId?: string): Response {
   return new Response(events(name, answerId), { headers: STREAM_HEADERS });
+}
+
+/** A recorded turn that sends its first `count` events, and then loses its
+ * connection: what the browser's `fetch` makes of a network that went away. */
+export function brokenAfter(name: string, count: number): Response {
+  const first = events(name).split("\n\n").slice(0, count);
+  let sent = false;
+  const body = new ReadableStream<Uint8Array>({
+    // The connection breaks once the events have been read: a stream that errs
+    // drops whatever is still waiting to be read.
+    pull(controller) {
+      if (sent) {
+        controller.error(new TypeError("network error"));
+        return;
+      }
+      sent = true;
+      controller.enqueue(new TextEncoder().encode(first.join("\n\n") + "\n\n"));
+    },
+  });
+  return new Response(body, { headers: STREAM_HEADERS });
+}
+
+/** `answer`, given only once the test calls `release`: a request that takes its
+ * time, to see what the page shows meanwhile. */
+export function later(answer: Answer): {
+  answer: Answer;
+  release: () => void;
+} {
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    answer: async (call) => {
+      await released;
+      return answer(call);
+    },
+    release,
+  };
 }
 
 /** A recorded turn that sends its first `count` events, and then nothing more until

@@ -149,16 +149,17 @@ test("a long list is read a page at a time", async ({ chat, page }) => {
   ).toHaveCount(0);
 });
 
-test("an answer is written on while another conversation is open, and is whole on coming back", async ({
+test("an answer is written on while another conversation is open, and is read along with on coming back", async ({
   chat,
   page,
 }) => {
+  // Twenty words at half a second each: still on its way when the page is back.
+  const twenty =
+    "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty";
   await chat.open();
   await chat.converse("Another conversation.");
   await chat.newChat.click();
-  await chat.ask(
-    "[[pace: 0.3]] one two three four five six seven eight nine ten eleven twelve",
-  );
+  await chat.ask(`[[pace: 0.5]] ${twenty}`);
   await expect(chat.answers).toContainText("Echo: one two");
   const slow = chat.listed.filter({ hasText: "pace" });
   await expect(slow).toHaveAttribute("aria-current", "page");
@@ -167,12 +168,14 @@ test("an answer is written on while another conversation is open, and is whole o
   await expect(chat.answers).toHaveText("Echo: Another conversation.");
 
   // Nobody is reading the slow answer now. It is written all the same: whoever
-  // comes back finds it on its way, or done, and in the end whole.
+  // comes back reads along with it while it is written, and in the end it is whole.
   await slow.click();
-  await expect(chat.answers).toHaveText(
-    "Echo: one two three four five six seven eight nine ten eleven twelve",
-    { timeout: 15_000 },
-  );
+  await expect(chat.stop).toBeVisible();
+  await expect(chat.answers).toContainText("Echo: one two");
+  await expect(chat.answers).not.toContainText("twenty");
+  await expect(chat.answers).toHaveText(`Echo: ${twenty}`, {
+    timeout: 20_000,
+  });
   await chat.answered();
   await expect(page.getByText(/stopped before it was finished/)).toBeHidden();
   await expect(page.getByText(/still being written/)).toBeHidden();

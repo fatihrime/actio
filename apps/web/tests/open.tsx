@@ -3,20 +3,26 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { UserEvent } from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { SWRConfig } from "swr";
 
 import { ChatApp } from "@/components/chat/chat-app";
 
 /** Open the app at `path`, and hand back the person who uses it. Set up the fake API
- * first (./fake-api.ts): the page asks it at once. */
-export function open(path = "/"): UserEvent {
+ * first (./fake-api.ts): the page asks it at once.
+ *
+ * `strict` renders it in React's StrictMode, as Next.js does in development
+ * (`make dev`): each component's effects are run, undone and run again when it
+ * appears. */
+export function open(path = "/", { strict = false } = {}): UserEvent {
   window.history.replaceState(null, "", path);
-  render(
+  const app = (
     // Its own cache, so what one test read from the API isn't the next one's.
     <SWRConfig value={{ provider: () => new Map() }}>
       <ChatApp />
-    </SWRConfig>,
+    </SWRConfig>
   );
+  render(strict ? <StrictMode>{app}</StrictMode> : app);
   return userEvent.setup();
 }
 

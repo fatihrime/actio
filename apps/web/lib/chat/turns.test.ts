@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ChatMessage } from "./messages";
-import { turnRequest } from "./turns";
+import { turnRequest, turnTransport } from "./turns";
+import type { JoinOptions } from "./turns";
 
 function message(
   id: string,
@@ -124,5 +125,39 @@ describe("turnRequest", () => {
         thinking: false,
       }),
     ).toThrow("Only a question can be answered");
+  });
+});
+
+describe("turnTransport", () => {
+  it("reads along with a turn at that turn's stream", async () => {
+    const asked: { url: string; method: string | undefined }[] = [];
+    // The library hands `fetch` the address as text.
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      asked.push({ url, method: init?.method });
+      // The turn has ended: there is nothing to read along with.
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    const turn: JoinOptions = { turn: "t?1" };
+
+    const stream = await turnTransport("c 1/2").reconnectToStream({
+      chatId: "c 1/2",
+      metadata: turn,
+    });
+
+    expect(stream).toBeNull();
+    // Each id is a single segment of the address, however it is written.
+    expect(asked).toEqual([
+      { url: "/api/conversations/c%201%2F2/turns/t%3F1/stream", method: "GET" },
+    ]);
+  });
+
+  it("refuses to read along without being told which turn", async () => {
+    const fetching = vi.fn();
+    vi.stubGlobal("fetch", fetching);
+
+    await expect(
+      turnTransport("c1").reconnectToStream({ chatId: "c1" }),
+    ).rejects.toThrow("Only a turn can be read along with");
+    expect(fetching).not.toHaveBeenCalled();
   });
 });

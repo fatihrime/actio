@@ -25,6 +25,7 @@ const CONVERSATION = "GET /api/conversations/*";
 const RENAME = "PATCH /api/conversations/*";
 const DELETE = "DELETE /api/conversations/*";
 const TURNS = "POST /api/conversations/*/turns";
+const STREAM = "GET /api/conversations/*/turns/*/stream";
 
 const SKY = RECORDED.conversation;
 const TYRES = "01900000-0000-7000-8000-0000000000c2";
@@ -656,7 +657,7 @@ describe("deleting a conversation", () => {
 });
 
 describe("opening another conversation while an answer is being written", () => {
-  it("lets the answer be written on, and finds it on coming back", async () => {
+  it("lets the answer be written on, and reads along with it on coming back", async () => {
     const api = fakeApi();
     const asked = () => conversationOf(api.to(TURNS)[0]);
     let looks = 0;
@@ -684,25 +685,21 @@ describe("opening another conversation while an answer is being written", () => 
             ]),
           );
         }
-        // The one that was left: still being written at the first look, done at
-        // the second.
+        // The one that was left: still being written when it is opened again.
         looks += 1;
         const sent = (api.to(TURNS)[0]?.body as { message: { id: string } })
           .message.id;
         return json(
           200,
-          looks === 1
-            ? conversation(
-                asked(),
-                [question(sent, "Why is the sky blue?")],
-                turn({ status: "running", finish_reason: null }),
-              )
-            : conversation(asked(), [
-                question(sent, "Why is the sky blue?"),
-                answer(RECORDED.answer, "Echo: Why is the sky blue?", sent),
-              ]),
+          conversation(
+            asked(),
+            [question(sent, "Why is the sky blue?")],
+            turn({ status: "running", finish_reason: null }),
+          ),
         );
-      });
+      })
+      // The page reads along with it again, from the answer's first event.
+      .on(STREAM, () => streamed("answer.sse"));
     const user = open();
     await ask(user, "Why is the sky blue?");
     await screen.findByText(/^Echo:/);
@@ -717,18 +714,14 @@ describe("opening another conversation while an answer is being written", () => 
     await user.click(screen.getByRole("link", { name: "Sky" }));
 
     expect(
-      await screen.findByText(/An answer to this is still being written/),
-    ).toBeInTheDocument();
-    expect(
-      await screen.findByText(
-        "Echo: Why is the sky blue?",
-        {},
-        { timeout: 4000 },
-      ),
+      await screen.findByText("Echo: Why is the sky blue?"),
     ).toBeInTheDocument();
     expect(screen.queryByText(/still being written/)).not.toBeInTheDocument();
-    expect(looks).toBe(2);
-    // It ended while nobody was reading it: what it cost is read now.
+    expect(api.to(STREAM).map((call) => call.path)).toEqual([
+      `/api/conversations/${asked()}/turns/${RECORDED.turn}/stream`,
+    ]);
+    expect(looks).toBe(1);
+    // What it cost is read once it has ended.
     await waitFor(() => {
       expect(api.to("GET /api/usage").length).toBeGreaterThan(usageRead);
     });
