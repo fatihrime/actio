@@ -114,6 +114,22 @@ async def ended(*requests: asyncio.Task[httpx.Response]) -> list[httpx.Response]
         return list(await asyncio.gather(*requests))
 
 
+def writing(turn_id: str) -> asyncio.Task[Any]:
+    """The task the app's `TurnRunner` writes a running turn in, found by the name the
+    runner gives it (`actio.chat.running`). It ends once the turn is recorded: for a turn
+    that nobody reads along with, nothing else says so. Look for it while the turn runs:
+    a task that has ended is no longer listed."""
+    [task] = [task for task in asyncio.all_tasks() if task.get_name() == f"turn-{turn_id}"]
+    return task
+
+
+async def recorded(task: asyncio.Task[Any]) -> None:
+    """Wait until the task a turn is written in has ended: the turn is recorded. The task
+    is left alone, whatever happens to the wait."""
+    done, _ = await asyncio.wait({task}, timeout=PATIENCE_S)
+    assert done, "the turn wasn't recorded in time"
+
+
 async def count(db: AsyncSession, table: type) -> int:
     return await db.scalar(select(func.count()).select_from(table)) or 0
 
@@ -254,6 +270,7 @@ async def test_a_reader_is_told_when_the_stream_is_lost_and_the_turn_runs_on(
     asked = chat.asking()
     await held(model)
     turn_id = await chat.running_turn()
+    turn = writing(turn_id)
 
     async with Valkey.from_url(valkey_url) as valkey:
         await valkey.delete(f"{settings.valkey_prefix}:turn:{turn_id}")
@@ -262,6 +279,8 @@ async def test_a_reader_is_told_when_the_stream_is_lost_and_the_turn_runs_on(
         hold.set()
         await asyncio.wait_for(model.closed.wait(), PATIENCE_S)
         gone_for_good = not await valkey.exists(f"{settings.valkey_prefix}:turn:{turn_id}")
+    # Nobody reads along with it now: only its task says when it is recorded.
+    await recorded(turn)
 
     for response in (reader, joining):
         assert response.status_code == 200
