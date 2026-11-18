@@ -29,7 +29,7 @@ up: .env ## Run the whole stack in containers, shaped like production, at http:/
 
 dev: .env ## Run the stack at http://localhost:8080 with the API and web app native; Ctrl-C stops them
 	docker compose stop api web # in case `make up` left them running
-	$(DEV_COMPOSE) up --detach --wait postgres valkey caddy
+	$(DEV_COMPOSE) up --detach --wait --build postgres valkey caddy # --build: the proxy's config is in its image
 	./scripts/with-dev-env.sh uv run actio --role migrate
 	@echo "Open http://localhost:8080 (API docs: /api/docs). 'make down' stops the containers."
 	./scripts/with-dev-env.sh pnpm exec concurrently --kill-others --names api,web \

@@ -18,11 +18,17 @@ from typing import Any
 
 import pytest
 
+from actio.api.turns import MAX_QUESTION_CHARS
 from actio.chat.running import GRACE, LAST_WORDS
 from actio.cli import WAITS_FOR_REQUESTS_S
 
 ROOT = Path(__file__).resolve().parents[2]
-DOCKERFILES = ["apps/api/Dockerfile", "apps/web/Dockerfile", "packages/fakellm/Dockerfile"]
+DOCKERFILES = [
+    "apps/api/Dockerfile",
+    "apps/web/Dockerfile",
+    "deploy/caddy/Dockerfile",
+    "packages/fakellm/Dockerfile",
+]
 DATA_SERVICES = ["postgres", "valkey"]
 # Containers that do one thing and exit. Listed by name on purpose: adding one here is
 # a decision, because a job is exempt from the health check rule.
@@ -219,6 +225,85 @@ def test_the_api_is_given_the_time_it_takes_to_end_its_answers(stack: dict[str, 
 
     assert answers_take < server_waits
     assert server_waits + LAST_WORDS < docker_waits
+
+
+CADDY_SIZES = {"B": 1, "KB": 1000, "KiB": 1024, "MB": 1000**2, "MiB": 1024**2}
+"""What a size in the Caddyfile means, in bytes: Caddy reads `MB` as a million."""
+
+
+def caddy_block(caddyfile: str, opening: str) -> str:
+    """What is inside the block of the Caddyfile that starts with `opening`, up to the
+    brace that closes it."""
+    start = caddyfile.index(opening) + len(opening)
+    depth = 1
+    for at in range(start, len(caddyfile)):
+        depth += {"{": 1, "}": -1}.get(caddyfile[at], 0)
+        if depth == 0:
+            return caddyfile[start:at]
+    raise AssertionError(f"{opening!r} is never closed")
+
+
+def test_the_proxy_takes_every_request_the_api_would_and_refuses_much_larger_ones() -> None:
+    """The API reads a request's body whole before it can say that it is too large.
+    So the proxy refuses a body over a size of its own, for the API's routes, first.
+
+    The limit must let through every request the API takes: the longest question,
+    `MAX_QUESTION_CHARS` characters, and the rest of the request around it. A character
+    takes at most twelve bytes in JSON: one beyond the first 65,536, written as two
+    `\\u` escapes, as a client that escapes everything outside ASCII writes it (Python's
+    `json.dumps` does). The API counts it as one character.
+
+    And the refusal is a problem document, as every error of the API is, so that the
+    page has words to show. See ADR 0023."""
+    room_for_the_rest = 64 * 1024  # ids, a model's name, a flag, 16 parts' keys: far less
+    longest_character = len(json.dumps("\U0001f6b2")) - 2  # a bicycle: two escapes
+    caddyfile = (ROOT / "deploy/caddy/Caddyfile").read_text()
+    api_routes = caddy_block(caddyfile, "handle @api {")
+    [(number, unit)] = re.findall(
+        r"request_body\s*\{\s*max_size\s+(\d+)([KM]?i?B)\s*\}", api_routes
+    )
+    refusal = caddy_block(caddyfile, "handle_errors 413 {")
+    [body] = re.findall(r"respond `(.+)` 413", refusal)
+    problem = json.loads(body)
+
+    assert longest_character == 12
+    assert (
+        int(number) * CADDY_SIZES[unit]
+        >= longest_character * MAX_QUESTION_CHARS + room_for_the_rest
+    )
+    assert caddyfile.count("request_body") == 1  # the web app's own routes are its own
+    assert "header Content-Type application/problem+json" in refusal
+    assert set(problem) == {"type", "title", "status", "detail"}
+    assert (problem["type"], problem["status"]) == ("about:blank", 413)
+
+
+def test_the_proxy_runs_the_config_it_was_built_with(stack: dict[str, Any]) -> None:
+    """The proxy's config holds a limit that protects the API: the size of a request. A
+    limit that isn't applied protects nothing, and nothing says that it isn't.
+
+    A stack that is updated in place keeps a container running unless its image or its
+    settings changed: a file mounted into it may change, or be replaced and lost to it,
+    without Compose doing anything. So the config is part of the proxy's image, as code
+    is part of the API's. A change to it is a new image, which Compose starts the proxy
+    from; nothing is mounted, and nothing watches the file. The build checks the config,
+    so a mistake in it stops the build, and the proxy that runs keeps serving. Its base
+    image is pinned like every other: see `test_built_images_start_from_bases_pinned_by_digest`.
+    See ADR 0023."""
+    caddy = stack["services"]["caddy"]
+    dockerfile = (ROOT / "deploy/caddy/Dockerfile").read_text()
+    lines = [" ".join(line.split()) for line in dockerfile.replace("\\\n", " ").splitlines()]
+
+    assert Path(caddy["build"]["context"]).resolve() == (ROOT / "deploy" / "caddy").resolve()
+    assert caddy["build"]["dockerfile"] == "Dockerfile"
+    assert caddy.get("image") is None  # what runs is what was built here
+    assert not caddy.get("volumes")
+    assert caddy.get("command") is None  # the image's own: `caddy run` on its Caddyfile
+    # And the base image's own, too: nothing here starts Caddy otherwise, watching the
+    # file or reading another.
+    assert [line for line in lines if line.startswith(("CMD", "ENTRYPOINT"))] == []
+    assert "COPY Caddyfile /etc/caddy/Caddyfile" in lines
+    [validate] = [line for line in lines if line.startswith("RUN ")]
+    assert validate.endswith("caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile")
 
 
 def test_valkey_keeps_nothing_on_disk(stack: dict[str, Any]) -> None:

@@ -8,6 +8,15 @@
 :8080 {
 	@api path /api/* /v1/*
 	handle @api {
+		# The largest request the API takes is a question of 100,000 characters
+		# (MAX_QUESTION_CHARS), at most twelve bytes each as JSON: a character beyond
+		# the first 65,536 written as two \u escapes. That is 1.2 MB and a little more.
+		# A larger body is refused here: one that says its length before any of it is
+		# passed on, and one sent in chunks once the limit is reached.
+		# deploy/tests/test_compose_policy.py holds the two numbers together.
+		request_body {
+			max_size 2MB
+		}
 		reverse_proxy {$ACTIO_API_UPSTREAM} {
 			flush_interval -1 # pass streamed tokens (server-sent events) through at once
 		}
@@ -16,6 +25,12 @@
 		reverse_proxy {$ACTIO_WEB_UPSTREAM} {
 			flush_interval -1
 		}
+	}
+
+	# Refused for its size: in the API's own error format, so that the page can say why.
+	handle_errors 413 {
+		header Content-Type application/problem+json
+		respond `{"type":"about:blank","title":"Content Too Large","status":413,"detail":"This is too much to send at once: Actio takes at most 2 MB in one request. Shorten the message, and send it again."}` 413
 	}
 }
 

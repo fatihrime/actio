@@ -30,15 +30,20 @@ x-api-stores: &api-stores
 
 services:
   caddy:
-    image: caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee
+    # The pinned Caddy image with the config built in (deploy/caddy/Dockerfile). A
+    # change to the Caddyfile reaches the proxy when the image is built again, and
+    # Compose starts the proxy from the new one: `make up`, `make dev` and `make e2e`
+    # build it. A plain `docker compose up` reuses the image that is there. The config
+    # holds the limit on a request's size that protects the API.
+    build:
+      context: deploy/caddy
+      dockerfile: Dockerfile
     <<: *hardening
     user: "1000:1000"
     tmpfs: [/config, /data] # Caddy's runtime state; nothing worth keeping
     environment:
       ACTIO_API_UPSTREAM: api:8000
       ACTIO_WEB_UPSTREAM: web:3000
-    volumes:
-      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
       - "127.0.0.1:${ACTIO_HTTP_PORT:-8080}:8080"
     networks: [edge]

@@ -2,7 +2,7 @@
 
 Actio's own code is [MIT-licensed](LICENSE). Its dependencies are declared in the `pyproject.toml` files and `uv.lock` (Python), and in the `package.json` files and `pnpm-lock.yaml` (JavaScript). They are installed from the package registries: none of their code is copied into this repository.
 
-This file records what Actio's two container images ship. The API image was checked on 2026-11-11, and on 2026-11-14 for the one package it gained since (`tzdata`); the web image on 2026-11-14. Each check read the installed packages' own metadata, inside the built image.
+This file records what Actio's three container images ship: the API's, the web app's, and the proxy's. The API image was checked on 2026-11-11, and on 2026-11-14 for the one package it gained since (`tzdata`); the web image on 2026-11-14; the proxy image on 2026-11-18. Each check read the installed packages' own metadata, inside the built image.
 
 ## Components under the LGPL
 
@@ -51,8 +51,13 @@ Actio allows LGPL libraries that are used unmodified, as separate libraries ([AD
 - `json-schema` is offered under AFL-2.1 or BSD-3-Clause, and is used under BSD-3-Clause.
 - `caniuse-lite`, the browser-support data used at build time, is under CC-BY-4.0.
 
+**The proxy image** (`deploy/caddy/Dockerfile`) is the official Caddy image, `caddy:2.11.9-alpine`, unmodified, with Actio's config file added. It ships Caddy 2.11.9, under Apache-2.0, as its project builds it.
+
 ## Not covered here
 
 - **Development tools,** such as the test and lint tools, which no image ships. Among them is Playwright (Apache-2.0), which downloads a Chromium browser to the machine that runs the end-to-end tests.
 - **The fake model's image,** which only the end-to-end tests build and run (`packages/fakellm/Dockerfile`). Its packages are a subset of the API image's.
+- **The base images' own operating systems:** Debian's packages in the API and web images, which start from the official Python and Node.js images, and Alpine's in the proxy image, which starts from the official Caddy image. They come with those images unmodified, under their distributions' licenses, some of them the GPL (such as BusyBox, in Alpine). Each base image is pinned by digest in its Dockerfile.
+- **The language runtimes that come with those base images:** CPython and pip in the API image, Node.js and npm in the web image.
+- **The Go modules compiled into Caddy's program,** in the proxy image. Its entry above names Caddy alone.
 - **Models.** Model weights are not part of this repository or of its images. You download them yourself, with Ollama, under each model's own license.
