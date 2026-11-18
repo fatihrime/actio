@@ -15,6 +15,10 @@ answer says every few seconds that it is still at it (`still_alive`). A turn who
 process died would otherwise block its conversation for ever, so one that has been
 silent for too long is given up on, as `interrupted`, the next time someone looks.
 
+An account may also have only so many answers being written at once, in all its
+conversations together, when its plan says so: see `being_written`. A turn that would
+be one too many is refused before anything of it is kept.
+
 These functions never commit, and take the time as `now`.
 """
 
@@ -23,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import BigInteger, func, literal, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +62,17 @@ class StillAnsweringError(Exception):
     def __init__(self, turn_id: uuid.UUID) -> None:
         super().__init__(str(turn_id))
         self.turn_id = turn_id
+
+
+class TooManyAnswersError(Exception):
+    """The account has as many answers being written as its plan allows at once."""
+
+    def __init__(self, running: int, at_once: int) -> None:
+        super().__init__(f"{running} of {at_once}")
+        self.running = running
+        """How many are being written."""
+        self.at_once = at_once
+        """How many the plan allows at once."""
 
 
 class AlreadyAskedError(Exception):
@@ -117,6 +132,7 @@ async def ask(
     thinking: bool,
     turn_id: uuid.UUID,
     now: datetime,
+    answers_at_once: int | None = None,
 ) -> Begun:
     """Add a question to a conversation and start the turn that answers it.
 
@@ -124,7 +140,9 @@ async def ask(
     that doesn't exist yet is created by its first question, one with no `parent_id`.
 
     Raises `AlreadyAskedError` when this message was sent before, so that sending a
-    request twice never asks twice.
+    request twice never asks twice. Raises `TooManyAnswersError` when the account
+    already has `answers_at_once` answers being written, the most its plan allows;
+    `None`: the plan has no such limit.
     """
     conversation = await conversations.get(db, conversation_id, user_id=user_id, to_change=True)
     if conversation is None:
@@ -137,6 +155,7 @@ async def ask(
             raise AlreadyAskedError(await latest_for(db, conversation, earlier.id))
         raise IdTakenError
     await _require_free(db, conversation, now=now)
+    await _require_room(db, user_id, answers_at_once, now=now)
     question = await tree.append(
         db,
         conversation,
@@ -159,11 +178,13 @@ async def answer_again(
     thinking: bool,
     turn_id: uuid.UUID,
     now: datetime,
+    answers_at_once: int | None = None,
 ) -> Begun:
     """Start a turn that answers an existing question once more.
 
     The new answer will stand beside the earlier ones, as another version. Meanwhile
-    the conversation shows the branch that ends at the question.
+    the conversation shows the branch that ends at the question. `answers_at_once` is
+    as for `ask`.
     """
     conversation = await conversations.get(db, conversation_id, user_id=user_id, to_change=True)
     if conversation is None:
@@ -176,6 +197,7 @@ async def answer_again(
     if question.role != "user":
         raise tree.OutOfTurnError
     await _require_free(db, conversation, now=now)
+    await _require_room(db, user_id, answers_at_once, now=now)
     conversation.current_leaf_id = question.id
     conversation.last_active_at = now
     return await _begin(db, conversation, question, model, thinking, turn_id, now)
@@ -266,6 +288,26 @@ async def give_up_on_stale(db: AsyncSession, conversation_id: uuid.UUID, *, now:
     )
 
 
+async def being_written(db: AsyncSession, user_id: uuid.UUID, *, now: datetime) -> int:
+    """How many answers the account has being written, in all its conversations.
+
+    A turn counts while it is `running` and was heard from within `STALE_AFTER`: the
+    rule `give_up_on_stale` goes by. So a turn whose process died stops counting a
+    minute after it was last heard from, whether or not anyone has given up on it. A
+    turn that waits for its model's server is running, and counts."""
+    found = await db.scalar(
+        select(func.count())
+        .select_from(Turn)
+        .join(Conversation, Turn.conversation_id == Conversation.id)
+        .where(
+            Conversation.user_id == user_id,
+            Turn.status == "running",
+            Turn.alive_at > now - STALE_AFTER,
+        )
+    )
+    return found or 0
+
+
 async def get(db: AsyncSession, conversation: Conversation, turn_id: uuid.UUID) -> Turn | None:
     """The conversation's turn with this id, as the database has it now."""
     found: Turn | None = await db.scalar(
@@ -344,6 +386,35 @@ async def _require_free(db: AsyncSession, conversation: Conversation, *, now: da
     running = await running_in(db, conversation)
     if running is not None:
         raise StillAnsweringError(running)
+
+
+async def _require_room(
+    db: AsyncSession, user_id: uuid.UUID, at_once: int | None, *, now: datetime
+) -> None:
+    """Refuse a turn that would be one more answer than the account may have being
+    written at once.
+
+    Two questions of one account that arrive together would each count the same turns,
+    and both pass: a turn that is being started is in no count until its transaction is
+    committed. So the account's admissions take a lock first, and hold it until the
+    transaction ends: they are counted one after the other. Other accounts take other
+    locks, and never wait for this one.
+    """
+    if at_once is None:
+        return
+    key = literal(_admissions_of(user_id), BigInteger)
+    await db.execute(select(func.pg_advisory_xact_lock(key)))
+    running = await being_written(db, user_id, now=now)
+    if running >= at_once:
+        raise TooManyAnswersError(running, at_once)
+
+
+def _admissions_of(user_id: uuid.UUID) -> int:
+    """The key of the advisory lock that an account's admissions take: the last 64 bits
+    of its id, as Postgres's signed `bigint`. In the ids Actio makes they are random,
+    and the bits that mark the id's variant make them negative: never the key of the
+    migrations' lock (`actio.migrations.env`), which is positive."""
+    return int.from_bytes(user_id.bytes[8:], signed=True)
 
 
 async def _begin(

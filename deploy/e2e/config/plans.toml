@@ -26,10 +26,12 @@ output = 1_000_000
 input = 0
 output = 0
 
+# Two answers at once, as people get: apps/web/e2e/turns.spec.ts asks for a third.
 [plans.guest]
 title = "Guest"
 session_credits = 100_000
 week_credits = 400_000
+answers_at_once = 2
 
 # Enough for the few short questions of the tests that sign up for other reasons, and
 # gone after two or three long ones.
@@ -37,3 +39,4 @@ week_credits = 400_000
 title = "Free"
 session_credits = 500
 week_credits = 5_000
+answers_at_once = 3

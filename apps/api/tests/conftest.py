@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from actio import catalog as catalogs
 from actio.api.dependencies import get_clock, get_new_id
 from actio.app import create_app
-from actio.catalog import Catalog, CatalogFile, OfferedModel
+from actio.catalog import Catalog, CatalogFile, Gate, OfferedModel
 from actio.chat import running as turn_runner
 from actio.core import schema
 from actio.core.database import create_engine, create_session_factory
@@ -175,6 +175,7 @@ def plans_for_tests(
     min_answer_tokens: int = 16,
     models: Iterable[str] = ("standard",),
     free_models: Iterable[str] = (),
+    answers_at_once: int | None = None,
 ) -> Plans:
     """Prices and plans for the app under test.
 
@@ -183,13 +184,17 @@ def plans_for_tests(
     use in a session and in a week, or `None` for no limits; by default far more than a
     test uses. `models` are the models to price: the one that nearly every catalog here
     offers, unless a test offers others. `free_models` are offered beside them, and cost
-    nothing whatever `free` says.
+    nothing whatever `free` says. `answers_at_once` is how many answers a guest and an
+    account may each have being written at once; by default as many as they ask for.
     """
 
     def plan(title: str, allowance: tuple[int, int] | None) -> dict[str, Any]:
-        if allowance is None:
-            return {"title": title}
-        return {"title": title, "session_credits": allowance[0], "week_credits": allowance[1]}
+        limits: dict[str, Any] = {"title": title}
+        if allowance is not None:
+            limits |= {"session_credits": allowance[0], "week_credits": allowance[1]}
+        if answers_at_once is not None:
+            limits["answers_at_once"] = answers_at_once
+        return limits
 
     price = 0 if free else 1_000_000
     prices = {name: {"input": price, "output": price} for name in models}
@@ -219,13 +224,16 @@ class PlansWith(Protocol):
         min_answer_tokens: int = ...,
         models: Iterable[str] = ...,
         free_models: Iterable[str] = ...,
+        answers_at_once: int | None = ...,
     ) -> Plans: ...
 
 
 @pytest.fixture
 def plans_with() -> PlansWith:
     """Call it for plans with limits a test can reach: `plans_with(guest=(1_000, 10_000))`
-    lets a guest use 1,000 credits a session and 10,000 a week. See `plans_for_tests`."""
+    lets a guest use 1,000 credits a session and 10,000 a week, and
+    `plans_with(answers_at_once=1)` lets it have one answer written at a time. See
+    `plans_for_tests`."""
     return plans_for_tests
 
 
@@ -234,16 +242,22 @@ class ScriptedModel:
 
     The script is a list of what to do in order: an event to yield, an error to raise,
     or an `asyncio.Event` to wait for, which lets a test hold the answer half-way.
+
+    `closes_when` makes closing its stream take a while, as closing the connection to a
+    real model's server does: the stream ends only once that event is set.
     """
 
-    def __init__(self, *script: Any) -> None:
+    def __init__(self, *script: Any, closes_when: asyncio.Event | None = None) -> None:
         self.script = list(script)
+        self.closes_when = closes_when
         self.requests: list[ChatRequest] = []
         self.started = asyncio.Event()
         """Set once the model has been asked: the turn is now running."""
         self.waiting = asyncio.Event()
         """Set while the model waits for an `asyncio.Event` of its script. Whatever it
         yielded before has been taken by then: stored in the turn, and streamed."""
+        self.closing = asyncio.Event()
+        """Set when the answer's stream begins to end, whoever ends it."""
         self.closed = asyncio.Event()
         """Set when the answer's stream ends, whoever ended it."""
 
@@ -261,6 +275,9 @@ class ScriptedModel:
                 else:
                     yield item
         finally:
+            self.closing.set()
+            if self.closes_when is not None:
+                await self.closes_when.wait()
             self.closed.set()
 
 
@@ -281,6 +298,51 @@ def catalog_of(model: ChatProvider, *, thinking: bool = True, also: Iterable[str
         for name, title in titles.items()
     }
     return Catalog(offered, default="standard", thinking=dict.fromkeys(offered, thinking))
+
+
+class Lineup:
+    """Models a test offers, each with a script of its own, on servers of the test's
+    choosing: a server that writes only so many answers at once is a `Gate`, which the
+    models on it share. The first model added is the default."""
+
+    def __init__(self) -> None:
+        self._offered: dict[str, OfferedModel] = {}
+
+    def add(
+        self,
+        name: str,
+        *script: Any,
+        gate: Gate | None = None,
+        closes_when: asyncio.Event | None = None,
+    ) -> ScriptedModel:
+        """Offer a model called `name` that follows `script`, behind `gate` if any. See
+        `ScriptedModel` for `closes_when`."""
+        model = ScriptedModel(*script, closes_when=closes_when)
+        self._offered[name] = OfferedModel(
+            name=name,
+            title=name.capitalize(),
+            kind="openai-compatible",
+            model=f"scripted-{name}",
+            context_window=4096,
+            max_output_tokens=512,
+            chat=model,
+            gate=gate,
+        )
+        return model
+
+    @property
+    def names(self) -> list[str]:
+        return list(self._offered)
+
+    def catalog(self) -> Catalog:
+        default = next(iter(self._offered))
+        return Catalog(self._offered, default=default, thinking=dict.fromkeys(self._offered, False))
+
+
+@pytest.fixture
+def lineup() -> Lineup:
+    """An empty `Lineup`: add the models, then start an app with its `catalog()`."""
+    return Lineup()
 
 
 class Offer(Protocol):

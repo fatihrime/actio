@@ -1,5 +1,7 @@
 """Turns that run apart from their request: read along with again, stopped, kept alive
-while they are written, and ended by a shutdown.
+while they are written, and ended by a shutdown. And how many run at once: turns that
+wait at the gate in front of a model's server, the answers one account may have being
+written at once, and the readers it may have open.
 
 The app runs in process, and a request's response comes back whole, once its stream has
 ended. So a test starts a request as a task, does what it is about while the model is
@@ -10,19 +12,24 @@ connection, a reader who leaves in the middle, is in `test_turns_live.py`.
 import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import ClientDisconnect
 from valkey.asyncio import Valkey
 
 from actio.api import turns as turn_routes
 from actio.api import ui_stream
+from actio.catalog import Gate
 from actio.chat import events as turn_events
+from actio.chat import readers as turn_readers
 from actio.chat import running, turns
 from actio.chat.events import EventsUnavailableError, TurnEvents
 from actio.chat.models import Conversation, Message, Turn
@@ -30,7 +37,16 @@ from actio.chat.parts import TextPart
 from actio.core.ids import new_id
 from actio.core.settings import Settings
 from actio.usage.models import UsageEntry
-from actio_llm import Finish, FinishReason, ReasoningDelta, TextDelta, Usage
+from actio.usage.plans import Plans
+from actio_llm import (
+    Finish,
+    FinishReason,
+    ProviderUnavailableError,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    Usage,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -73,11 +89,12 @@ class Chat:
         self.path = f"/api/conversations/{self.id}"
         self.question = new_id()
 
-    def asking(self, text: str = "Tell me something.") -> asyncio.Task[httpx.Response]:
-        """Ask, and go on without waiting: the response comes when its stream has ended."""
+    def asking(self, text: str = "Tell me something.", **more: Any) -> asyncio.Task[httpx.Response]:
+        """Ask, and go on without waiting: the response comes when its stream has ended.
+        `more` goes into the request too, such as the `model` to ask."""
         message = {"id": str(self.question), "parts": [{"type": "text", "text": text}]}
         return asyncio.create_task(
-            self.client.post(f"{self.path}/turns", json={"message": message})
+            self.client.post(f"{self.path}/turns", json={"message": message, **more})
         )
 
     def reading_along(self, turn_id: str) -> asyncio.Task[httpx.Response]:
@@ -153,6 +170,34 @@ async def beaten(happened: Callable[[], Awaitable[bool]]) -> None:
             if await happened():
                 return
             await asyncio.sleep(0.005)
+
+
+async def eventually(happened: Callable[[], Awaitable[bool]]) -> None:
+    """Wait until what the database is asked says has happened: it does in a moment."""
+    async with asyncio.timeout(PATIENCE_S):
+        while True:
+            if await happened():
+                return
+            await asyncio.sleep(0.005)
+
+
+async def until(condition: Callable[[], bool]) -> None:
+    """Wait until `condition` holds: the app gets there in a moment."""
+    async with asyncio.timeout(PATIENCE_S):
+        while True:
+            if condition():
+                return
+            await asyncio.sleep(0.005)
+
+
+async def alive_at(db: AsyncSession, turn_id: uuid.UUID) -> datetime:
+    """When the turn last said that it is alive."""
+    moment = await db.scalar(
+        select(Turn.alive_at).where(Turn.id == turn_id).execution_options(populate_existing=True)
+    )
+    await db.commit()  # the next look starts from what the database has then
+    assert moment is not None
+    return moment
 
 
 async def left_running(db: AsyncSession, chat: Chat, clock: Any) -> Turn:
@@ -341,9 +386,12 @@ async def test_a_reader_is_sent_a_line_while_the_model_is_silent(
     assert said(waited) == "Echo: Hello"
 
 
-async def test_readers_dont_keep_the_database_busy(scripted: Any) -> None:
+async def test_readers_dont_keep_the_database_busy(
+    scripted: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A reader holds its connection for as long as the answer takes. If each also held
     a connection to the database, a dozen readers would leave none for anyone else."""
+    monkeypatch.setattr(turn_readers, "READERS_PER_ACCOUNT", 20)  # not what this is about
     hold = asyncio.Event()
     model, browser = await scripted(TextDelta("Half an "), hold, DONE)
     chat = Chat(browser)
@@ -745,6 +793,866 @@ async def test_a_shutdown_gives_an_answer_a_moment_to_finish(
     turn = await the_turn(db)
     assert (turn.status, turn.credits) == ("completed", 9)
     assert said(reader) == "Nearly done."
+
+
+# --- The gate in front of a model's server --------------------------------------------
+#
+# A server that writes one answer at a time: a turn that comes while it is busy waits
+# inside Actio, running like any other, and its model is asked once the turn has passed.
+
+
+async def guest_on(
+    start_app: Any, settings: Settings, lineup: Any, plans: Plans | None = None
+) -> httpx.AsyncClient:
+    """A guest's browser on an app that offers the models of `lineup`."""
+    browser: httpx.AsyncClient = await start_app(settings, catalog=lineup.catalog(), plans=plans)
+    await browser.post("/api/session/guest")
+    return browser
+
+
+async def test_a_turn_waits_while_its_models_server_is_busy_and_its_model_is_asked_only_then(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    clock: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two models on one server, which writes one answer at a time. A server that is asked
+    anyway keeps the request waiting inside itself, while the client's patience for the
+    first word runs out: so it is asked only once it is free."""
+    assert migrated
+    gate, hold = Gate(1), asyncio.Event()
+    first = lineup.add(
+        "standard", TextDelta("The first "), hold, TextDelta("answer."), DONE, gate=gate
+    )
+    second = lineup.add("second", TextDelta("The second answer."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    one, two = Chat(browser), Chat(browser)
+    asked_first = one.asking()
+    await held(first)
+
+    asked_second = two.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+    waiting = await two.running_turn()  # it waits: it isn't refused
+    clock.advance(seconds=30)
+    asked_meanwhile = list(second.requests)
+    hold.set()
+    first_reader, second_reader = await ended(asked_first, asked_second)
+
+    assert asked_meanwhile == []
+    assert first.closed.is_set()
+    assert len(second.requests) == 1
+    assert said(first_reader) == "The first answer."
+    assert said(second_reader) == "The second answer."
+    assert chunk(second_reader, "finish")["messageMetadata"]["turn"]["status"] == "completed"
+    assert f"turn {waiting}: waited 30.0 s for the model's server" in caplog.text
+    assert caplog.text.count("for the model's server") == 1  # the first one didn't wait
+
+
+async def test_turns_that_wait_pass_in_the_order_they_came(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any
+) -> None:
+    assert migrated
+    gate = Gate(1)
+    names = ["standard", "second", "third"]
+    holds = [asyncio.Event() for _ in names]
+    models = [
+        lineup.add(
+            name, TextDelta(f"{name.capitalize()} "), hold, TextDelta("answered."), DONE, gate=gate
+        )
+        for name, hold in zip(names, holds, strict=True)
+    ]
+    browser = await guest_on(start_app, settings, lineup)
+    chats = [Chat(browser) for _ in names]
+    asked = [chats[0].asking()]
+    await held(models[0])
+    for chat, name in zip(chats[1:], names[1:], strict=True):
+        asked.append(chat.asking(model=name))
+        await until(lambda: gate.waiting == len(asked) - 1)  # in line behind the ones before
+
+    holds[0].set()
+    await held(models[1])
+    third_asked_too_soon = models[2].started.is_set()
+    holds[1].set()
+    await held(models[2])
+    holds[2].set()
+    readers = await ended(*asked)
+
+    assert not third_asked_too_soon
+    assert [said(reader) for reader in readers] == [
+        "Standard answered.",
+        "Second answered.",
+        "Third answered.",
+    ]
+
+
+async def test_a_busy_server_holds_up_only_the_answers_it_is_to_write(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any
+) -> None:
+    """A model on another server is asked at once, and so is one on a server that takes
+    every answer as it comes."""
+    assert migrated
+    busy, other = Gate(1), Gate(1)
+    hold = asyncio.Event()
+    first = lineup.add("standard", TextDelta("Busy."), hold, DONE, gate=busy)
+    same = lineup.add("same", TextDelta("Same server."), DONE, gate=busy)
+    lineup.add("elsewhere", TextDelta("Another server."), DONE, gate=other)
+    lineup.add("ungated", TextDelta("Every answer at once."), DONE)
+    browser = await guest_on(start_app, settings, lineup)
+    asked = Chat(browser).asking()
+    await held(first)
+    waits = Chat(browser).asking(model="same")
+    await until(lambda: busy.waiting == 1)
+
+    on_another, without_a_gate = await ended(
+        Chat(browser).asking(model="elsewhere"), Chat(browser).asking(model="ungated")
+    )
+    waited = not same.started.is_set()
+    hold.set()
+    await ended(asked, waits)
+
+    assert said(on_another) == "Another server."
+    assert said(without_a_gate) == "Every answer at once."
+    assert waited
+
+
+@pytest.mark.parametrize(
+    ("ending", "recorded_as"),
+    [
+        ("finishes", "completed"),
+        ("fails", "failed"),
+        ("is stopped", "stopped"),
+        ("is cancelled", "interrupted"),
+    ],
+)
+async def test_the_next_turn_gets_in_however_the_one_before_it_ended(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    ending: str,
+    recorded_as: str,
+) -> None:
+    assert migrated
+    gate, hold = Gate(1), asyncio.Event()
+    rest = (
+        [ProviderUnavailableError("the server went away")]
+        if ending == "fails"
+        else [TextDelta(" answer."), DONE]
+    )
+    first = lineup.add("standard", TextDelta("Half an"), hold, *rest, gate=gate)
+    lineup.add("second", TextDelta("The next answer."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    one, two = Chat(browser), Chat(browser)
+    asked_first = one.asking()
+    await held(first)
+    first_turn = await one.running_turn()
+    task = writing(first_turn)
+    asked_second = two.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+
+    match ending:
+        case "finishes" | "fails":
+            hold.set()
+        case "is stopped":
+            await asyncio.wait_for(one.stop(first_turn), PATIENCE_S)
+        case "is cancelled":
+            # From outside, without a halt: a process going down faster than it can say.
+            task.cancel()
+    [next_reader] = await ended(asked_second)
+    await recorded(task)
+    if ending == "is cancelled":
+        asked_first.cancel()  # its stream never got its last event: nothing would end it
+    else:
+        await ended(asked_first)
+
+    assert said(next_reader) == "The next answer."
+    first_answer = (await one.read())["messages"][1]
+    assert first_answer["metadata"]["turn"]["status"] == recorded_as
+
+
+async def test_the_next_turn_waits_until_the_model_before_it_has_closed_its_stream(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any
+) -> None:
+    """Closing a model's stream takes a moment: the connection to its server is closed,
+    and only then does the server stop writing. Until then the server is busy. Here the
+    model asks for a tool, which no turn offers it: the turn ends there, with the
+    model's stream still open, and closes it."""
+    assert migrated
+    gate, hold, let_close = Gate(1), asyncio.Event(), asyncio.Event()
+    tool = ToolCall("call-1", "get_weather", {"city": "Izmir"})
+    first = lineup.add(
+        "standard", TextDelta("Half an answer"), hold, tool, DONE, gate=gate, closes_when=let_close
+    )
+    second = lineup.add("second", TextDelta("The next answer."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    one, two = Chat(browser), Chat(browser)
+    asked_first = one.asking()
+    await held(first)
+    asked_second = two.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+
+    hold.set()
+    await asyncio.wait_for(first.closing.wait(), PATIENCE_S)
+    # A turn let through before the stream began to close was woken before this test
+    # was, and has asked its model by now: it does so in its very next step.
+    asked_while_closing = list(second.requests)
+    let_close.set()
+    first_reader, second_reader = await ended(asked_first, asked_second)
+
+    assert asked_while_closing == []
+    assert chunk(first_reader, "message-metadata")["messageMetadata"]["turn"]["error"] == (
+        "model_error"
+    )
+    assert said(second_reader) == "The next answer."
+
+
+async def test_a_turn_stopped_while_it_waits_ends_at_once_and_leaves_the_others_as_they_were(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    db: AsyncSession,
+    clock: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Stop takes a turn out of the queue. Nothing was written, so nothing is kept or
+    charged, and its model never hears of it. The answer ahead of it goes on, and the
+    one behind it doesn't jump ahead. The log says how long the stopped one waited."""
+    assert migrated
+    gate, hold = Gate(1), asyncio.Event()
+    first = lineup.add(
+        "standard", TextDelta("The first "), hold, TextDelta("answer."), DONE, gate=gate
+    )
+    second = lineup.add("second", TextDelta("Never written."), DONE, gate=gate)
+    third = lineup.add("third", TextDelta("The third answer."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    one, two, three = Chat(browser), Chat(browser), Chat(browser)
+    asked_first = one.asking()
+    await held(first)
+    asked_second = two.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+    asked_third = three.asking(model="third")
+    await until(lambda: gate.waiting == 2)
+    second_turn = await two.running_turn()
+    clock.advance(seconds=20)
+
+    # A stop answers once the turn is recorded: never, if the wait can't be ended.
+    stopped = await asyncio.wait_for(two.stop(second_turn), PATIENCE_S)
+    # No pause is needed to see whether the turn behind slipped through. It would have
+    # been let through when the stopped one left the line, and asked its model in its
+    # very next step; the stop answers only after the stopped turn was recorded, which
+    # takes the database several round trips after that, while other tasks run.
+    behind = (gate.waiting, third.started.is_set(), first.closed.is_set())
+    [second_reader] = await ended(asked_second)
+    hold.set()
+    first_reader, third_reader = await ended(asked_first, asked_third)
+
+    assert stopped.json()["status"] == "stopped"
+    assert behind == (1, False, False)
+    assert (
+        f"turn {second_turn}: waited 20.0 s for the model's server, and didn't get its turn"
+        in caplog.text
+    )
+    assert second.requests == []
+    assert kinds(second_reader) == ["start", "start-step", "finish-step", "finish", "[DONE]"]
+    conversation = await two.read()
+    assert [m["role"] for m in conversation["messages"]] == ["user"]
+    assert (conversation["unanswered"]["status"], conversation["unanswered"]["credits"]) == (
+        "stopped",
+        None,
+    )
+    assert await count(db, UsageEntry) == 2  # the first and the third
+    assert said(first_reader) == "The first answer."
+    assert said(third_reader) == "The third answer."
+
+
+async def test_a_turn_that_waits_longer_than_a_minute_keeps_its_place_its_credits_and_its_stream(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    plans_with: Any,
+    db: AsyncSession,
+    clock: Any,
+    valkey_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn that waits says that it is alive, like one that is written: otherwise it
+    would be given up on, its credits handed back and its stream deleted, while it waits
+    behind a long answer."""
+    assert migrated
+    monkeypatch.setattr(turns, "BEAT", timedelta(milliseconds=10))
+    gate, hold = Gate(1), asyncio.Event()
+    first = lineup.add(
+        "standard", TextDelta("A long "), hold, TextDelta("answer."), DONE, gate=gate
+    )
+    lineup.add("second", TextDelta("At last."), DONE, gate=gate)
+    lineup.add("elsewhere", TextDelta("At once."), DONE)
+    # Each answer holds the guess at its prompt and 512 tokens. With two held, 1,500
+    # leave a third less than its whole room.
+    plans = plans_with(guest=(1_500, 10_000), models=lineup.names)
+    browser = await guest_on(start_app, settings, lineup, plans)
+    one, two = Chat(browser), Chat(browser)
+    asked_first = one.asking()
+    await held(first)
+    writing = uuid.UUID(await one.running_turn())
+    asked_second = two.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+    waiting = uuid.UUID(await two.running_turn())
+
+    statuses = []
+    for _ in range(4):  # three minutes, in steps shorter than the patience with silence
+        clock.advance(seconds=45)
+        # Both turns beat: the one that is written must hold its credits too, for what
+        # the third question is told at the end to be about the one that waits.
+        for turn_id in (writing, waiting):
+            await beaten(partial(_said_alive_now, db, turn_id, clock.now))
+        statuses.append((await two.read())["unanswered"]["status"])
+    async with Valkey.from_url(valkey_url) as valkey:
+        # A beat says the turn is alive, renews its hold, and only then keeps its
+        # stream. A stream kept again after this was renewed, as if it had been silent
+        # for nearly a minute, means a beat at this moment has renewed the hold too.
+        for turn_id in (writing, waiting):
+            key = f"{settings.valkey_prefix}:turn:{turn_id}"
+            await valkey.pexpire(key, 2_000)
+
+            async def kept_again(key: str = key) -> bool:
+                return bool(await valkey.pttl(key) > 2_000)
+
+            await beaten(kept_again)
+    [beside] = await ended(Chat(browser).asking(model="elsewhere"))
+    hold.set()
+    _, second_reader = await ended(asked_first, asked_second)
+
+    assert statuses == ["running"] * 4
+    # Both holds were still there: the one of the turn that waits too.
+    assert chunk(beside, "start")["messageMetadata"]["turn"]["capped_by_usage"] is True
+    assert said(second_reader) == "At last."
+    assert chunk(second_reader, "finish")["messageMetadata"]["turn"]["status"] == "completed"
+
+
+async def _said_alive_now(db: AsyncSession, turn_id: uuid.UUID, now: datetime) -> bool:
+    return await alive_at(db, turn_id) == now
+
+
+async def test_the_reader_of_a_turn_that_waits_is_kept_connected_and_then_reads_the_answer(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert migrated
+    monkeypatch.setattr(turn_events, "TICK", timedelta(milliseconds=10))
+    monkeypatch.setattr(turn_routes, "KEEP_ALIVE_AFTER", timedelta(milliseconds=30))
+    silent: list[uuid.UUID] = []
+    follow = TurnEvents.follow
+
+    async def noted(events: TurnEvents, turn_id: uuid.UUID) -> AsyncIterator[bytes | None]:
+        """What readers are told, with each tick in which there was nothing new noted."""
+        async with aclosing(follow(events, turn_id)) as following:
+            async for event in following:
+                if event is None:
+                    silent.append(turn_id)
+                yield event
+
+    monkeypatch.setattr(TurnEvents, "follow", noted)
+    gate, hold = Gate(1), asyncio.Event()
+    first = lineup.add("standard", TextDelta("First."), hold, DONE, gate=gate)
+    lineup.add("second", TextDelta("Second."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    asked_first = Chat(browser).asking()
+    await held(first)
+    second = Chat(browser)
+    asked_second = second.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+    waiting = uuid.UUID(await second.running_turn())
+
+    # Four silent ticks, 40 ms of them: a line was due after 30.
+    await until(lambda: silent.count(waiting) >= 4)
+    hold.set()
+    _, waited = await ended(asked_first, asked_second)
+
+    lines = waited.text.split("\n\n")
+    assert lines.index(": keep-alive") == 2  # after `start` and `start-step`
+    assert said(waited) == "Second."
+    assert kinds(waited)[-3:] == ["finish-step", "finish", "[DONE]"]
+
+
+async def test_a_shutdown_ends_the_turns_that_wait_too_and_leaves_the_gate_free(
+    open_app: Any,
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    db: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert migrated
+    gate, never = Gate(1), asyncio.Event()
+    first = lineup.add(
+        "standard", TextDelta("Half an "), TextDelta("answer"), never, DONE, gate=gate
+    )
+    second = lineup.add("second", TextDelta("Never written."), DONE, gate=gate)
+    catalog = lineup.catalog()
+    one: Chat
+    two: Chat
+    # A shutdown that can't end the turn that waits would wait for it: in time, or never.
+    async with asyncio.timeout(PATIENCE_S), open_app(settings, catalog=catalog) as browser:
+        await browser.post("/api/session/guest")
+        one, two = Chat(browser), Chat(browser)
+        asked_first = one.asking()
+        await held(first)
+        asked_second = two.asking(model="second")
+        await until(lambda: gate.waiting == 1)
+        cookies = dict(browser.cookies)
+        # Leaving the block is the shutdown.
+    first_reader, second_reader = await ended(asked_first, asked_second)
+
+    for reader in (first_reader, second_reader):
+        assert chunk(reader, "finish")["messageMetadata"]["turn"]["status"] == "interrupted"
+    assert second.requests == []
+    assert said(second_reader) == ""
+    assert await count(db, UsageEntry) == 0
+    waited = chunk(second_reader, "start")["messageMetadata"]["turn"]["id"]
+    assert f"turn {waited}: waited 0.0 s for the model's server, and didn't get its turn" in (
+        caplog.text
+    )
+
+    # The same server, behind the same gate, takes the next answer at once.
+    second.script = [TextDelta("Asked again, and answered."), DONE]
+    restarted = await start_app(settings, catalog=catalog)
+    restarted.cookies.update(cookies)
+    again = await asyncio.wait_for(
+        restarted.post(
+            f"{two.path}/turns", json={"answer_to": str(two.question), "model": "second"}
+        ),
+        PATIENCE_S,
+    )
+
+    assert (again.status_code, said(again)) == (200, "Asked again, and answered.")
+
+
+# --- Answers at once, per account -----------------------------------------------------
+
+
+async def test_one_answer_more_than_the_plan_allows_at_once_is_refused_and_leaves_nothing(
+    scripted: Any,
+    plans_with: Any,
+    db: AsyncSession,
+    settings: Settings,
+    valkey_url: str,
+) -> None:
+    hold = asyncio.Event()
+    model, browser = await scripted(
+        TextDelta("Half an "), hold, TextDelta("answer."), DONE, plans=plans_with(answers_at_once=1)
+    )
+    busy, another = Chat(browser), Chat(browser)
+    asked = busy.asking()
+    await held(model)
+    turn_id = await busy.running_turn()
+    before = (await browser.get("/api/usage")).json()
+
+    refused = await asyncio.wait_for(another.asking("And meanwhile?"), PATIENCE_S)
+
+    after = (await browser.get("/api/usage")).json()
+    rows = (await count(db, Conversation), await count(db, Message), await count(db, Turn))
+    async with Valkey.from_url(valkey_url) as valkey:
+        streams = await valkey.keys(f"{settings.valkey_prefix}:turn:*")
+    hold.set()
+    [answered] = await ended(asked)
+
+    assert refused.status_code == 429
+    assert refused.headers["content-type"] == "application/problem+json"
+    assert "retry-after" not in refused.headers
+    assert refused.json() == {
+        "type": "about:blank",
+        "title": "Too Many Requests",
+        "status": 429,
+        "detail": "An answer is already being written for you, and your plan allows one "
+        "at a time. Wait for it to finish, or stop it.",
+        "at_once": 1,
+    }
+    # The question was never asked: no conversation, no message, no turn, nothing held,
+    # no stream.
+    assert (await browser.get(another.path)).status_code == 404
+    assert rows == (1, 1, 1)
+    assert len(model.requests) == 1
+    assert after == before
+    assert streams == [f"{settings.valkey_prefix}:turn:{turn_id}".encode()]
+    assert said(answered) == "Half an answer."
+
+
+async def test_an_answer_that_has_ended_makes_room_for_the_next(
+    scripted: Any, plans_with: Any
+) -> None:
+    hold = asyncio.Event()
+    model, browser = await scripted(
+        TextDelta("An answer."), hold, DONE, plans=plans_with(answers_at_once=2)
+    )
+    first, second, third = Chat(browser), Chat(browser), Chat(browser)
+    asked = [first.asking(), second.asking()]
+    await until(lambda: len(model.requests) == 2)
+
+    refused = await asyncio.wait_for(third.asking("A third?"), PATIENCE_S)
+    hold.set()
+    await ended(*asked)
+    model.script = [TextDelta("Now there is room."), DONE]
+    [answered] = await ended(third.asking("A third?"))  # the same message: it was never kept
+
+    assert (refused.status_code, refused.json()["at_once"]) == (429, 2)
+    assert refused.json()["detail"] == (
+        "2 answers are already being written for you, as many as your plan allows at "
+        "once. Wait for one to finish, or stop one."
+    )
+    assert said(answered) == "Now there is room."
+
+
+async def test_an_account_at_its_limit_keeps_no_other_account_from_asking(
+    scripted: Any, plans_with: Any, start_app: Any, settings: Settings
+) -> None:
+    hold = asyncio.Event()
+    model, browser = await scripted(
+        TextDelta("Half an "), hold, TextDelta("answer."), DONE, plans=plans_with(answers_at_once=1)
+    )
+    asked = Chat(browser).asking()
+    await held(model)
+    mine = await asyncio.wait_for(Chat(browser).asking("Mine, meanwhile?"), PATIENCE_S)
+    stranger = await start_app(settings, plans=plans_with(answers_at_once=1))
+    await stranger.post("/api/session/guest")
+
+    [theirs] = await ended(Chat(stranger).asking("Theirs, meanwhile?"))
+    hold.set()
+    await ended(asked)
+
+    assert mine.status_code == 429
+    assert (theirs.status_code, said(theirs)) == (200, "Echo: Theirs, meanwhile?")
+
+
+async def test_a_turn_left_by_a_process_that_died_stops_counting_a_minute_after_it_was_heard_from(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    plans_with: Any,
+    db: AsyncSession,
+    clock: Any,
+) -> None:
+    """Nothing gives up on it: its conversation isn't looked at. It only stops counting,
+    by the rule that would give up on it."""
+    assert migrated
+    browser = await start_app(settings, plans=plans_with(answers_at_once=1))
+    await browser.post("/api/session/guest")
+    left = await left_running(db, Chat(browser), clock)
+
+    clock.advance(seconds=59)
+    too_early = await asyncio.wait_for(Chat(browser).asking("Is it gone?"), PATIENCE_S)
+    clock.advance(seconds=1)
+    [in_time] = await ended(Chat(browser).asking("And now?"))
+    await db.refresh(left)
+
+    assert too_early.status_code == 429
+    assert (in_time.status_code, said(in_time)) == (200, "Echo: And now?")
+    assert left.status == "running"
+
+
+async def test_a_turn_that_waits_for_its_models_server_counts_as_being_written(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, plans_with: Any
+) -> None:
+    assert migrated
+    gate, hold = Gate(1), asyncio.Event()
+    model = lineup.add("standard", TextDelta("An answer."), hold, DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup, plans_with(answers_at_once=2))
+    asked = [Chat(browser).asking()]
+    await held(model)
+    asked.append(Chat(browser).asking())
+    await until(lambda: gate.waiting == 1)
+
+    refused = await asyncio.wait_for(Chat(browser).asking(), PATIENCE_S)
+    hold.set()
+    await ended(*asked)
+
+    assert (refused.status_code, refused.json()["at_once"]) == (429, 2)
+
+
+async def test_another_answer_to_an_old_question_counts_like_a_new_question(
+    scripted: Any, plans_with: Any
+) -> None:
+    model, browser = await scripted(
+        TextDelta("An answer."), DONE, plans=plans_with(answers_at_once=1)
+    )
+    answered = Chat(browser)
+    await ended(answered.asking())
+    hold = asyncio.Event()
+    model.script = [TextDelta("Half"), hold, DONE]
+    busy = Chat(browser)
+    asked = busy.asking()
+    await held(model)
+
+    again = {"answer_to": str(answered.question)}
+    refused = await asyncio.wait_for(browser.post(f"{answered.path}/turns", json=again), PATIENCE_S)
+    hold.set()
+    await ended(asked)
+    model.script = [TextDelta("Another answer."), DONE]
+    afterwards = await asyncio.wait_for(
+        browser.post(f"{answered.path}/turns", json=again), PATIENCE_S
+    )
+
+    assert (refused.status_code, refused.json()["at_once"]) == (429, 1)
+    assert (afterwards.status_code, said(afterwards)) == (200, "Another answer.")
+
+
+async def waits_for_a_lock(db: AsyncSession) -> bool:
+    """Whether a transaction on this test's database has asked for an advisory lock and
+    waits for it, as Postgres says."""
+    waiting = await db.scalar(
+        text(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted "
+            "AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+        )
+    )
+    await db.commit()  # the next look starts from what the database has then
+    return bool(waiting)
+
+
+async def test_two_questions_at_the_same_moment_do_not_both_pass_a_limit_of_one(
+    scripted: Any, plans_with: Any, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that is being started is in nobody's count until its transaction is
+    committed. Two questions counted side by side would each find none, and both pass.
+    Here the first is held between its count and its commit, and the second comes: it
+    must wait for the first's transaction to end before it counts."""
+    _, browser = await scripted(TextDelta("An answer."), DONE, plans=plans_with(answers_at_once=1))
+    counted, go_on = asyncio.Event(), asyncio.Event()
+    opening = TurnEvents.open
+
+    async def held_before_its_commit(events: TurnEvents, turn_id: uuid.UUID, first: bytes) -> None:
+        if not counted.is_set():
+            counted.set()
+            await go_on.wait()
+        await opening(events, turn_id, first)
+
+    monkeypatch.setattr(TurnEvents, "open", held_before_its_commit)
+    first = Chat(browser).asking("One")
+    try:
+        await asyncio.wait_for(counted.wait(), PATIENCE_S)
+        second = Chat(browser).asking("Two, at the same moment")
+        # The second question waits for the first's transaction, before it counts.
+        await eventually(lambda: waits_for_a_lock(db))
+    finally:
+        go_on.set()  # whatever happened: the first one goes on, and the test can end
+    answered, refused = await ended(first, second)
+
+    assert (answered.status_code, refused.status_code) == (200, 429)
+
+
+async def test_a_plan_that_says_nothing_of_answers_at_once_lets_an_account_have_many(
+    scripted: Any,
+) -> None:
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("An answer."), hold, DONE)
+    asked = [Chat(browser).asking() for _ in range(4)]
+    await until(lambda: len(model.requests) == 4)
+    hold.set()
+    responses = await ended(*asked)
+
+    assert {response.status_code for response in responses} == {200}
+
+
+# --- Readers, per account -------------------------------------------------------------
+
+
+@pytest.fixture
+def following(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
+    """The turns readers have begun to follow, an entry for each reader. A reader is
+    counted against its account before it follows: one that is here has its place."""
+    followed: list[uuid.UUID] = []
+    follow = TurnEvents.follow
+
+    def noted(events: TurnEvents, turn_id: uuid.UUID) -> Any:
+        followed.append(turn_id)
+        return follow(events, turn_id)
+
+    monkeypatch.setattr(TurnEvents, "follow", noted)
+    return followed
+
+
+TOO_MANY_READERS = (
+    "You already have 6 windows or tabs reading answers as they are written, and an "
+    "account may have 6 at once. Close one of them, and try again."
+)
+
+
+async def test_an_account_reads_along_in_six_places_at_once_and_a_seventh_is_refused(
+    scripted: Any, following: list[uuid.UUID]
+) -> None:
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("Half an "), hold, TextDelta("answer."), DONE)
+    chat = Chat(browser)
+    asked = chat.asking()  # the first reader: the question's own
+    await held(model)
+    turn_id = await chat.running_turn()
+    joined = [chat.reading_along(turn_id) for _ in range(5)]
+    await until(lambda: len(following) == 6)
+
+    seventh = await chat.read_along(turn_id)
+    hold.set()
+    readers = await ended(asked, *joined)
+
+    assert seventh.status_code == 429
+    assert seventh.json()["detail"] == TOO_MANY_READERS
+    assert "retry-after" not in seventh.headers
+    assert [said(reader) for reader in readers] == ["Half an answer."] * 6
+
+
+async def test_the_readers_of_one_account_keep_no_other_account_from_reading_along(
+    scripted: Any, following: list[uuid.UUID]
+) -> None:
+    """Both accounts on the same app: readers are counted in the process."""
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("Half an "), hold, TextDelta("answer."), DONE)
+    mine = Chat(browser)
+    asked_mine = mine.asking()
+    await held(model)
+    my_turn = await mine.running_turn()
+    joined_mine = [mine.reading_along(my_turn) for _ in range(5)]
+    await until(lambda: len(following) == 6)  # all six sent, and reading
+
+    # Another account, in the same browser: a session of its own.
+    browser.cookies.clear()
+    await browser.post("/api/session/guest")
+    theirs = Chat(browser)
+    asked_theirs = theirs.asking("Theirs")
+    await until(lambda: len(following) == 7)
+    joined_theirs = theirs.reading_along(await theirs.running_turn())
+    await until(lambda: len(following) == 8)  # it reads: it wasn't refused
+    hold.set()
+    readers = await ended(asked_mine, *joined_mine, asked_theirs, joined_theirs)
+
+    assert [said(reader) for reader in readers] == ["Half an answer."] * 8
+
+
+async def test_a_reader_that_has_ended_makes_room(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, following: list[uuid.UUID]
+) -> None:
+    assert migrated
+    first_hold, second_hold = asyncio.Event(), asyncio.Event()
+    first = lineup.add("standard", TextDelta("One."), first_hold, DONE)
+    second = lineup.add("second", TextDelta("Two."), second_hold, DONE)
+    browser = await guest_on(start_app, settings, lineup)
+    one, two = Chat(browser), Chat(browser)
+    asked_first = one.asking()
+    await held(first)
+    asked_second = two.asking(model="second")
+    await until(lambda: len(second.requests) == 1)
+    first_turn, second_turn = await one.running_turn(), await two.running_turn()
+    first_joined = [one.reading_along(first_turn) for _ in range(2)]
+    second_joined = [two.reading_along(second_turn) for _ in range(2)]
+    await until(lambda: len(following) == 6)
+    full = await one.read_along(first_turn)
+
+    first_hold.set()
+    await ended(asked_first, *first_joined)  # three readers have ended
+    more = [two.reading_along(second_turn) for _ in range(3)]
+    await until(lambda: len(following) == 9)
+    full_again = await two.read_along(second_turn)
+    second_hold.set()
+    readers = await ended(asked_second, *second_joined, *more)
+
+    assert (full.status_code, full_again.status_code) == (429, 429)
+    assert [said(reader) for reader in readers] == ["Two."] * 6
+
+
+async def test_the_reader_of_a_turn_just_started_is_never_refused_and_counts(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, following: list[uuid.UUID]
+) -> None:
+    assert migrated
+    first_hold, second_hold = asyncio.Event(), asyncio.Event()
+    first = lineup.add("standard", TextDelta("One."), first_hold, DONE)
+    second = lineup.add("second", TextDelta("Two."), second_hold, DONE)
+    browser = await guest_on(start_app, settings, lineup)
+    one, two = Chat(browser), Chat(browser)
+    asked_first = one.asking()
+    await held(first)
+    first_turn = await one.running_turn()
+    first_joined = [one.reading_along(first_turn) for _ in range(5)]
+    await until(lambda: len(following) == 6)
+
+    asked_second = two.asking(model="second")  # a seventh reader
+    await until(lambda: len(following) == 7)
+    past_the_limit = await one.read_along(first_turn)
+    first_hold.set()
+    await ended(asked_first, *first_joined)  # six have ended: the second question's is left
+    second_turn = await two.running_turn()
+    second_joined = [two.reading_along(second_turn) for _ in range(5)]
+    await until(lambda: len(following) == 12)
+    full = await two.read_along(second_turn)
+    second_hold.set()
+    readers = await ended(asked_second, *second_joined)
+
+    assert len(second.requests) == 1
+    assert past_the_limit.json()["detail"] == (
+        "You already have 7 windows or tabs reading answers as they are written, and an "
+        "account may have 6 at once. Close 2 of them, and try again."
+    )
+    assert full.status_code == 429  # 1 + 5: the question's own reader counts
+    assert [said(reader) for reader in readers] == ["Two."] * 6
+
+
+async def test_nothing_to_read_along_with_takes_no_room(
+    scripted: Any, following: list[uuid.UUID]
+) -> None:
+    """A turn that has ended (204), or none at all (404): nothing is being read."""
+    model, browser = await scripted(TextDelta("An answer."), DONE)
+    done = Chat(browser)
+    [answered] = await ended(done.asking())
+    ended_turn = chunk(answered, "start")["messageMetadata"]["turn"]["id"]
+    hold = asyncio.Event()
+    model.script = [TextDelta("Half an "), hold, TextDelta("answer."), DONE]
+    chat = Chat(browser)
+    asked = chat.asking()
+    await held(model)
+    turn_id = await chat.running_turn()
+    already = len(following)
+    joined = [chat.reading_along(turn_id) for _ in range(4)]  # five readers
+    await until(lambda: len(following) == already + 4)
+
+    nothing = [await done.read_along(ended_turn) for _ in range(3)]
+    no_such = [await chat.read_along(new_id()) for _ in range(3)]
+    joined.append(chat.reading_along(turn_id))  # the sixth
+    await until(lambda: len(following) == already + 5)
+    hold.set()
+    readers = await ended(asked, *joined)
+
+    assert [response.status_code for response in nothing] == [204] * 3
+    assert [response.status_code for response in no_such] == [404] * 3
+    assert [said(reader) for reader in readers] == ["Half an answer."] * 6
+
+
+async def test_a_reader_whose_response_could_send_nothing_is_given_back(valkey_url: str) -> None:
+    """A web server that knows the client is gone says so at the response's first send
+    (ASGI 2.4). Then the stream the response would read is never begun, and only the
+    response itself can give the reader back. Uvicorn tells it otherwise, and the stream
+    always begins: `test_turns_live.py` has that."""
+    readers = turn_readers.TurnReaders()
+    account = new_id()
+
+    async def gone(message: Any) -> None:
+        raise OSError(f"the client has gone, and {message['type']} can't be sent")
+
+    async def nothing_more() -> dict[str, Any]:
+        return {"type": "http.disconnect"}
+
+    async with Valkey.from_url(valkey_url) as valkey:
+        response = turn_routes._following(TurnEvents(valkey), new_id(), readers.join(account))
+        with pytest.raises(ClientDisconnect):
+            await response({"type": "http", "asgi": {"spec_version": "2.4"}}, nothing_more, gone)
+
+    places = [readers.join(account) for _ in range(turn_readers.READERS_PER_ACCOUNT)]
+    with pytest.raises(turn_readers.TooManyReadersError):
+        readers.join(account)
+    assert len(places) == 6
 
 
 # --- The description ------------------------------------------------------------------

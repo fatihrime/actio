@@ -3,8 +3,8 @@
 Both are read from a TOML file, `config/plans.toml`:
 
 - a **price** for each model on offer, in credits per million tokens;
-- **plans:** how many credits a session and a week allow. Guests get one plan, and
-  accounts another.
+- **plans:** how many credits a session and a week allow, and how many answers may be
+  written at once. Guests get one plan, and accounts another.
 
 `load` reads and checks the file. A mistake raises `PlansError`, which says where the
 file is and what is wrong in it. `Plans` is what the rest of Actio asks: which plan an
@@ -81,7 +81,8 @@ class PriceEntry(BaseModel):
 
 
 class PlanEntry(BaseModel):
-    """One `[plans.<name>]` table: how many credits each window allows."""
+    """One `[plans.<name>]` table: how many credits each window allows, and how many
+    answers may be written at once."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -90,6 +91,9 @@ class PlanEntry(BaseModel):
     """Left out: a session has no limit of its own."""
     week_credits: int | None = Field(default=None, ge=0, le=MAX_CREDITS)
     """Left out: a week has no limit."""
+    answers_at_once: int | None = Field(default=None, ge=1)
+    """How many answers one account may have being written at the same time, in all its
+    conversations. Left out: as many as it asks for."""
 
     @model_validator(mode="after")
     def _lets_a_session_reach_its_limit(self) -> Self:
@@ -172,6 +176,8 @@ class Plan:
     title: str
     session_credits: int | None
     week_credits: int | None
+    answers_at_once: int | None
+    """How many answers an account may have being written at once. `None`: no limit."""
 
 
 class Plans:
@@ -179,7 +185,9 @@ class Plans:
 
     def __init__(self, file: PlansFile) -> None:
         self._plans = {
-            name: Plan(name, entry.title, entry.session_credits, entry.week_credits)
+            name: Plan(
+                name, entry.title, entry.session_credits, entry.week_credits, entry.answers_at_once
+            )
             for name, entry in file.plans.items()
         }
         self._guests = self._plans[file.guests]

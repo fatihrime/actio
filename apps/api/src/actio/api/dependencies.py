@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from actio.api.problems import Problem
 from actio.catalog import Catalog
 from actio.chat.events import TurnEvents
+from actio.chat.readers import TurnReaders
 from actio.chat.running import TurnRunner
 from actio.core.ids import new_id
 from actio.core.resources import Resources
@@ -86,11 +87,18 @@ def get_turn_runner(request: Request) -> TurnRunner:
     return runner
 
 
+def get_turn_readers(request: Request) -> TurnReaders:
+    readers: TurnReaders = request.app.state.turn_readers
+    return readers
+
+
 Models = Annotated[Catalog, Depends(get_catalog)]
 Events = Annotated[TurnEvents, Depends(get_turn_events)]
 """What running turns stream, to append to and to follow."""
 Runner = Annotated[TurnRunner, Depends(get_turn_runner)]
 """The turns this process is writing: to start one, and to stop one."""
+Readers = Annotated[TurnReaders, Depends(get_turn_readers)]
+"""The responses this process has open that read along with a turn, per account."""
 Usage = Annotated[UsageLimits, Depends(get_usage_limits)]
 """The usage limits: what an answer may cost its account. Not to be confused with
 `Limits` (`actio.api.rate_limits`), which counts how often something is tried."""

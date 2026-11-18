@@ -34,6 +34,7 @@ output = 0
 title = "Guest"
 session_credits = 25_000
 week_credits = 100_000
+answers_at_once = 2
 
 [plans.free]
 title = "Free"
@@ -86,6 +87,18 @@ def test_the_end_to_end_stack_has_a_limit_within_reach_and_a_model_that_costs_no
     assert loaded.free_models() == ["local"]
     assert loaded.plan_for(is_guest=False).session_credits == 500
     assert loaded.plan_for(is_guest=True).session_credits == 100_000
+    # A guest has two answers written at once, and a third is refused: turns.spec.ts.
+    assert loaded.plan_for(is_guest=True).answers_at_once == 2
+
+
+@pytest.mark.parametrize("folder", ["config", "deploy/e2e/config"], ids=["make up", "make e2e"])
+def test_a_guest_has_two_answers_written_at_once_and_an_account_three(folder: str) -> None:
+    offered = catalog.read_file(ROOT / folder / "models.toml").models
+
+    loaded = plans.load(ROOT / folder / "plans.toml", models=offered)
+
+    assert loaded.plan_for(is_guest=True).answers_at_once == 2
+    assert loaded.plan_for(is_guest=False).answers_at_once == 3
 
 
 def test_a_file_says_what_models_cost_and_what_each_plan_allows(tmp_path: Path) -> None:
@@ -97,6 +110,8 @@ def test_a_file_says_what_models_cost_and_what_each_plan_allows(tmp_path: Path) 
     assert file.prices["local"].cached_input is None
     assert file.plans["free"].week_credits == 600_000
     assert file.plans["staff"].session_credits is None
+    assert file.plans["guest"].answers_at_once == 2
+    assert file.plans["free"].answers_at_once is None  # as many as it asks for
 
 
 def test_a_missing_file_says_where_it_looked_and_how_to_point_elsewhere(tmp_path: Path) -> None:
@@ -158,6 +173,21 @@ MISTAKES = {
     "a name with a capital letter": ("[plans.staff]", "[plans.Staff]", "plans.Staff"),
     "a plan without a title": ('title = "Staff"', "", "plans.staff.title"),
     "an answer of no tokens": ("min_answer_tokens = 256", "min_answer_tokens = 0", "min_answer"),
+    "no answers at once": (
+        "answers_at_once = 2",
+        "answers_at_once = 0",
+        "plans.guest.answers_at_once",
+    ),
+    "fewer answers at once than none": (
+        "answers_at_once = 2",
+        "answers_at_once = -2",
+        "plans.guest.answers_at_once",
+    ),
+    "answers at once written as a word": (
+        "answers_at_once = 2",
+        'answers_at_once = "two"',
+        "plans.guest.answers_at_once",
+    ),
     "the same plan twice": ("[plans.staff]", "[plans.free]", "valid TOML"),
     "a line that stops half-way": ("session_hours = 5", "session_hours = ", "valid TOML"),
 }
@@ -242,6 +272,7 @@ def test_a_guest_has_one_plan_and_an_account_another() -> None:
 
     assert (guest.name, guest.title, guest.session_credits) == ("guest", "Guest", 25_000)
     assert (account.name, account.title, account.week_credits) == ("free", "Free", 600_000)
+    assert (guest.answers_at_once, account.answers_at_once) == (2, None)
 
 
 def test_a_plan_has_a_session_that_opens_when_used_and_a_week_by_the_calendar() -> None:

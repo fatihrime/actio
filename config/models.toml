@@ -25,6 +25,16 @@ default = "standard"
 #   kind = "openai-compatible"
 #   url = "http://127.0.0.1:1234/v1"
 #   api_key_env = "LMSTUDIO_API_KEY"
+#
+# answers_at_once: how many answers the server writes at the same time, across all the
+#   models it runs. An answer that would be one more waits its turn inside Actio, which
+#   asks the server only once it has room, so that the wait doesn't count against the
+#   server's time to answer. Left out, it is 1 for "ollama", and there is no limit for
+#   "openai-compatible", which may write many at once. Set it to what the server was
+#   started to handle in parallel: OLLAMA_NUM_PARALLEL for Ollama, the number of parallel
+#   requests for LM Studio or llama.cpp's server:
+#
+#   answers_at_once = 4
 
 [providers.ollama]
 kind = "ollama"

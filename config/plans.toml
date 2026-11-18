@@ -51,15 +51,21 @@ cached_input = 25_000
 # title            what people see
 # session_credits  how much one session allows
 # week_credits     how much one week allows
+# answers_at_once  how many answers one account may have being written at the same
+#                  time, in all its conversations. One more is refused, with the advice
+#                  to wait for one to finish or to stop one. A turn that waits for the
+#                  model's server to have room (models.toml) counts too.
 #
-# Leave a line out and that window has no limit. A plan with neither limits nothing.
+# Leave a line out and that has no limit. A plan with none of the three limits nothing.
 
 [plans.guest]
 title = "Guest"
 session_credits = 25_000
 week_credits = 100_000
+answers_at_once = 2
 
 [plans.free]
 title = "Free"
 session_credits = 100_000
 week_credits = 600_000
+answers_at_once = 3

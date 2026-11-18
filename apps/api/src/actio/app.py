@@ -12,6 +12,7 @@ from actio.api import conversations, health, identity, problems, turns, usage
 from actio.api.same_origin import SameOriginOnly
 from actio.catalog import Catalog, open_catalog
 from actio.chat.events import TurnEvents
+from actio.chat.readers import TurnReaders
 from actio.chat.running import TurnRunner
 from actio.core.resources import open_resources
 from actio.core.settings import Settings
@@ -35,7 +36,9 @@ Actio's HTTP API, which its web app is built on.
   answer is written whether or not anyone reads along. It can be joined again, and
   stopped, by the turn's id.
 - **Usage is limited** per session and per week. `GET /api/usage` says how much is
-  left, and a question that no longer fits is answered 429, with when it will.
+  left, and a question that no longer fits is answered 429, with when it will. A plan
+  may also limit how many answers are written for one account at once, and an account
+  reads along with only so many at once: past either, the answer is 429 too.
 """
 
 
@@ -79,6 +82,7 @@ def create_app(
                 resources.valkey, prefix=f"{settings.valkey_prefix}:turn"
             )
             app.state.turn_runner = runner = TurnRunner()
+            app.state.turn_readers = TurnReaders()
             # The web server tells the application to shut down only after the
             # requests it was answering have ended. The answers being written have to
             # hear it sooner, so that they end while their readers are still there.

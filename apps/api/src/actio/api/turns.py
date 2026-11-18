@@ -25,6 +25,12 @@ A turn costs credits, and an account has only so many per session and per week
 that doesn't fit is answered 429, with the moment the limit starts over, and nothing of
 it is stored: the question was never asked.
 
+An account's plan may also say how many answers it may have being written at once. A
+turn that would be one more is answered 429 as well, before anything is kept or held.
+And an account has only so many readers open (`actio.chat.readers`): joining a turn
+beyond them is answered 429. The reader of the request that starts a turn is never
+refused, and counts.
+
 The conversation's and the question's ids are chosen by whoever sends them, as a
 browser does before it has heard from the server. The question's id also makes a
 repeated request harmless: the same message is never asked twice.
@@ -43,6 +49,7 @@ from fastapi import APIRouter, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.types import Receive, Scope, Send
 
 from actio.api import ui_stream
 from actio.api.conversations import MessageMetadata, OwnConversation, TurnOut
@@ -56,6 +63,7 @@ from actio.api.dependencies import (
     Models,
     NewId,
     Now,
+    Readers,
     Runner,
     Usage,
 )
@@ -67,6 +75,7 @@ from actio.chat import answering, context, tree, turns
 from actio.chat.answering import Ended, Halt
 from actio.chat.events import EventsLostError, EventsUnavailableError, TurnEvents
 from actio.chat.parts import TextPart
+from actio.chat.readers import Reader, TooManyReadersError
 from actio.chat.turns import Begun
 from actio.identity.sessions import Principal
 from actio.usage.limits import (
@@ -163,7 +172,9 @@ class TurnRequest(BaseModel):
             "description": "Too many messages in a short time, or a usage limit is "
             "reached. `Retry-After` says how long to wait. For a usage limit, `window` "
             "names the one that is full, `resets_at` says when it starts over, and "
-            "`alternatives` lists the models that cost nothing."
+            "`alternatives` lists the models that cost nothing. Or as many answers are "
+            "being written as the plan allows at once, which `at_once` says: nobody "
+            "knows when one ends, so there is no `Retry-After`."
         },
         503: {
             "description": "The model can't answer right now: `model_status` says why. "
@@ -182,6 +193,7 @@ async def start_turn(
     usage: Usage,
     events: Events,
     runner: Runner,
+    readers: Readers,
     resources: AppResources,
     clock: Clock,
     now: Now,
@@ -202,7 +214,10 @@ async def start_turn(
     if body.thinking and not status.thinking:
         raise Problem(422, "This model can't reason before it answers.", model=offered.name)
 
-    begun = await _begin(db, body, conversation_id, principal.user_id, offered, new_id(), now)
+    plan = usage.plans.plan_for(is_guest=principal.is_guest)
+    begun = await _begin(
+        db, body, conversation_id, principal.user_id, offered, new_id(), now, plan.answers_at_once
+    )
     request = ChatRequest(
         model=offered.model,
         messages=context.for_model(begun.history, now=now),
@@ -252,7 +267,8 @@ async def start_turn(
             halt,
         ),
     )
-    return _following(events, turn.id)
+    # The turn has started: its own reader is part of it, however many the account has.
+    return _following(events, turn.id, readers.start(principal.user_id))
 
 
 @router.get(
@@ -270,10 +286,21 @@ async def start_turn(
             "conversation for what it left."
         },
         **NO_SUCH_TURN,
+        429: {
+            "description": "The account already has six readers open, or more: "
+            "responses that read along with a turn. Those of the requests that started "
+            "the turns count, and are never refused."
+        },
     },
 )
 async def follow_turn(
-    turn_id: uuid.UUID, conversation: OwnConversation, db: Database, events: Events, now: Now
+    turn_id: uuid.UUID,
+    conversation: OwnConversation,
+    principal: CurrentPrincipal,
+    db: Database,
+    events: Events,
+    readers: Readers,
+    now: Now,
 ) -> Response:
     """Read along with a turn that is being written: after a reload, after a lost
     connection, or from another window.
@@ -289,7 +316,11 @@ async def follow_turn(
         raise Problem(404, "This conversation has no such turn.")
     if turn.status != "running":
         return Response(status_code=204)
-    return _following(events, turn.id)
+    try:
+        reader = readers.join(principal.user_id)
+    except TooManyReadersError as error:
+        raise Problem(429, _too_many_readers(error.reading, error.at_once)) from None
+    return _following(events, turn.id, reader)
 
 
 @router.post(
@@ -325,6 +356,7 @@ async def _begin(
     offered: OfferedModel,
     turn_id: uuid.UUID,
     now: datetime,
+    answers_at_once: int | None,
 ) -> Begun:
     """Start the turn, or say as a problem why it can't start."""
     shared: dict[str, Any] = {
@@ -334,6 +366,7 @@ async def _begin(
         "thinking": body.thinking,
         "turn_id": turn_id,
         "now": now,
+        "answers_at_once": answers_at_once,
     }
     try:
         if body.message is not None:
@@ -371,6 +404,36 @@ async def _begin(
         ) from None
     except turns.IdTakenError:
         raise Problem(409, "This id is already in use. Choose another.") from None
+    except turns.TooManyAnswersError as error:
+        raise _too_many_answers(error.running, error.at_once) from None
+
+
+def _too_many_answers(running: int, at_once: int) -> Problem:
+    """The 429 for a turn that would be one more answer than the plan allows at once.
+    No `Retry-After`: nobody knows when an answer ends. `at_once` is the plan's limit."""
+    if running == 1:
+        said = (
+            "An answer is already being written for you, and your plan allows one at a "
+            "time. Wait for it to finish, or stop it."
+        )
+    else:
+        share = "as many as" if running == at_once else "more than"
+        said = (
+            f"{running} answers are already being written for you, {share} your plan "
+            "allows at once. Wait for one to finish, or stop one."
+        )
+    return Problem(429, said, at_once=at_once)
+
+
+def _too_many_readers(reading: int, at_once: int) -> str:
+    """Why a join is refused: the account has as many readers open as it may, or more,
+    since the reader of a turn just started is never refused."""
+    to_close = reading - at_once + 1
+    return (
+        f"You already have {reading} windows or tabs reading answers as they are "
+        f"written, and an account may have {at_once} at once. Close "
+        f"{'one' if to_close == 1 else to_close} of them, and try again."
+    )
 
 
 async def _reserve(
@@ -545,11 +608,26 @@ async def _write(
     await out.end()
 
 
-def _following(events: TurnEvents, turn_id: uuid.UUID) -> StreamingResponse:
-    """The response that reads along with a turn."""
-    return StreamingResponse(
-        _read(events, turn_id), media_type=ui_stream.MEDIA_TYPE, headers=ui_stream.HEADERS
-    )
+def _following(events: TurnEvents, turn_id: uuid.UUID, reader: Reader) -> StreamingResponse:
+    """The response that reads along with a turn, as `reader`."""
+    return _Reading(reader, _read(events, turn_id))
+
+
+class _Reading(StreamingResponse):
+    """A response that reads along with a turn. Its reader counts against its account
+    until the response is over, however that came about: the stream ended, the client
+    left, something failed, or the client was gone before anything could be sent, and
+    the stream was never read at all."""
+
+    def __init__(self, reader: Reader, content: AsyncIterator[bytes]) -> None:
+        super().__init__(content, media_type=ui_stream.MEDIA_TYPE, headers=ui_stream.HEADERS)
+        self._reader = reader
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._reader.leave()
 
 
 async def _read(events: TurnEvents, turn_id: uuid.UUID) -> AsyncIterator[bytes]:

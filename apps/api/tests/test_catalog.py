@@ -5,6 +5,7 @@ No model server runs here. Ollama is stood in for by a function that answers its
 and an OpenAI-compatible server by fakellm.
 """
 
+import asyncio
 import json
 import tomllib
 from datetime import UTC, datetime, timedelta
@@ -15,7 +16,14 @@ import httpx2
 import pytest
 
 from actio import catalog as catalogs
-from actio.catalog import CatalogError, CatalogFile, ModelStatus, UnknownModelError, read_file
+from actio.catalog import (
+    CatalogError,
+    CatalogFile,
+    Gate,
+    ModelStatus,
+    UnknownModelError,
+    read_file,
+)
 from actio_fakellm.app import DEFAULT_MODELS as FAKE_MODELS
 from actio_fakellm.app import create_app as create_fake_llm
 from actio_llm import Ollama, OpenAICompatible
@@ -105,6 +113,7 @@ def test_the_file_in_the_repository_is_valid() -> None:
     assert file.default in file.models
     standard = file.models["standard"]
     assert file.providers[standard.provider].kind == "ollama"
+    assert file.providers[standard.provider].at_once == 1  # one answer at a time
     assert standard.model == "qwen3.5:4b-q4_K_M"
 
 
@@ -120,6 +129,8 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
     assert provider.url == "http://fakellm:8100/v1"  # the container's name and port
     assert standard.model in FAKE_MODELS
     assert standard.thinking is True  # so a test can ask for reasoning
+    # Every answer is asked at once: the tests run side by side, on one fake.
+    assert provider.at_once is None
 
 
 def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:
@@ -192,6 +203,16 @@ MISTAKES = {
         "valid TOML",
     ),
     "a line that stops half-way": ('default = "standard"', "default = ", "valid TOML"),
+    "a server that writes no answers": (
+        'url = "http://lab.internal:8000/v1"',
+        'url = "http://lab.internal:8000/v1"\nanswers_at_once = 0',
+        "providers.lab.answers_at_once",
+    ),
+    "a server that writes fewer than none": (
+        'kind = "ollama"',
+        'kind = "ollama"\nanswers_at_once = -1',
+        "providers.ollama.answers_at_once",
+    ),
 }
 
 
@@ -235,6 +256,146 @@ async def test_a_model_is_found_by_its_name_and_the_default_when_none_is_named()
         assert isinstance(big.chat, OpenAICompatible)
         with pytest.raises(UnknownModelError):
             catalog.get("largest")
+
+
+# --- How many answers a server writes at once -----------------------------------------
+
+
+async def test_ollama_writes_one_answer_at_a_time_and_another_server_any_number() -> None:
+    """Unless the file says otherwise."""
+    async with catalogs.build(parsed(GOOD), ollama_url="http://ollama") as catalog:
+        standard, big = catalog.get("standard"), catalog.get("big")
+
+    assert standard.gate is not None
+    assert standard.gate.at_once == 1
+    assert big.gate is None
+
+
+async def test_a_server_writes_as_many_answers_at_once_as_the_file_says() -> None:
+    file = parsed(
+        GOOD.replace('kind = "ollama"', 'kind = "ollama"\nanswers_at_once = 4').replace(
+            'url = "http://lab', 'answers_at_once = 2\nurl = "http://lab'
+        )
+    )
+
+    async with catalogs.build(file, ollama_url="http://ollama") as catalog:
+        standard, big = catalog.get("standard"), catalog.get("big")
+
+    assert file.providers["ollama"].answers_at_once == 4
+    assert (standard.gate and standard.gate.at_once, big.gate and big.gate.at_once) == (4, 2)
+
+
+async def test_the_models_of_one_server_share_its_gate_and_another_servers_have_their_own() -> None:
+    file = parsed(
+        GOOD.replace('url = "http://lab', 'answers_at_once = 1\nurl = "http://lab')
+        + """
+[models.small]
+title = "Granite 4 Micro"
+provider = "ollama"
+model = "granite4:micro"
+context_window = 4096
+max_output_tokens = 1024
+
+[providers.workstation]
+kind = "ollama"
+url = "http://workstation.internal:11434"
+
+[models.smart]
+title = "Qwen 3.5 9B"
+provider = "workstation"
+model = "qwen3.5:9b"
+context_window = 8192
+max_output_tokens = 2048
+"""
+    )
+
+    async with catalogs.build(file, ollama_url="http://ollama") as catalog:
+        gates = {offered.name: offered.gate for offered in catalog}
+
+    assert gates["standard"] is gates["small"]  # one Ollama, writing for both
+    assert len({id(gates["standard"]), id(gates["big"]), id(gates["smart"])}) == 3
+    assert None not in gates.values()
+
+
+# --- The gate by itself ---------------------------------------------------------------
+
+
+class Answering:
+    """An answer that passes a gate, and holds its place there until it is let go."""
+
+    def __init__(self, gate: Gate, passed: list[str], name: str) -> None:
+        self.done = asyncio.Event()
+        self.task = asyncio.create_task(self._pass(gate, passed, name))
+
+    async def _pass(self, gate: Gate, passed: list[str], name: str) -> None:
+        async with gate:
+            passed.append(name)
+            await self.done.wait()
+
+
+async def settled() -> None:
+    """Let every task that can go on do so."""
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+async def test_answers_pass_in_the_order_they_came_as_many_at_a_time_as_the_server_takes() -> None:
+    gate, passed = Gate(2), list[str]()
+    first, second, third, fourth = (Answering(gate, passed, name) for name in "abcd")
+    await settled()
+    at_first, waiting = list(passed), gate.waiting
+
+    second.done.set()
+    await settled()
+    then = list(passed)
+    first.done.set()
+    third.done.set()
+    fourth.done.set()
+    await asyncio.wait_for(asyncio.gather(first.task, second.task, third.task, fourth.task), 1)
+
+    assert (at_first, waiting) == (["a", "b"], 2)
+    assert then == ["a", "b", "c"]
+    assert passed == ["a", "b", "c", "d"]
+    assert (gate.full, gate.waiting) == (False, 0)
+
+
+async def test_an_answer_that_gives_up_waiting_leaves_the_order_of_the_others_as_it_was() -> None:
+    gate, passed = Gate(1), list[str]()
+    first, second, third = (Answering(gate, passed, name) for name in "abc")
+    await settled()
+
+    second.task.cancel()  # stopped while it waits
+    await settled()
+    still_waiting = gate.waiting
+    first.done.set()
+    third.done.set()
+    await asyncio.wait_for(asyncio.gather(first.task, third.task), 1)
+
+    assert still_waiting == 1
+    assert passed == ["a", "c"]
+    assert second.task.cancelled()
+    assert not gate.full
+
+
+async def test_a_place_at_the_gate_is_given_back_however_the_answer_ended() -> None:
+    gate = Gate(1)
+
+    with pytest.raises(RuntimeError):
+        async with gate:
+            raise RuntimeError("the model failed")
+    after_a_failure = gate.full
+
+    async def holds_its_place() -> None:
+        async with gate:
+            await asyncio.Event().wait()
+
+    holding = asyncio.create_task(holds_its_place())
+    await settled()
+    while_held = gate.full
+    holding.cancel()  # from outside, as a process going down does
+    await asyncio.gather(holding, return_exceptions=True)
+
+    assert (after_a_failure, while_held, gate.full) == (False, True, False)
 
 
 # --- Reaching the providers -----------------------------------------------------------

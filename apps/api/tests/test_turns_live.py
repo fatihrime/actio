@@ -13,16 +13,20 @@ a server. Here is what only a connection that closes can show.
 import asyncio
 import os
 import signal
+import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx2
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from actio.chat import running
+from actio.chat import readers, running
 from actio.chat.models import Conversation, Message, Turn
 from actio.core.ids import new_id
 from actio_llm import Finish, FinishReason, ReasoningDelta, TextDelta, Usage
@@ -68,21 +72,35 @@ class Reader:
         return unanswered["id"]  # type: ignore[no-any-return]
 
 
-_incoming: dict[int, tuple[AsyncIterator[str], list[str]]] = {}
-"""For each response being read: where its reader is, and what has arrived so far. A
-response's content can be iterated only once, so the iterator is kept between reads."""
+@dataclass
+class Incoming:
+    """What has arrived of a response that is being read, and where its reader is. A
+    response's content can be iterated only once, so the iterator is kept between reads."""
+
+    pieces: AsyncIterator[str]
+    seen: list[str] = field(default_factory=list)
+
+
+INCOMING = "actio-tests-incoming"
+"""Where a response keeps its `Incoming`: in its own `extensions`, so that it goes with
+the response, and is never taken for another's. A table of its own, keyed by `id`, was:
+a response that was gone left its entry behind, and a later one could get its `id`."""
 
 
 async def read_until(response: httpx2.Response, marker: str) -> str:
     """Read on until `marker` has arrived, and return everything that came so far."""
-    pieces, seen = _incoming.setdefault(id(response), (response.aiter_text(), []))
+    incoming = response.extensions.get(INCOMING)
+    if incoming is None:
+        incoming = response.extensions[INCOMING] = Incoming(response.aiter_text())
     async with asyncio.timeout(PATIENCE_S):
-        while marker not in "".join(seen):
+        while marker not in "".join(incoming.seen):
             try:
-                seen.append(await anext(pieces))
+                incoming.seen.append(await anext(incoming.pieces))
             except StopAsyncIteration:
-                raise AssertionError(f"the response ended without {marker!r}: {seen!r}") from None
-    return "".join(seen)
+                raise AssertionError(
+                    f"the response ended without {marker!r}: {incoming.seen!r}"
+                ) from None
+    return "".join(incoming.seen)
 
 
 @pytest.fixture
@@ -285,6 +303,102 @@ async def test_told_to_stop_the_process_ends_an_answer_while_its_reader_is_still
     assert answer.parts == [{"type": "text", "text": "Half an answer"}]
     with pytest.raises(httpx2.ConnectError):  # nothing listens there any more
         await browser.get(reader.path)
+
+
+async def joined_when_there_is_room(
+    reader: Reader, windows: AsyncExitStack, turn_id: str
+) -> httpx2.Response:
+    """Read along with the turn, as soon as the account has a reader to spare: the
+    server notices a reader that is gone a moment after it went."""
+    async with asyncio.timeout(PATIENCE_S):
+        while True:
+            joined: httpx2.Response = await windows.enter_async_context(
+                reader.reading_along(turn_id)
+            )
+            if joined.status_code != 429:
+                return joined
+            await joined.aclose()
+            await asyncio.sleep(0.01)
+
+
+async def test_a_reader_who_leaves_in_the_middle_makes_room_for_another(
+    served: Any, browser: httpx2.AsyncClient
+) -> None:
+    hold = asyncio.Event()
+    _, address = await served(
+        TextDelta("The first half, "), hold, TextDelta("then the rest."), DONE
+    )
+    reader = await guest_at(browser, address)
+
+    async with AsyncExitStack() as windows:
+        asking = await windows.enter_async_context(reader.asking("Tell me something"))
+        await read_until(asking, "The first half, ")
+        turn_id = await reader.running_turn()
+        for _ in range(5):  # six windows read along, as many as an account may
+            await read_until(
+                await windows.enter_async_context(reader.reading_along(turn_id)),
+                "The first half, ",
+            )
+        refused = await browser.get(f"{reader.path}/turns/{turn_id}/stream")
+        await asking.aclose()  # the window that asked is closed, the answer half-written
+        joined = await joined_when_there_is_room(reader, windows, turn_id)
+        hold.set()
+        rest = await read_until(joined, "[DONE]")
+
+    assert refused.status_code == 429
+    assert rest.startswith('data: {"type":"start",')
+    assert '"delta":"then the rest."' in rest
+
+
+async def test_a_reader_who_is_gone_before_anything_was_sent_takes_no_room(
+    served: Any, browser: httpx2.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A browser that asks to read along, and is closed before the answer comes: the
+    response finds nobody to send to."""
+    hold = asyncio.Event()
+    _, address = await served(
+        TextDelta("The first half, "), hold, TextDelta("then the rest."), DONE
+    )
+    reader = await guest_at(browser, address)
+    joins: list[uuid.UUID] = []
+    join = readers.TurnReaders.join
+
+    def noted(counted: readers.TurnReaders, account: uuid.UUID) -> readers.Reader:
+        joins.append(account)
+        return join(counted, account)
+
+    monkeypatch.setattr(readers.TurnReaders, "join", noted)
+
+    async with AsyncExitStack() as windows:
+        asking = await windows.enter_async_context(reader.asking("Tell me something"))
+        await read_until(asking, "The first half, ")
+        turn_id = await reader.running_turn()
+        for _ in range(4):  # five readers: room for one more
+            await read_until(
+                await windows.enter_async_context(reader.reading_along(turn_id)),
+                "The first half, ",
+            )
+        url = urlsplit(address)
+        cookie = "; ".join(f"{name}={value}" for name, value in browser.cookies.items())
+        for _ in range(3):
+            _, writer = await asyncio.open_connection(url.hostname, url.port)
+            writer.write(
+                f"GET {urlsplit(reader.path).path}/turns/{turn_id}/stream HTTP/1.1\r\n"
+                f"Host: {url.netloc}\r\nCookie: {cookie}\r\n\r\n".encode()
+            )
+            await writer.drain()
+            writer.close()  # gone before any answer
+            await writer.wait_closed()
+        async with asyncio.timeout(PATIENCE_S):
+            while True:
+                if len(joins) == 7:  # four windows, and the three that left at once
+                    break
+                await asyncio.sleep(0.01)
+        sixth = await joined_when_there_is_room(reader, windows, turn_id)
+        hold.set()
+        rest = await read_until(sixth, "[DONE]")
+
+    assert '"delta":"then the rest."' in rest
 
 
 async def test_deleting_a_conversation_while_it_is_being_answered_is_not_an_error(

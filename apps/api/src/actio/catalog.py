@@ -10,6 +10,10 @@ what to call it at its provider, its limits, and the client to stream an answer 
   Nothing connects until a model is used.
 - `Catalog.status` asks a provider whether it has a model, and what the model can do.
 
+A server writes only so many answers at once: a local one, such as Ollama, one. Each
+provider that has such a limit gets a `Gate`, shared by every model it runs, at which
+the answers that would be too many wait their turn.
+
 Nothing here knows about HTTP: the route is in `actio.api.models`.
 """
 
@@ -68,6 +72,9 @@ class ProviderEntry(BaseModel):
     api_key_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
     """The name of the environment variable that holds the server's key. The key itself
     never goes in the file."""
+    answers_at_once: int | None = Field(default=None, ge=1)
+    """How many answers the server writes at the same time, across all the models it
+    runs. Left out: see `at_once`."""
 
     @model_validator(mode="after")
     def _fits_its_kind(self) -> Self:
@@ -76,6 +83,17 @@ class ProviderEntry(BaseModel):
         if self.kind == "ollama" and self.api_key_env is not None:
             raise ValueError("Ollama takes no key")
         return self
+
+    @property
+    def at_once(self) -> int | None:
+        """How many answers the server is given at a time. `None`: as many as come.
+
+        Ollama writes one answer at a time, unless the file says otherwise. A server
+        that speaks OpenAI's API may write many at once, as vLLM does, so it is given
+        every answer at once unless the file says how many it takes."""
+        if self.answers_at_once is None and self.kind == "ollama":
+            return 1
+        return self.answers_at_once
 
 
 class ModelEntry(BaseModel):
@@ -145,6 +163,46 @@ def read_file(path: Path) -> CatalogFile:
 # --- What the rest of Actio uses ------------------------------------------------------
 
 
+class Gate:
+    """The way in to a server that writes only so many answers at once.
+
+    An answer passes while the server has room for it, and holds its place until its
+    stream is closed. One that comes while the server is full waits here, inside Actio,
+    and its server hears of it only once it has passed: a server that is asked anyway
+    keeps the request waiting inside itself, while the client's patience for the first
+    word runs out. Answers pass in the order they came. One that gives up waiting, by
+    being cancelled, leaves the others' order as it was.
+
+    `async with gate:` waits, and gives the place back on the way out, however that is.
+    """
+
+    def __init__(self, at_once: int) -> None:
+        self.at_once = at_once
+        """How many answers pass at the same time."""
+        self._way = asyncio.Semaphore(at_once)  # first come, first served
+        self._waiting = 0
+
+    @property
+    def full(self) -> bool:
+        """Whether an answer that comes now has to wait."""
+        return self._way.locked()
+
+    @property
+    def waiting(self) -> int:
+        """How many answers wait to pass."""
+        return self._waiting
+
+    async def __aenter__(self) -> None:
+        self._waiting += 1
+        try:
+            await self._way.acquire()
+        finally:
+            self._waiting -= 1
+
+    async def __aexit__(self, *_: object) -> None:
+        self._way.release()
+
+
 @dataclass(frozen=True, slots=True)
 class OfferedModel:
     """A model on offer: everything needed to ask it something."""
@@ -160,6 +218,9 @@ class OfferedModel:
     max_output_tokens: int
     chat: ChatProvider
     """Stream an answer with `chat.stream(ChatRequest(model=model, ...))`."""
+    gate: Gate | None = None
+    """Where an answer waits until its server has room for it: the same for every model
+    on that server. `None`: the server is given every answer at once."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +310,10 @@ async def build(
     transports = transports or {}
     async with AsyncExitStack() as stack:
         chats: dict[str, ChatProvider] = {}
+        gates = {
+            name: Gate(provider.at_once) if provider.at_once is not None else None
+            for name, provider in file.providers.items()
+        }
         for name, provider in file.providers.items():
             headers = {}
             if provider.api_key_env is not None:
@@ -279,6 +344,7 @@ async def build(
                 context_window=entry.context_window,
                 max_output_tokens=entry.max_output_tokens,
                 chat=chats[entry.provider],
+                gate=gates[entry.provider],
             )
             for name, entry in file.models.items()
         }

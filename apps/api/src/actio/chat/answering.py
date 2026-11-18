@@ -16,6 +16,12 @@ Nobody has to be listening. A turn runs apart from the request that started it
 says every few seconds that it is alive, and renews the hold on its credits: see
 `_beat`.
 
+A model's server that writes only so many answers at once has a gate in front of it
+(`actio.catalog.Gate`). A turn waits there, running like any other, and the model is
+asked only once the turn has passed: so the client's patience for the first word starts
+when the server is free. The turn gives its place back as soon as the model's stream is
+closed, however it ended.
+
 Recording a turn also settles what it cost. Credits were held for it before it started
 (`actio.usage.limits`). What it used goes into the usage ledger in the transaction that
 records its outcome, and only then are the counters told: see `_record`.
@@ -27,8 +33,8 @@ turns the steps into that.
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
-from contextlib import aclosing
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -37,7 +43,7 @@ import anyio
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from actio.catalog import OfferedModel
+from actio.catalog import Gate, OfferedModel
 from actio.chat import turns
 from actio.chat.parts import Part, ReasoningPart, TextPart
 from actio.chat.turns import Ending
@@ -248,6 +254,9 @@ async def answer(
     `open_session`. It returns once that is done: whoever is told that the turn has
     ended can rely on the answer being stored, and counted.
 
+    When the model's server is busy with other answers, the turn first waits at its
+    gate, saying all the while that it is alive.
+
     `halt` ends it early. `on_beat` is called with every beat, after the turn has said
     that it is alive: for whatever else has to be kept while the turn runs. Neither it
     nor `emit` may raise.
@@ -256,10 +265,16 @@ async def answer(
     ending: Ending | None = None
     beats = asyncio.create_task(_beat(open_session, turn_id, clock, usage, reserved, on_beat))
     try:
-        # Only waiting for the model can be halted. A step that has come is handed on
-        # whole, so what readers were shown is what gets stored.
+        # Only waiting, for the gate or for the model, can be halted. A step that has
+        # come is handed on whole, so what readers were shown is what gets stored.
         with halt.scope:
-            async with aclosing(offered.chat.stream(request)) as events:
+            # The model is asked only once the turn has passed the gate: the second
+            # expression is evaluated after the first was entered. The place at the gate
+            # is given back as soon as the model's stream is closed.
+            async with (
+                _through(offered.gate, turn_id, clock),
+                aclosing(offered.chat.stream(request)) as events,
+            ):
                 async for event in events:
                     for step in collected.take(event):
                         with anyio.CancelScope(shield=True):
@@ -310,6 +325,40 @@ async def answer(
                     reserved,
                 )
     return Ended(ending, finished, credits, warnings)
+
+
+@asynccontextmanager
+async def _through(
+    gate: Gate | None, turn_id: uuid.UUID, clock: Callable[[], datetime]
+) -> AsyncIterator[None]:
+    """Wait until the model's server has room for the answer, and keep its place there
+    until the end of the block. Without a gate, the server is asked at once.
+
+    A turn that had to wait says so in the log, with how long: whether it got its turn,
+    or was stopped, or ended by a shutdown, while it waited."""
+    if gate is None:
+        yield
+        return
+    came = clock() if gate.full else None
+    passed = False
+    try:
+        async with gate:
+            passed = True
+            if came is not None:
+                _waited(turn_id, came, clock)
+            yield
+    finally:
+        if came is not None and not passed:
+            _waited(turn_id, came, clock, ", and didn't get its turn")
+
+
+def _waited(
+    turn_id: uuid.UUID, came: datetime, clock: Callable[[], datetime], how: str = ""
+) -> None:
+    # A warning, as the other lines of this module are: only warnings and errors reach
+    # the log as the web server sets it up. Answers that wait are worth seeing there.
+    waited = (clock() - came).total_seconds()
+    logger.warning("turn %s: waited %.1f s for the model's server%s", turn_id, waited, how)
 
 
 async def _beat(

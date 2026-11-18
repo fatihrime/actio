@@ -31,8 +31,9 @@ class ProblemDocument(BaseModel):
     this. Some carry more members: `errors` (422: what is wrong with the request, and
     where), `retry_after` (429: seconds to wait), `window`, `resets_at` and
     `alternatives` (429: the usage limit that is reached, when it starts over, and the
-    models that cost nothing), `model` and `model_status` (503: the model that can't
-    answer), `turn_id` and `turn_status` (409: the turn in the way)."""
+    models that cost nothing), `at_once` (429: how many answers the plan allows to be
+    written at once), `model` and `model_status` (503: the model that can't answer),
+    `turn_id` and `turn_status` (409: the turn in the way)."""
 
     model_config = ConfigDict(title="Problem", extra="allow")
 
