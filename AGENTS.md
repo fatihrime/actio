@@ -40,7 +40,7 @@ Actio is a self-hostable, local-first AI platform. It combines a chat assistant,
 | `deploy/tests/` | Policy tests for the containers: published ports, pinned images, networks, hardening |
 | `docs/` | The documentation site's pages (built by Zensical from `zensical.toml`), including the ADRs in `docs/adr/` |
 | `scripts/` | Developer scripts. `read_only_git.py` is the check that keeps the reviewing agent's shell to git commands that only read, and `tests/` holds its tests |
-| `.claude/` | The three agents that Claude Code's main session hands work to (`agents/`): a coder, a test-runner and a reviewer. How they work together is in `CLAUDE.md` |
+| `.claude/` | The two agents that Claude Code's main session hands work to (`agents/`): a coder, which builds a step's first version, and a reviewer. How they work with the main session is in `CLAUDE.md` |
 | `conftest.py` | Test fixtures shared by every suite: a throwaway Postgres and Valkey, from the images pinned in `compose.yaml` |
 
 ## Commands
