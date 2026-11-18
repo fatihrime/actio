@@ -38,6 +38,7 @@ Then open <http://localhost:8080> and ask something. No account is needed: a fir
 
 - **The answer appears as it is written.** The first one takes a few seconds longer, while the model loads. **Stop** ends an answer early and keeps what was written.
 - **Only Stop ends an answer.** Reloading the page, closing it or losing the connection doesn't: the answer is written to its end at the server, and is there when you come back: still arriving, if it isn't done yet, with Stop beside it. A second window that opens the conversation while the answer is being written shows it arriving too ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md)). An answer you no longer want still counts against your usage limits unless you stop it.
+- **Ollama writes one answer at a time.** A question asked while another answer is being written, in another conversation or by someone else on the same Actio, waits its turn: the page shows the question and the wait for the first words, and they come once the other answer is done. Answers are taken in the order they were asked. **Stop** ends one that waits too; it has written nothing then, and costs nothing ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)).
 - **Answers are formatted:** headings, tables, code in colour with a button to copy it, formulas, and diagrams. Try "derive the quadratic formula", or "draw a mermaid flowchart of making tea".
     - A link in an answer shows its address before it opens.
     - A picture an answer points at is not fetched, and HTML in an answer is shown as text. A model's words can come from anywhere, so they can't make your browser do things ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
@@ -72,6 +73,16 @@ The first command starts a guest session. The second starts a conversation, unde
 
 Which models are offered is in `config/models.toml`: the file explains itself. To offer another model, or one on LM Studio or any other server that speaks OpenAI's API, edit it and run `make up` or `make dev` again. A mistake in the file stops the API from starting, with a line that says what is wrong. See [ADR 0013](adr/0013-the-models-on-offer-are-a-file.md).
 
+A server that writes several answers at the same time is told so in the same file, under its provider. Ollama started with `OLLAMA_NUM_PARALLEL=4`, for example:
+
+```toml
+[providers.ollama]
+kind = "ollama"
+answers_at_once = 4
+```
+
+Then four answers are written at once, and a fifth waits its turn. Left out, it is 1 for Ollama, and there is no limit for a server that speaks OpenAI's API, such as vLLM, which takes every answer as it comes. For LM Studio or llama.cpp's server, give the number of requests it was set to handle in parallel.
+
 !!! note "On Linux"
     Ollama listens only on `127.0.0.1` by default, which containers can't reach, so with `make up` the model shows as `unreachable`. Ollama's `OLLAMA_HOST` setting changes where it listens: Docker's bridge address, usually `172.17.0.1`, is reachable from containers and not from your network. This follows Ollama's and Docker's documentation; this project's own Linux run, in CI, has no Ollama to try it with.
 
@@ -88,6 +99,7 @@ An answer costs credits, and everyone has only so many: per session, which opens
 - **On the way to a limit you are told once:** when half of it is used, three quarters, and nine tenths.
 - **Near a limit, answers get shorter.** An answer is given only as much room as is left. One that had to stop for that says so.
 - **At a limit, a question is refused.** The page says which limit was reached, when it resets, and counts down the time until then. Nothing is sent meanwhile. The question isn't stored: it is back in the box, to be sent later.
+- **A guest may have two answers being written at once, and an account three,** in all their conversations together. One question more is refused, and says so: "2 answers are already being written for you, as many as your plan allows at once. Wait for one to finish, or stop one." The question is back in the box, and can be sent as soon as one of the answers has ended. An answer that waits for the model's server counts too.
 - **A model that costs nothing can carry on.** Where the installation offers one, the page offers it at the limit, and that model answers until the limit resets. The default files offer none: see below.
 - **The API says the same.** With the session from the commands above:
 
@@ -97,7 +109,7 @@ An answer costs credits, and everyone has only so many: per session, which opens
 
     It answers with your plan, and for each limit how much is used and when it starts over. The page shows exactly this, and counts nothing itself ([ADR 0021](adr/0021-usage-limits-in-the-page.md)).
 
-Prices, plans, the length of a session and the moment the week starts over are in `config/plans.toml`, which explains itself. Edit it and run `make up` or `make dev` again.
+Prices, plans, how many answers each plan may have written at once, the length of a session and the moment the week starts over are in `config/plans.toml`, which explains itself. Edit it and run `make up` or `make dev` again.
 
 - Every model in `config/models.toml` needs a price there, or the API doesn't start, and says which model is missing one.
 - A model priced at nothing is free: it uses up no credits and is never refused. Offer a small one beside the default, at `input = 0` and `output = 0`, and the page offers it by its title to whoever reaches a limit: "Use Local (free)".
@@ -114,7 +126,7 @@ make dev         # starts the stack; Ctrl-C stops the API and the web app
 
 `make doctor` lists any missing tools, with install hints. You don't need Node.js itself: pnpm installs the version the project pins.
 
-In this mode, saving a Python file restarts the API, and the browser picks up changes to the web app by itself. `make dev` first stops any containers that `make up` started, so you can switch between the two modes freely. Postgres keeps its data in a Docker volume in both modes, so it survives restarts. Valkey keeps nothing on disk: after a restart the rate limits start full, and the usage limits are counted up again from the database.
+In this mode, saving a Python file restarts the API, and the browser picks up changes to the web app by itself. The proxy's configuration, `deploy/caddy/Caddyfile`, is built into its image: after a change to it, run `make dev` (or `make up`) again to apply it. A mistake in it stops the build, with Caddy's own words, and the proxy that runs goes on as it was. `make dev` first stops any containers that `make up` started, so you can switch between the two modes freely. Postgres keeps its data in a Docker volume in both modes, so it survives restarts. Valkey keeps nothing on disk: after a restart the rate limits start full, and the usage limits are counted up again from the database.
 
 ## Talk to a local model from the terminal
 
@@ -193,6 +205,15 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 **"You've reached your usage limit"**
 :   The session's allowance, or the week's, is used up: see [Usage limits](#usage-limits). The page says when it starts over, and counts down to it. On your own machine, raise the limits in `config/plans.toml`, or leave them out, and run `make up` or `make dev` again.
 
+**"2 answers are already being written for you"**
+:   As many answers are on their way, in your other conversations, as your plan allows at once: see [Usage limits](#usage-limits). Wait for one to finish, or open its conversation and stop it, then send the question again: it is still in the box. To allow more, raise `answers_at_once` in `config/plans.toml`, or leave it out, and run `make up` or `make dev` again.
+
+**An answer takes long to begin while another is being written**
+:   The model's server writes one answer at a time, so this one waits its turn inside Actio, and begins when the other is done. The API's log says how long it waited: `turn …: waited 12.3 s for the model's server`. If the server can write several at once, say how many in `config/models.toml`: see [Models](#models).
+
+**"This is too much to send at once"**
+:   A request to the API was larger than 2 MB, and the proxy in front of it refused it. A question has room for 100,000 characters, which is far less.
+
 **"The server was restarted while this answer was being written"**
 :   The API was stopped in the middle of an answer: by `make down`, by `make up` after a change, or by a saved file under `make dev`. It gives the answers being written 15 seconds to finish, then keeps what each had written and marks it interrupted. Such an answer costs nothing. **Try again** asks for it once more.
 
@@ -200,7 +221,7 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 :   An answer was being written: see the entry above. With none under way it takes a second or two.
 
 **"An answer to this is still being written", and it stays**
-:   The answer is being written at the server, and the page can't read along with it: the stream of its words was lost, as after a restart of Valkey, or couldn't be asked for. Otherwise the page shows the words as they arrive. It looks again every second and a half, and shows the answer when it is done. If the API was killed while writing it, nothing ever finishes it: the page notices a minute after the answer was last heard from, and offers to try again.
+:   The answer is being written at the server, and the page can't read along with it: the stream of its words was lost, as after a restart of Valkey, or couldn't be asked for. It can't be asked for when six of your windows or tabs already read along with answers, the most one account may. Otherwise the page shows the words as they arrive. It looks again every second and a half, and shows the answer when it is done. If the API was killed while writing it, nothing ever finishes it: the page notices a minute after the answer was last heard from, and offers to try again.
 
 **A question answers 503, "Usage can't be counted right now"**
 :   The API can't reach Valkey, where usage is counted, and refuses instead of answering uncounted. `/api/readyz` and `docker compose ps` show what is down.

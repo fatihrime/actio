@@ -26,7 +26,7 @@ flowchart LR
     api -->|"host.docker.internal"| ollama
 ```
 
-- **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies need.
+- **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies need. A request to the API with a body over 2 MB it refuses itself, with a 413 in the API's own error format: a body that says its length before any of it is passed on, one sent in chunks once the limit is reached ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)). Its configuration, `deploy/caddy/Caddyfile`, is built into its image, as the API's code is into the API's: after a change to it, `make up` or `make dev` again applies it, and a mistake in it stops the build while the running proxy goes on as it was.
 - **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, and `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). Today the API serves its interactive docs, two probes, guest sessions and accounts:
     - `/api/healthz` answers whenever the process is alive;
     - `/api/readyz` answers 200 only when the database is reachable and migrated and Valkey answers. Otherwise it answers 503 and names what is missing;
@@ -37,7 +37,9 @@ flowchart LR
     - `POST /api/conversations/{id}/turns` puts a question to a model and streams the answer back, piece by piece, in the format the AI SDK reads. The first question creates the conversation. The same route rewords an earlier question, or asks for another answer. Each turn is recorded: which model, how it ended, what it cost in tokens and time ([ADR 0014](adr/0014-turns-streamed-in-the-ai-sdks-format.md));
     - a turn runs apart from the request that started it, in a task of its own. The request only reads along, and closing it ends nothing. `GET …/turns/{turn_id}/stream` reads along again from the answer's first event, and `POST …/turns/{turn_id}/cancel` stops the turn. Told to stop, the API gives the answers that are being written a moment, then records what is unfinished as interrupted ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md));
     - `GET /api/models` lists the models on offer, from `config/models.toml`, and says whether each can answer right now: `ready`, `missing` from its server, or its server `unreachable` ([ADR 0013](adr/0013-the-models-on-offer-are-a-file.md));
-    - a turn costs credits, and an account has only so many per session and per week, from `config/plans.toml`. The most a turn can cost is held before a model is asked; a turn that doesn't fit is answered 429, with the moment the limit starts over. `GET /api/usage` says how much is used ([ADR 0020](adr/0020-usage-limits-on-turns.md)).
+    - a model's server writes only so many answers at once: Ollama one, unless the models file says otherwise. A turn that comes while its server is busy waits its turn inside the API, at a gate in front of the server, running like any other, and its model is asked once there is room ([ADR 0023](adr/0023-answers-that-wait-their-turn.md));
+    - a turn costs credits, and an account has only so many per session and per week, from `config/plans.toml`. The most a turn can cost is held before a model is asked; a turn that doesn't fit is answered 429, with the moment the limit starts over. `GET /api/usage` says how much is used ([ADR 0020](adr/0020-usage-limits-on-turns.md));
+    - a plan also says how many answers one account may have being written at once, and one more is answered 429, before anything is kept. An account reads along with an answer in six places at once at most: one more join is answered 429 too ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)).
 - **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
 - **The web app** is a Next.js application: the chat ([ADR 0015](adr/0015-the-web-chat-calls-the-api-from-the-browser.md)).
     - **Its server sends only the frame of the page.** Everything of yours is fetched by the browser, straight from the API, with the session cookie. Nothing but the API handles a session.
@@ -62,8 +64,8 @@ Inside the API, the code is split into layers that only import downward, and a t
 | Layer | Holds |
 |---|---|
 | `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, which attempts are rate-limited, the error format. The only layer that knows the web framework |
-| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Running turns apart from their requests, and the stream of what each writes. Tables and rules, with no HTTP |
-| `actio.catalog` | The models on offer: reading `config/models.toml`, and asking a model's server about it |
+| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Running turns apart from their requests, the stream of what each writes, and how many answers and readers one account has at once. Tables and rules, with no HTTP |
+| `actio.catalog` | The models on offer: reading `config/models.toml`, asking a model's server about it, and the gate where answers wait while that server is busy |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
 | `actio.usage` | Usage limits: reading `config/plans.toml`, holding credits before a request and counting them after it through the [engine](reference/quota.md), and the ledger |
 | `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter, reading a file in `config/`, hearing the signal that stops the process |
@@ -93,8 +95,7 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 The next phases add:
 
 - **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
-- **a gate in front of a local model,** which answers one question at a time, and a limit on how many answers one account has written at once;
-- **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them.
+- **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them. The router will also say when an answer waits for its server, and how many are ahead of it.
 
 ## Repository layout
 
@@ -107,6 +108,6 @@ The next phases add:
 | `packages/quota` | The usage-limits engine: Lua scripts for Valkey, and the Python reference model they're tested against |
 | `compose.yaml`, `compose.dev.yaml` | The stack for `make up`, and the overlay for `make dev` |
 | `config/` | What an installation changes without touching code. Today: `models.toml`, the models on offer, and `plans.toml`, what they cost and how much each kind of account may use |
-| `deploy/` | Caddy's configuration, and the tests for the containers' rules |
+| `deploy/` | Caddy's configuration and the image it is built into, and the tests for the containers' rules |
 | `docs/` | This site, including the decision records |
 | `scripts/` | Developer scripts: tool checks, the denylist hook, the smoke test |
