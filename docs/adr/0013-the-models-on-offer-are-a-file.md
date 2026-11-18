@@ -101,3 +101,12 @@ Actio can talk to a model through two clients: one for Ollama, one for any serve
 - **Prices are in a second file, `config/plans.toml`,** under the names the models have here. The models file says where a model runs and what it can hold; the plans file says what using it costs and how much each kind of account may use. They change for different reasons, and are read by different parts of the code.
 - **The two are checked against each other when the API starts.** A model without a price stops the start, and so does a price for a model that isn't offered. So offering a model now means editing two files.
 - Which accounts may use which model is still open: every account may use every model.
+
+### 2026-11-18: a provider says how many answers it writes at once
+
+A provider has one setting more, `answers_at_once`: how many answers its server writes at the same time, across all the models it runs ([ADR 0023](0023-answers-that-wait-their-turn.md)).
+
+- **An answer that would be one more waits inside Actio,** at a gate that every model of that provider shares, and the server is asked only once it has room.
+- **Left out, it is 1 for `ollama`, and there is no limit for `openai-compatible`,** which may batch many. A server started to write several at once is given its number.
+- **Like every setting, it is checked when the API starts:** 0, or a number below it, stops the start with one line.
+- `OfferedModel` carries its provider's gate, or none. The rest of Actio still sees only `Catalog` and `OfferedModel`.

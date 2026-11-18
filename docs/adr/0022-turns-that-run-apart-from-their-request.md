@@ -310,3 +310,12 @@ The page joins a turn's stream now. "The page doesn't read along again", under "
 - **there is no Stop while the page only looks;**
 - **a conversation that is already open in one window isn't told of an answer asked for in another.** It learns of it the next time it reads the conversation;
 - **a join is still sent the whole answer so far,** as "a reader can't go on from the middle", above, says.
+
+### 2026-11-18: answers wait their turn, and an account has only so many
+
+Two items of "Not done yet" are done, in [ADR 0023](0023-answers-that-wait-their-turn.md):
+
+- **"Nothing limits how many answers one account has written at once, and a local model that answers one at a time gets them all at once."** A turn now waits at a gate in front of its model's server, inside Actio, and its model is asked only once the server has room. A plan may say how many answers one account has being written at once, and one more is refused.
+- **"Nothing limits how many readers one account has open."** An account has six at most; a seventh may not join. The request that starts a turn is never refused for it.
+
+What is decided above holds for a turn that waits, as for one that is written: it says every 15 seconds that it is alive, which keeps its hold and its stream; Stop ends it at once, as `stopped`, with nothing written; a shutdown records it as `interrupted`. "One process" holds for the gate and the count of readers too: both are in the process, as the turns are.

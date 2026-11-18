@@ -193,3 +193,16 @@ The revision above said the page "looks every second and a half" for an answer i
 - **The answer in these two is twenty words at half a second each,** where it was twelve at 0.3. The page has to be back and reading along before the answer ends, or the join is answered 204 and the test fails on a page that did nothing wrong. Twenty words leave about eight seconds for that, which a slow runner shouldn't use up.
 - **One test more,** in `turns.spec.ts`: a second tab of the same browser opens the conversation while its answer is written, reads along, and stops it. Both tabs then say that it was stopped and show the same words, and a reload shows them still. Two readers told the same thing by the server are what only the whole stack shows.
 - **That makes 31 tests.**
+
+### 2026-11-18: answers at once, and a request too large for the proxy
+
+An account may have only so many answers being written at once, and the proxy refuses a request over 2 MB ([ADR 0023](0023-answers-that-wait-their-turn.md)). Two tests more, in `turns.spec.ts`:
+
+- **a guest with two answers being written,** in two conversations, asks a third. It is refused in the API's words, and the question is back in the box. One of the two is stopped from its conversation, and the same question is then answered, while the other is still being written: the stop made the room. The two answers take twenty seconds each, at a word a second, where the test needs about eight;
+- **through the proxy,** with the browser's own session: a body over 2 MB is answered 413, as a problem document with words for the page, and one under it, whose message is a character longer than the API takes, reaches the API and is answered 422. These are requests the page wouldn't send, so the test sends them itself, with the browser context's own requests.
+
+The plans file of the stack gives guests and accounts what people get, two and three answers at once (`deploy/e2e/config/plans.toml`). A test in the API's suite holds it to that.
+
+**Not tested here: the gate in front of a model's server.** The page can't choose a model, and the stack's model, the fake, has to stay without a gate: the tests run side by side, and would otherwise wait for each other's answers. The API's suite tests the gate.
+
+That makes 33 tests, in about 20 seconds. The two new ones were run five times over, five at a time: 10 of 10 passed.

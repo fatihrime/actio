@@ -151,3 +151,11 @@ On a MacBook Pro (M1 Pro, 16 GB), in a headless Chromium against the stack of `m
     - a question too large for the plan is not offered the model that costs nothing, though the refusal names it;
     - choosing a model at any other time: with the router.
 - **How to reverse it:** the page's part is `lib/usage.ts`, `components/usage/` and what `components/chat/chat.tsx` does with a refusal. Without them a usage limit is again a sentence to dismiss, and the API is unchanged.
+
+## Revisions
+
+### 2026-11-18: a 429 without a window is also too many answers at once
+
+"One that names no window is the limit on how often questions are sent", in the decision above, isn't the only such 429 any more. A plan may now limit how many answers one account has being written at once, and the API refuses one more with a 429 that names no window and has no time to wait: nobody knows when an answer ends ([ADR 0023](0023-answers-that-wait-their-turn.md)).
+
+The page didn't change for it, and treats it as the decision says of any 429 without a window: the API's words, the question back in the box, and the next question taken as soon as it is sent. No limit is held, and nothing counts down. A component test sends such a refusal, and fails if the page takes it for a usage limit.

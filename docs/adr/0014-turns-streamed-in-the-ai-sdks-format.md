@@ -186,3 +186,11 @@ The decision said "Leaving stops the model", and "Not done yet" began with what 
     - **"Nothing is sent while a model loads"** is done: a reader who hears nothing for 15 seconds is sent a line that is no event, and the library skips it.
 - **What is still not done,** of the list above: an answer is still stored only when it ends, so what a killed process had written is lost; a long conversation still fails where it should be shortened; nothing limits how many answers one account has written at once, or the size of a request.
 - **Two recordings were added** to the files that both sides test against: a stream that ends because its turn was stopped, and one with the line that keeps a silent connection open. The older recordings didn't change by a byte: the events are what they were, and only the way they travel is new.
+
+### 2026-11-18: how many answers at once, and how large a request
+
+Two items of "Not done yet" are done, in [ADR 0023](0023-answers-that-wait-their-turn.md): "no limit on how many conversations one account has answered at once, and none on the size of a request before it is read".
+
+- **A plan may limit how many answers one account has being written at once,** in all its conversations. One more is refused before anything is stored, like a question that comes too fast: a 429, with `at_once`. "One answer at a time per conversation" holds as before, and is checked first.
+- **A turn may also wait** before its model is asked, at a gate in front of a server that writes only so many answers at once. It is `running` meanwhile, and its stream has begun: `start` and `start-step`, then the line that keeps a silent connection open. The stream's format didn't change, and no recording did.
+- **The proxy refuses a body over 2 MB** on the API's routes: 413, as a problem document. A body that says its length is refused before any of it is passed on, and one sent in chunks once the limit is reached. The largest question the API takes fits, however its characters are written in JSON.

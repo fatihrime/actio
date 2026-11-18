@@ -225,3 +225,11 @@ Not changed: the order of ledger and counters, what a refusal says, and a hold t
 
 - **Still not done:** a limit on how many answers one account has written at once, which comes with the gate in front of a local model; and settling a turn whose process died, which comes with the worker.
 - **Found on the way:** a hold that ran out still shows as `reserved` in `GET /api/usage` until the account's next question. The engine clears expired holds when it makes a new one ([ADR 0006](0006-usage-limits-engine.md)), not when it is only read. Nothing is refused for it, and the page's meter shows what was used.
+
+### 2026-11-18: a plan limits how many answers are written at once
+
+"A limit on how many answers one account has written at once", under "Not done yet" and in the revision above, is done, with the gate in front of a local model ([ADR 0023](0023-answers-that-wait-their-turn.md)).
+
+- **The plans file has a third limit:** `[plans.<name>]` takes `answers_at_once`, how many answers one account may have being written at the same time, in all its conversations. Left out, there is none, as for the other two. So "a plan with neither limits nothing", above, is now a plan with none of the three. A guest may have 2 by default, an account 3.
+- **It is no window, and holds no credits.** It counts the account's turns that are running, from their rows in the database, and refuses one more before anything is held: a 429 with `at_once`, and without `window`, `resets_at` or `Retry-After`. A refusal at a usage limit is as it was.
+- **"Several answers written at once are each counted for what they really used"**, under "Harder", still holds, for fewer of them.

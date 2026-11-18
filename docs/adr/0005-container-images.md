@@ -73,3 +73,13 @@ We chose option 1 for both images.
 ### 2026-11-14: a third image, for tests only
 
 The end-to-end tests run this stack with a fake model as one more container ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md)). Its image, `packages/fakellm/Dockerfile`, is built like the API's, and its container follows every rule above: the same test checks the two compose files together. No installation ships it.
+
+### 2026-11-18: a fourth image, the proxy with its config
+
+Caddy's config now holds a limit that protects the API: the size of a request ([ADR 0023](0023-answers-that-wait-their-turn.md)). On a stack that was running, `make up` left that limit off, and nothing said so.
+
+- **Why.** The proxy ran the pinned Caddy image, with the Caddyfile mounted into it as one file. An editor or git replaces a file with a new one, which a mount of the old file never shows: the container no longer found its Caddyfile at all. And Compose doesn't recreate a container because a file it mounts has changed, whether the file is a bind mount or one of Compose's `configs:` (tried on Compose 5.7.0). The proxy went on with the config it had started with.
+- **Now the config is part of an image,** built from `deploy/caddy/Dockerfile`: the same pinned Caddy image, with the Caddyfile copied in, as the API's and the web app's code are copied into theirs. A change to the file is a new image, and `make up` or `make dev` recreates the proxy from it; `make dev` builds it too now. Nothing is mounted into the proxy.
+- **The build checks the config** (`caddy validate`): a mistake in it stops the build, and the proxy that is running goes on as it was.
+- **Watching the file was tried first,** with the folder mounted and Caddy started with `--watch`. Caddy's documentation says that the feature "is intended for use only in local development environments!", and a watcher can catch a file half-written. So it was dropped for the image.
+- **The rules above hold for it,** as for the other images: its base is pinned by digest, and its container runs read-only, as a non-root user, without capabilities, with its two folders in memory. A test in `deploy/tests/` holds it to being built from `deploy/caddy/`, with nothing mounted, and to a build that checks the config.

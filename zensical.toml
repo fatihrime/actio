@@ -45,6 +45,7 @@ nav = [
     { "0020. Usage limits on turns" = "adr/0020-usage-limits-on-turns.md" },
     { "0021. Usage limits in the page" = "adr/0021-usage-limits-in-the-page.md" },
     { "0022. Turns that run apart from their request" = "adr/0022-turns-that-run-apart-from-their-request.md" },
+    { "0023. Answers that wait their turn" = "adr/0023-answers-that-wait-their-turn.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]
