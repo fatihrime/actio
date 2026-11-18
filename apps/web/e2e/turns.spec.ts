@@ -2,6 +2,11 @@
 // reader, refused by the model's server, broken off half-way. After each, the page
 // shows what the server kept, and a reload shows the same. And the one thing that
 // doesn't end an answer: its reader going away. Whoever comes back reads along.
+//
+// Then what is refused before an answer begins: one answer more than a guest may have
+// written at once, and a request too large for the proxy in front of the API.
+import { randomUUID } from "node:crypto";
+
 import { Chat, expect, test } from "./chat";
 
 /** Twenty words: at half a second each, an answer still on its way after a reload
@@ -177,4 +182,84 @@ test("reasoning shows while it is written, then folds away", async ({
   await expect(
     thought.getByText("Blue light scatters most, and red light least."),
   ).toBeVisible();
+});
+
+test("a third answer at once is refused, and is answered once one of the two is stopped", async ({
+  chat,
+  page,
+}) => {
+  // Two answers in two conversations, at a word a second: twenty seconds each, which
+  // leaves the rest of the test room to spare. A guest may have two written at once
+  // (deploy/e2e/config/plans.toml).
+  await chat.open();
+  await chat.ask(`[[pace: 1]] First: ${TWENTY}`);
+  await expect(chat.answers).toContainText("one");
+  await chat.newChat.click();
+  await expect(chat.questions).toHaveCount(0);
+  await chat.ask(`[[pace: 1]] Second: ${TWENTY}`);
+  await expect(chat.answers).toContainText("one");
+
+  await chat.newChat.click();
+  await expect(chat.questions).toHaveCount(0);
+  await chat.ask("And a third, meanwhile?");
+
+  await expect(
+    page.getByText(
+      "2 answers are already being written for you, as many as your plan allows at once. Wait for one to finish, or stop one.",
+    ),
+  ).toBeVisible();
+  await expect(chat.box).toHaveValue("And a third, meanwhile?");
+  await expect(chat.questions).toHaveCount(0);
+
+  // Stop the second, from its conversation.
+  await chat.listed.filter({ hasText: "Second:" }).click();
+  await chat.stop.click();
+  await expect(
+    page.getByText("This answer was stopped before it was finished."),
+  ).toBeVisible();
+
+  await chat.converse("And a third, meanwhile?");
+
+  // The first was still being written all the while: the stop made the room.
+  await chat.listed.filter({ hasText: "First:" }).click();
+  await expect(chat.stop).toBeVisible();
+  await expect(chat.answers).not.toContainText("twenty");
+  await chat.stop.click();
+  await chat.answered();
+});
+
+test("a request too large for the proxy is refused there, and a long one reaches the API", async ({
+  chat,
+  page,
+}) => {
+  await chat.open();
+  await expect(chat.box).toBeVisible(); // there is a session now
+  // As the page asks, with this browser's session.
+  const ask = (characters: number) =>
+    page.request.post(`/api/conversations/${randomUUID()}/turns`, {
+      data: {
+        message: {
+          id: randomUUID(),
+          parts: [{ type: "text", text: "a".repeat(characters) }],
+        },
+        parent_id: null,
+        thinking: false,
+      },
+    });
+
+  // Two million characters: more than the proxy lets through in one request.
+  const tooLarge = await ask(2_000_000);
+  expect(tooLarge.status()).toBe(413);
+  expect(tooLarge.headers()["content-type"]).toBe("application/problem+json");
+  expect(((await tooLarge.json()) as { detail: string }).detail).toBe(
+    "This is too much to send at once: Actio takes at most 2 MB in one request. Shorten the message, and send it again.",
+  );
+
+  // One character more than a question may have: the proxy lets it through, and the
+  // API says what is wrong with it.
+  const tooLong = await ask(100_001);
+  expect(tooLong.status()).toBe(422);
+  expect(await tooLong.text()).toContain(
+    "a message has at most 100000 characters",
+  );
 });

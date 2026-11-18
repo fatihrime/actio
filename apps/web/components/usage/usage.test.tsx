@@ -406,6 +406,29 @@ describe("a usage limit that is reached", () => {
     expect(send()).toBeEnabled();
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
   });
+
+  it("isn't taken for as many answers being written as the plan allows at once", async () => {
+    // What the API says then: no window, and no time to wait, since nobody knows when
+    // an answer ends.
+    const atOnce =
+      "2 answers are already being written for you, as many as your plan allows at once. Wait for one to finish, or stop one.";
+    const api = fakeApi()
+      .on(TURNS, () => problem(429, atOnce, { at_once: 2 }))
+      .on(CONVERSATION, missing);
+    const user = open();
+
+    await ask(user, "Why is the sky blue?");
+
+    // In the API's words, as that question's own problem: once an answer ends, or is
+    // stopped, it can be sent again.
+    expect(await screen.findByText(atOnce)).toBeInTheDocument();
+    await backInTheBox("Why is the sky blue?");
+    expect(screen.queryByText(/usage limit/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("timer")).not.toBeInTheDocument();
+    expect(send()).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    expect(api.to(TURNS)).toHaveLength(1);
+  });
 });
 
 describe("a model that costs nothing", () => {
