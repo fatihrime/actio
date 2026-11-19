@@ -1,9 +1,10 @@
 """Deleting what has expired: guests whose day is over, and sessions nobody used."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio.core.database import create_engine, create_session_factory
@@ -105,6 +106,53 @@ async def test_a_sweep_deletes_a_batch_at_most_and_the_oldest_first(db: AsyncSes
     assert (await count(db, User), await count(db, BrowserSession)) == (0, 0)
 
 
+READ_AGAIN_FOR_EACH_ROW = (
+    "enable_hashagg",
+    "enable_hashjoin",
+    "enable_mergejoin",
+    "enable_material",
+    "enable_sort",
+)
+"""The planner's settings that, turned off, leave it one way to join a statement with
+its subquery: read the subquery again for each row."""
+
+TWO_GUESTS_IN_ONE_STATEMENT = text(
+    "DELETE FROM users WHERE id IN ("
+    "SELECT id FROM users WHERE is_guest AND expires_at <= :now"
+    " ORDER BY expires_at LIMIT 2 FOR UPDATE SKIP LOCKED"
+    ") RETURNING id"
+)
+"""The sweep as it was once written: the batch as a subquery of the delete."""
+
+
+async def test_a_sweep_deletes_a_batch_at_most_whatever_plan_the_database_picks(
+    db: AsyncSession,
+) -> None:
+    """How the batch is taken holds it to its size, not the plan Postgres happens to
+    pick. Here the planner may not read a subquery once and remember it. A delete with
+    its batch as a subquery then reads it again for each row, each time skips the rows it
+    has deleted already, and so deletes every expired guest, not two."""
+    for minute in range(5):
+        await sessions.start_guest_session(db, now=NOON + timedelta(minutes=minute))
+    await db.commit()
+    all_expired = NOON + timedelta(days=2)
+    for setting in READ_AGAIN_FOR_EACH_ROW:
+        await db.execute(text(f"SET LOCAL {setting} = off"))
+    # The control, undone at once: with these settings the one-statement form does go
+    # past its batch. If it stops, as it may with another version of Postgres, this test
+    # proves nothing any more, and has to say so.
+    async with db.begin_nested() as control:
+        deleted = await db.execute(TWO_GUESTS_IN_ONE_STATEMENT, {"now": all_expired})
+        assert len(deleted.all()) == 5
+        await control.rollback()
+
+    # Two guests with their sessions, then two more sessions on their own, as above.
+    assert await sessions.delete_expired(db, now=all_expired, limit=2) == (2, 2)
+    await db.commit()
+
+    assert (await count(db, User), await count(db, BrowserSession)) == (3, 1)
+
+
 async def test_a_sweep_skips_rows_another_transaction_holds(
     db: AsyncSession, migrated: str
 ) -> None:
@@ -118,8 +166,11 @@ async def test_a_sweep_skips_rows_another_transaction_holds(
         async with create_session_factory(engine)() as other:
             await other.execute(select(User).where(User.id == held.user_id).with_for_update())
 
-            guests, _ = await sessions.delete_expired(db, now=NOON + GUEST_LIFETIME)
-            await db.commit()
+            # With a time limit: a sweep that waited for the held row would wait for
+            # ever, since the other transaction ends only after it.
+            async with asyncio.timeout(5):
+                guests, _ = await sessions.delete_expired(db, now=NOON + GUEST_LIFETIME)
+                await db.commit()
 
             assert guests == 1
             assert set((await db.scalars(select(User.id))).all()) == {held.user_id}

@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import Select, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio.core.ids import new_id
@@ -120,27 +120,39 @@ async def delete_expired(
     batches of `limit`, oldest first, and skips rows another transaction holds instead
     of waiting for them: any number of sweeps can run at once.
     """
-    guests = (
+    guests = await _held(
+        db,
         select(User.id)
         .where(User.is_guest, User.expires_at <= now)
         .order_by(User.expires_at)
-        .limit(limit)
-        .with_for_update(skip_locked=True)
+        .limit(limit),
     )
-    deleted_guests = await db.scalars(delete(User).where(User.id.in_(guests)).returning(User.id))
+    if guests:
+        await db.execute(delete(User).where(User.id.in_(guests)))
     # What is left after the guests' own sessions went with them: accounts' sessions
     # that weren't used for too long.
-    expired = (
+    expired = await _held(
+        db,
         select(BrowserSession.id)
         .where(BrowserSession.expires_at <= now)
         .order_by(BrowserSession.expires_at)
-        .limit(limit)
-        .with_for_update(skip_locked=True)
+        .limit(limit),
     )
-    deleted_sessions = await db.scalars(
-        delete(BrowserSession).where(BrowserSession.id.in_(expired)).returning(BrowserSession.id)
-    )
-    return len(deleted_guests.all()), len(deleted_sessions.all())
+    if expired:
+        await db.execute(delete(BrowserSession).where(BrowserSession.id.in_(expired)))
+    return len(guests), len(expired)
+
+
+async def _held(db: AsyncSession, batch: Select[uuid.UUID]) -> list[uuid.UUID]:
+    """Take a batch of rows by their ids, and hold them until the transaction ends,
+    skipping the rows another transaction holds. Whoever deletes them afterwards
+    deletes exactly these: nobody else can touch a row that is held.
+
+    A statement of its own, on purpose. As a subquery of the delete, the plan may read
+    the batch again for each row it looks at, and each time it skips the rows the delete
+    has removed already: the batch would grow past its limit.
+    """
+    return list((await db.scalars(batch.with_for_update(skip_locked=True))).all())
 
 
 def _principal(user: User, session: BrowserSession) -> Principal:
