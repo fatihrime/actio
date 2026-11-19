@@ -27,7 +27,7 @@ flowchart LR
 ```
 
 - **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies need. A request to the API with a body over 2 MB it refuses itself, with a 413 in the API's own error format: a body that says its length before any of it is passed on, one sent in chunks once the limit is reached ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)). Its configuration, `deploy/caddy/Caddyfile`, is built into its image, as the API's code is into the API's: after a change to it, `make up` or `make dev` again applies it, and a mistake in it stops the build while the running proxy goes on as it was.
-- **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, and `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). Today the API serves its interactive docs, two probes, guest sessions and accounts:
+- **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)), and `worker` runs background jobs (below). Today the API serves its interactive docs, two probes, guest sessions and accounts:
     - `/api/healthz` answers whenever the process is alive;
     - `/api/readyz` answers 200 only when the database is reachable and migrated and Valkey answers. Otherwise it answers 503 and names what is missing;
     - `POST /api/session/guest` starts a session as a new guest and sets its cookie, `GET /api/me` says who the cookie belongs to, and `DELETE /api/session` ends it ([ADR 0009](adr/0009-sessions-in-the-database.md));
@@ -40,6 +40,11 @@ flowchart LR
     - a model's server writes only so many answers at once: Ollama one, unless the models file says otherwise. A turn that comes while its server is busy waits its turn inside the API, at a gate in front of the server, running like any other, and its model is asked once there is room ([ADR 0023](adr/0023-answers-that-wait-their-turn.md));
     - a turn costs credits, and an account has only so many per session and per week, from `config/plans.toml`. The most a turn can cost is held before a model is asked; a turn that doesn't fit is answered 429, with the moment the limit starts over. `GET /api/usage` says how much is used ([ADR 0020](adr/0020-usage-limits-on-turns.md));
     - a plan also says how many answers one account may have being written at once, and one more is answered 429, before anything is kept. An account reads along with an answer in six places at once at most: one more join is answered 429 too ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)).
+- **The worker** is the same application, run with `--role worker`. It isn't one of the containers yet: `uv run actio --role worker` runs it ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md)).
+    - It runs background jobs from a queue in Postgres, Procrastinate's, one at a time. A job is deferred in the transaction of the change it follows, so the two are committed together, or not at all.
+    - A job can also have a schedule. Today there is one job: every ten minutes, the worker deletes expired guests and sessions, which the API otherwise deletes only after a new guest arrives.
+    - Told to stop, by SIGTERM or Ctrl-C, it lets the job in hand finish for up to 15 seconds, and ends well, whenever it is told. A second signal changes nothing.
+    - It lives through a restart of the database: it stops, starts again a second later, and waits for the database as when it first started.
 - **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
 - **The web app** is a Next.js application: the chat ([ADR 0015](adr/0015-the-web-chat-calls-the-api-from-the-browser.md)).
     - **Its server sends only the frame of the page.** Everything of yours is fetched by the browser, straight from the API, with the session cookie. Nothing but the API handles a session.
@@ -54,7 +59,7 @@ flowchart LR
     - **An answer is shown as the markdown it is written in:** headings, tables, coloured code, formulas and diagrams. It is a model's text, so it can do nothing else: HTML in it is shown as text, no picture is fetched, and a link opens only after you have seen its address ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
     - **Its types for the API are generated** from the API's recorded description, `apps/api/openapi.json`, so a change to the API that the page doesn't follow fails to compile.
 - **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
-    - Postgres holds six tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, the turns in which a model answered, and the usage ledger: what each turn used, in rows that are only ever added.
+    - Postgres holds six tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, the turns in which a model answered, and the usage ledger: what each turn used, in rows that are only ever added. Beside them is the queue of background jobs, in Procrastinate's own tables.
     - Valkey holds what is counted fast: the rate limits' counters, one number per client address or email address that has made an attempt lately, under a hashed name; and each account's usage counters, with the credits held for answers being written.
     - Valkey also holds what each running turn streams, in a stream of its own, so that an answer can be read by more than one reader and from its beginning. A stream is deleted a minute after its turn has ended.
     - Valkey keeps nothing on disk. After a restart the rate limits start full, and an account's usage counters are rebuilt from the ledger the next time they are needed. An answer that was being written is finished unread, and stored as ever.
@@ -64,11 +69,12 @@ Inside the API, the code is split into layers that only import downward, and a t
 | Layer | Holds |
 |---|---|
 | `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, which attempts are rate-limited, the error format. The only layer that knows the web framework |
+| `actio.worker` | The worker: every background job it runs, with what each needs, and their schedules. Beside `actio.api`: neither imports the other |
 | `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Running turns apart from their requests, the stream of what each writes, and how many answers and readers one account has at once. Tables and rules, with no HTTP |
 | `actio.catalog` | The models on offer: reading `config/models.toml`, asking a model's server about it, and the gate where answers wait while that server is busy |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
 | `actio.usage` | Usage limits: reading `config/plans.toml`, holding credits before a request and counting them after it through the [engine](reference/quota.md), and the ledger |
-| `actio.core` | Settings, ids, the database connection and its migrations, the rate limiter, reading a file in `config/`, hearing the signal that stops the process |
+| `actio.core` | Settings, ids, the database connection and its migrations, the queue of background jobs, the rate limiter, reading a file in `config/`, hearing the signal that stops the process |
 
 | Path | Goes to |
 |---|---|
@@ -94,14 +100,14 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 
 The next phases add:
 
-- **a worker process,** the same Python application run with `--role worker`, which takes background jobs from a queue in Postgres ([ADR 0001](adr/0001-one-app-several-process-roles.md));
+- **the worker's container,** so that `make up` runs the worker too, and `--role all`, the API and the worker in one process, for the smallest installations ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md));
 - **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them. The router will also say when an answer waits for its server, and how many are ahead of it.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `apps/api` | The Python application: the API today, plus the worker later |
+| `apps/api` | The Python application: the API and the worker |
 | `apps/web` | The Next.js web app: the chat's pages and components, its calls to the API, and their tests |
 | `packages/fakellm` | A fake LLM server for tests, scripted by directives in the prompt |
 | `packages/llm` | Model clients: a neutral chat format, adapters for Ollama and for OpenAI-compatible servers, a guess at a text's tokens, and the `actio-llm` command |
