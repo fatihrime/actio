@@ -11,8 +11,11 @@ The worker of an app here runs jobs of the test's own, in place of the real ones
 """
 
 import asyncio
+import contextlib
 import logging
+import multiprocessing
 import os
+import re
 import signal
 import socket
 import sys
@@ -331,6 +334,27 @@ async def test_a_job_in_hand_at_the_signal_still_finishes_when_the_app_is_then_s
     assert await queue_of(migrated) == []  # it succeeded, and was deleted
 
 
+async def test_in_a_server_started_from_another_process_only_the_first_signal_is_handed_on(
+    settings: Settings, open_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uvicorn's reloader runs the server in a process of its own, as in `make dev`.
+    Such a server is told to stop several times over, and uvicorn takes a SIGINT that
+    follows another signal for "quit at once": it would never shut the application
+    down. So there the web server, which the test's handler stands in for, gets the
+    first signal and no other. Here the test's process is made to look like one that
+    another started."""
+    monkeypatch.setattr(multiprocessing, "parent_process", lambda: object())
+
+    with standing_in_for_the_signals() as reached:
+        async with asyncio.timeout(20), open_app(settings):
+            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(0.05)
+
+    assert reached == [signal.SIGTERM]
+
+
 def cant_work(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     """What the worker said when it couldn't work."""
     return [
@@ -469,3 +493,102 @@ async def test_the_all_process_serves_sweeps_by_the_workers_schedule_and_ends_wh
     # It read which migration the database is at, and ran none: nothing of Alembic's.
     assert "alembic" not in log
     assert b'"GET /api/healthz HTTP/1.1" 200' in out
+
+
+async def test_the_server_that_the_reloader_started_shuts_the_application_down_whatever_follows(
+    migrated: str,
+) -> None:
+    """`make dev` runs the role with --reload: uvicorn's reloader, and the server in a
+    process of its own. A Ctrl-C there reaches that server more than once, and with a
+    SIGTERM beside it: from the terminal, from concurrently, from the reloader. Here
+    the server itself is sent a SIGTERM and then a SIGINT, the order in which uvicorn
+    quits at once. It shuts the application down all the same, its worker included.
+
+    The SIGINT comes while the server waits for a request it is answering, which is
+    when uvicorn would act on it: a readiness probe that takes two seconds, because
+    what stands in for Valkey here takes every connection and never says a word. That
+    request is answered too.
+
+    The two processes are in a group of their own, which is ended as one, pass or fail:
+    the server holds the pipe that the log is read from."""
+    asked = asyncio.Event()
+    hold = asyncio.Event()
+
+    async def say_nothing(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        asked.set()
+        await hold.wait()
+        writer.close()
+
+    silent = await asyncio.start_server(say_nothing, "127.0.0.1", 0)
+    port = a_free_port()
+    environment = os.environ | {
+        "ACTIO_DATABASE_URL": migrated,
+        "ACTIO_VALKEY_URL": f"valkey://127.0.0.1:{silent.sockets[0].getsockname()[1]}/0",
+        "ACTIO_PORT": str(port),
+        "ACTIO_MODELS_FILE": str(CONFIG / "models.toml"),
+        "ACTIO_PLANS_FILE": str(CONFIG / "plans.toml"),
+    }
+    reloader = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "actio",
+        "--role",
+        "all",
+        "--reload",
+        env=environment,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert reloader.stderr is not None
+    said: list[str] = []
+    server: int | None = None
+
+    async def read_until(awaited: str, *, within: float) -> None:
+        """Read the log up to the line that holds `awaited`, noting the server's
+        process on the way."""
+        nonlocal server
+        assert reloader.stderr is not None
+        async with asyncio.timeout(within):
+            async for line in reloader.stderr:
+                said.append(line.decode())
+                if started := re.search(r"Started server process \[(\d+)\]", said[-1]):
+                    server = int(started[1])
+                if awaited in said[-1]:
+                    return
+        pytest.fail(f"it ended before it said {awaited!r}:\n{''.join(said)}")
+
+    ended_well = False
+    try:
+        # Its worker works: the application has started, and listens for the signals.
+        await read_until("Starting worker on all queues", within=30)
+        assert server is not None
+        async with httpx2.AsyncClient(timeout=20) as client:
+            probe = asyncio.create_task(client.get(f"http://127.0.0.1:{port}/api/readyz"))
+            async with asyncio.timeout(10):
+                await asked.wait()  # the request is being answered
+            os.kill(server, signal.SIGTERM)
+            await read_until("Shutting down", within=10)  # the server waits for its request
+            os.kill(server, signal.SIGINT)
+            await read_until("Finished server process", within=15)
+            async with asyncio.timeout(10):
+                answered = await probe
+        reloader.send_signal(signal.SIGTERM)
+        async with asyncio.timeout(15):
+            _, rest = await reloader.communicate()
+        ended_well = True
+    finally:
+        hold.set()
+        silent.close()
+        if not ended_well:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(reloader.pid, signal.SIGKILL)
+            async with asyncio.timeout(10):
+                await reloader.communicate()
+
+    log = "".join(said) + rest.decode()
+    assert answered.status_code == 503  # Valkey never answered, and the request was
+    assert "Stopped worker on all queues" in log
+    assert "Waiting for application shutdown." in log
+    assert "Application shutdown complete." in log
+    assert "Traceback" not in log

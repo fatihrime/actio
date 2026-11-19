@@ -2,6 +2,7 @@
 :func:`create_app_with_worker` for the API with the worker inside it."""
 
 import asyncio
+import multiprocessing
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 
@@ -105,7 +106,14 @@ def create_app(
                 if inside is not None:
                     loop.call_soon_threadsafe(inside.stop)
 
-            stack.callback(on_stop_signal(told_to_stop))
+            # uvicorn takes a SIGINT that follows another signal for "quit at once", and
+            # then never shuts the application down: nothing below would run. A server
+            # that uvicorn started from another process, as its reloader does, is told
+            # to stop several times over: by that process, by the terminal, and by
+            # whatever runs the two, as concurrently does in `make dev`. There the first
+            # signal counts, and later ones change nothing.
+            started_by_another = multiprocessing.parent_process() is not None
+            stack.callback(on_stop_signal(told_to_stop, once=started_by_another))
             # Registered after the rest, so it runs before it on the way out: whatever
             # is still being written is ended and recorded while the database is still
             # open.

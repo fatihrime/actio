@@ -46,6 +46,38 @@ def test_the_listener_hears_first_and_the_handler_still_handles(handled: list[st
     assert handled == ["listener", "server", "listener", "server"]
 
 
+def test_told_once_only_the_first_signal_is_heard_and_handed_on(handled: list[str]) -> None:
+    """For a server that takes a second telling for "quit at once"."""
+    stop_listening = on_stop_signal(lambda: handled.append("listener"), once=True)
+    try:
+        told_to_stop()
+        told_to_stop()
+    finally:
+        stop_listening()  # it listens for SIGINT too, which the test run needs back
+
+    assert handled == ["listener", "server"]
+
+
+def test_told_once_a_signal_of_the_other_kind_changes_nothing_either(handled: list[str]) -> None:
+    """A SIGTERM, then a SIGINT: the order in which uvicorn quits at once, without
+    shutting the application down. The SIGINT reaches nobody."""
+    interrupted: list[int] = []
+    before = signal.signal(signal.SIGINT, lambda received, _frame: interrupted.append(received))
+    try:
+        stop_listening = on_stop_signal(lambda: handled.append("listener"), once=True)
+        try:
+            told_to_stop()
+            os.kill(os.getpid(), signal.SIGINT)
+        finally:
+            stop_listening()
+        os.kill(os.getpid(), signal.SIGINT)  # handled as before again, once nobody listens
+    finally:
+        signal.signal(signal.SIGINT, before)
+
+    assert handled == ["listener", "server"]
+    assert interrupted == [signal.SIGINT]
+
+
 def test_after_listening_the_signal_is_handled_as_before(handled: list[str]) -> None:
     server = signal.getsignal(signal.SIGTERM)
     stop_listening = on_stop_signal(lambda: handled.append("listener"))
