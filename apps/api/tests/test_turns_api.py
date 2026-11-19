@@ -44,6 +44,8 @@ from actio_llm import (
 pytestmark = pytest.mark.anyio
 
 PROBLEM = "application/problem+json"
+PATIENCE_S = 5.0
+"""How long a request that has to be refused at once is waited for."""
 # What a model is told before the conversation, on the test clock's day. Its wording is
 # pinned in test_answering.py; here it only has to come first.
 TODAY = context.for_model([], now=datetime(2026, 11, 10, 12, tzinfo=UTC))[0]
@@ -769,8 +771,10 @@ async def test_a_conversation_is_answered_one_question_at_a_time(scripted: Any) 
     first = asyncio.create_task(chat.turn(question))
     await model.started.wait()
 
-    meanwhile = await chat.ask("Another, before the answer came")
-    again = await chat.turn({"answer_to": question["message"]["id"]})
+    # Both are refused at once. With a time limit: a conversation that took one of them
+    # would ask the model, which is held, and the request would never end.
+    meanwhile = await asyncio.wait_for(chat.ask("Another, before the answer came"), PATIENCE_S)
+    again = await asyncio.wait_for(chat.turn({"answer_to": question["message"]["id"]}), PATIENCE_S)
     running = await chat.read()
     in_another_conversation = asyncio.create_task(elsewhere.ask("A question somewhere else"))
     hold.set()
