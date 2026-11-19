@@ -341,3 +341,9 @@ In a spike before the build: a throwaway project with Procrastinate 3.11.0, SQLA
 - **`/api/readyz` doesn't say whether the worker inside an `all` process works.** It is the next small step;
 - **Ctrl-C under `make dev` is a force quit.** The terminal sends the SIGINT to every process `make dev` started, and concurrently, which runs the API and the web app side by side ([ADR 0004](0004-local-development-stack.md)), sends each of them the same signal again. uvicorn takes the second as its force quit. So an answer being written isn't recorded as interrupted, and a job in hand stays `doing`, until something sweeps them. That is older than this step: the API alone was stopped the same way, and the measurement above found it. Putting it right is a step of its own;
 - the rest of the list of the revision above.
+
+### 2026-11-19: Ctrl-C under `make dev`
+
+"Ctrl-C under `make dev` is a force quit", in the list above, is done. A server that uvicorn's reloader started now takes the first signal it gets, and later ones change nothing: the application is shut down, and the job in hand gets its grace ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision of the same day). Measured there, a second into a job of eight seconds: the processes ended 7.3 seconds after Ctrl-C, with the job finished and its worker off Procrastinate's list, where the job had stayed `doing` before.
+
+The bullet "A SIGINT that follows another signal is uvicorn's force quit", in the revision above, still holds for a server started directly, as a container starts it or someone at a terminal without `--reload`.

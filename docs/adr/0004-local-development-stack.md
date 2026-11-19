@@ -61,3 +61,9 @@ The background jobs have a worker of their own ([ADR 0024](0024-background-jobs-
 - **Its log is part of the API's,** in the same terminal, one line a record, as the worker's container writes it.
 - **Saving a file stops the worker as Docker stops a container:** the job in hand gets its grace, as the answers being written get theirs, and then the new code starts.
 - **Ctrl-C is rougher than a save.** concurrently sends the terminal's SIGINT on to the processes it started, which have had it from the terminal already, and uvicorn takes a second SIGINT as its force quit: the application's shutdown is skipped. An idle worker has stopped by then. A job in hand, like an answer being written, is cut off. That is older than this revision, and is still to be put right ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day, "Still not done").
+
+### 2026-11-19: Ctrl-C shuts the application down
+
+"Ctrl-C is rougher than a save", in the revision above, no longer holds. The server that `make dev` runs now takes the first signal it gets and lets later ones change nothing, so a Ctrl-C stops it as a save does: an answer being written gets its moment and is recorded, and the job in hand gets its grace ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision of the same day, with what was measured). Nothing in `make dev`'s own command line changed: a process group of its own for the API was tried first, and didn't help.
+
+A second Ctrl-C no longer quits at once there. Ctrl-\ does.

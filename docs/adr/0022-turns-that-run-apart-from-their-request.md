@@ -319,3 +319,38 @@ Two items of "Not done yet" are done, in [ADR 0023](0023-answers-that-wait-their
 - **"Nothing limits how many readers one account has open."** An account has six at most; a seventh may not join. The request that starts a turn is never refused for it.
 
 What is decided above holds for a turn that waits, as for one that is written: it says every 15 seconds that it is alive, which keeps its hold and its stream; Stop ends it at once, as `stopped`, with nothing written; a shutdown records it as `interrupted`. "One process" holds for the gate and the count of readers too: both are in the process, as the turns are.
+
+### 2026-11-19: a server that the reloader started takes the first signal only
+
+**What was wrong:** under `make dev`, Ctrl-C never shut the application down. An answer that was being written was not halted and recorded as `interrupted`, as "A shutdown" above says: it stayed `running` until it was given up on. It had been so since this record was accepted. The measurements above stop the server with one SIGTERM, as Docker does, and none of them pressed Ctrl-C on `make dev`'s own command line. It was found when `make dev` got a worker ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision "`--role all`, and a worker in `make dev`"): a job in hand was cut off the same way.
+
+**Why,** measured on `make dev`'s command line with a stand-in that notes each signal it gets:
+
+- **uvicorn takes a SIGINT that follows another signal for "quit at once"** (`Server.handle_exit`), whichever signal came first. It then skips the application's shutdown, and the process ends;
+- **the server is told several times over.** `make dev` runs the API with `--reload`: uvicorn's reloader, and the server in a process of its own. At a Ctrl-C the server got a SIGINT from the terminal, which sends it to every process of the foreground group; a second one 0.08 seconds later from concurrently, which sends each command's whole tree of processes the signal it got itself; and a SIGTERM at the same moment, also from concurrently, which ends the API once the web app has ended (`--kill-others`). The reloader sends a SIGTERM of its own.
+
+**Decided: in a server that another process started, the first signal counts, and later ones change nothing.**
+
+- **`on_stop_signal(heard, once=True)`** (`actio.core.signals`): the first SIGTERM or SIGINT is heard and handed on to the web server, and every later one, of either kind, reaches nobody, for as long as the application listens: until its own shutdown has begun. From then on uvicorn no longer looks at whether it was told twice. The worker has the same rule for its own signals ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)). Two signals that arrive together can't both be the first: being the first is taking a lock, which is one step.
+- **`actio.app` asks for it when the process was started by another** (`multiprocessing.parent_process()`), as uvicorn's reloader starts its server, and as its supervisor of several workers would. Both stop their servers with a SIGTERM, so a SIGINT that reaches such a server directly is the terminal's, or passed on by whatever runs it.
+- **A server started directly is as it was:** the API's container, and `actio --role api` at a terminal. There a second Ctrl-C is still uvicorn's "quit at once", for someone who means it.
+
+**Not chosen:**
+
+- **A process group of its own for the API in `make dev`,** out of the terminal's reach. Built and measured first: the server then got one SIGINT, from concurrently, and concurrently's SIGTERM in the same instant. A SIGINT after a SIGTERM is "quit at once" too, and the application still wasn't shut down;
+- **`make dev` without `--kill-others`:** it would no longer end when the API or the web app fails to start, and the reloader's own SIGTERM would remain;
+- **a moment in which a second signal doesn't count:** a guess at how far apart two signals of one Ctrl-C are;
+- **the first signal only, everywhere:** it would take the second Ctrl-C from someone who runs the API at a terminal.
+
+**What it costs:** under `--reload` a second Ctrl-C no longer quits at once. The stop takes what it takes: the answers' 15 seconds and up to 5 more to record them, and the job in hand's 15. Ctrl-\ (SIGQUIT) still ends the processes at once.
+
+**What it doesn't cover:** a Ctrl-C in the moment in which the server starts, after a save too, before the application listens. That one is uvicorn's alone, with its second telling. Nothing is being written yet then.
+
+**Measured,** on `make dev`'s command line, with the app that has the worker inside it, a second into a job of eight seconds:
+
+- **before:** the processes were gone 0.2 to 0.4 seconds after Ctrl-C. The job stayed `doing`, its worker stayed on Procrastinate's list, and the server's log had no `Waiting for application shutdown.`;
+- **after:** they ended 7.3 seconds after Ctrl-C, when the job had finished: no row left, the worker off the list, `Waiting for application shutdown.` and `Application shutdown complete.` in the log, no trace;
+- **a second Ctrl-C a second after the first** changed nothing: the application's shutdown had begun by then, and was waiting for the job. A Ctrl-\ a second later ended the processes 0.05 seconds after it, with the job left `doing`;
+- **a real `make dev` session, idle:** it ended 0.5 seconds after Ctrl-C, with both lines in the server's log.
+
+A test starts `actio --role all --reload` for real, and sends its server a SIGTERM and then a SIGINT while it waits for a request it is answering, which is when uvicorn would quit. It fails unless that request was answered and the application was shut down.
