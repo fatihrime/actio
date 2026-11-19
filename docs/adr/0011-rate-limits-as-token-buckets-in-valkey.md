@@ -132,3 +132,17 @@ Separately, a guest expires after a day ([ADR 0009](0009-sessions-in-the-databas
 
 - **Every ten minutes,** the worker deletes a batch of expired guests and sessions, the same batch a new guest's sweep deletes. A worker that starts sweeps at once, unless another has since the last ten-minute mark.
 - **The sweep after each new guest stays.** A busy installation is kept clear by its newcomers, a quiet one by the schedule. Both skip rows the other holds, so neither waits.
+
+### 2026-11-19: a sweep takes its batch in a statement of its own
+
+**What was wrong:** "in batches of 100", above, held only as long as Postgres planned the sweep one way. The sweep deleted its batch in one statement, with the batch as a subquery of the delete. A plan that reads that subquery again for each row it looks at deletes more than the batch: each time, the subquery skips the rows the delete has removed already, and the next ones come. With the planner kept from reading the subquery once, a sweep that was asked for two of five expired guests deleted all five.
+
+**No harm came of it.** Left to itself, Postgres 17 read the subquery once: measured on five expired guests, and on 50,000, where the old statement deleted 100 for the 100 it was asked for. Both plans put the batch in a hash first. And a sweep deletes only what has expired, which nobody could use any more. But nothing held Postgres to those plans, and one sweep's transaction could have grown past its batch after an upgrade.
+
+**Why it shows only now:** the test of the batch passed, with the plan of the day. The worker's second job, which gives up on turns a dead process left ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "the worker gives up on turns nobody looks at"), was first written the same way, and went past its batch in its own test, with the plan Postgres picked there. That named the cause, and this sweep had the same form.
+
+**What changed:** a sweep takes each batch, of guests and then of sessions, by a statement of its own, which holds those rows, and deletes exactly them in the next. That holds a batch to its size whatever the plan. Rows that another transaction holds are skipped as before. A sweep that finds nothing sends two statements, as it did. One that finds guests and sessions sends four.
+
+**Two sweeps at once can still wait a moment, one for the other,** as they could before: when the second takes, as expired sessions, the sessions of guests the first one holds, the first one's delete waits until the second has committed, and then finds those sessions gone. Neither waits for a row it was going to take itself, and there is no circle in it.
+
+**A test holds it.** For its own transaction it turns off the planner's ways of reading a subquery once: `enable_hashagg`, `enable_hashjoin`, `enable_mergejoin`, `enable_material` and `enable_sort`. It failed on the sweep as it was, with five guests deleted for two, and passes now. It also runs the old statement itself first, as a control that is undone at once, and fails if that no longer goes past its batch: with another version of Postgres those settings may stop forcing the plan, and the test would otherwise pass without proving anything.
