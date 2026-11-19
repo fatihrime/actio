@@ -65,3 +65,11 @@ The `worker` role exists: `python -m actio --role worker` runs background jobs f
 ### 2026-11-19: the worker's container, and `all` still to come
 
 `make up` runs the worker as a container of its own, from the same image as the API, beside it: production runs `api` and `worker` apart, as "Harder" above says ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day). `all` did not come with it, as the revision above said it would: it comes with a worker in `make dev`, in the next step. Until then `make dev` runs no worker, and one is run there by hand.
+
+### 2026-11-19: the `all` role
+
+`python -m actio --role all` exists: the API's web server, with the worker running inside the same process, its jobs on the API's own database pool ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision "`--role all`, and a worker in `make dev`").
+
+- **What it is for:** the smallest installations, where one process is enough, and `make dev`, which runs it with `--reload`: the worker's code then reloads with the API's ([ADR 0004](0004-local-development-stack.md), revision of the same day).
+- **It doesn't migrate,** as `api` doesn't: `actio --role migrate` stays its own step, run before.
+- **Production still runs `api` and `worker` apart,** in containers of their own, as "Harder" above says: a crash in one would take the other down, and each is stopped, started again and limited on its own. `compose.yaml` doesn't use `all`.

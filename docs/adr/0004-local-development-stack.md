@@ -50,3 +50,14 @@ We chose option 3. `make dev` starts the containers, then runs the API and the w
     - each version is one line in `compose.yaml`;
     - the routing lives in one Caddyfile;
     - going fully native means installing the three servers and pointing the settings at them.
+
+## Revisions
+
+### 2026-11-19: `make dev` runs the worker too
+
+The background jobs have a worker of their own ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)), which `make up` runs as a container. `make dev` now runs it as well, inside the API's process: `uv run actio --role all --reload` takes the place of `--role api --reload` ([ADR 0001](0001-one-app-several-process-roles.md), revision of the same day). Nothing else in `make dev` changed: it still stops the containers of `make up` first, migrates, and runs two processes, named `api` and `web`.
+
+- **One process, not a third one.** A worker run beside the API would need a reloader of its own; without one it would go on running the code it started with after a file was saved, and run jobs that the code no longer has. Inside the API's process it reloads with the API, by the same watcher. And it is one process fewer on a 16 GB machine.
+- **Its log is part of the API's,** in the same terminal, one line a record, as the worker's container writes it.
+- **Saving a file stops the worker as Docker stops a container:** the job in hand gets its grace, as the answers being written get theirs, and then the new code starts.
+- **Ctrl-C is rougher than a save.** concurrently sends the terminal's SIGINT on to the processes it started, which have had it from the terminal already, and uvicorn takes a second SIGINT as its force quit: the application's shutdown is skipped. An idle worker has stopped by then. A job in hand, like an answer being written, is cut off. That is older than this revision, and is still to be put right ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day, "Still not done").

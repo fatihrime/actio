@@ -268,3 +268,76 @@ In a spike before the build: a throwaway project with Procrastinate 3.11.0, SQLA
 - **`--role all`, and a worker in `make dev`:** the next step;
 - **a stack that comes back after a reboot.** No container but the worker has a restart policy, so after Docker was restarted `make up` has to be run again; and a worker that Docker couldn't stop comes back alone until then. A policy for the whole stack would answer both;
 - the rest of the list above: retries; a queueing lock; jobs left `doing` by a worker that died; jobs cut off at a stop that stay `aborted`; cleaning out failed and aborted jobs; more than one job at a time.
+
+### 2026-11-19: `--role all`, and a worker in `make dev`
+
+`actio --role all` runs the API's web server with the worker inside the same process, and `make dev` runs it, with `--reload` ([ADR 0004](0004-local-development-stack.md), revision of the same day). The first item of the revision above's "Still not done" is done with it. Production still runs `api` and `worker` apart ([ADR 0001](0001-one-app-several-process-roles.md), revision of the same day).
+
+**The role** (`actio.cli`):
+
+- **It goes the API's way.** It reads the models file and the plans file first, so a mistake in one is one line and status 2, then runs uvicorn with the API's arguments: the address, the trusted proxies, the 25 seconds the server waits for its requests at a stop. Only the app and the log differ (below).
+- **It doesn't migrate.** `actio --role migrate` stays its own step, run before, as for `api`.
+- **`--reload` is allowed for `api` and `all`,** watching the same folder. For `migrate` and `worker` it is refused, with the same line as before.
+- **The app is `create_app(with_worker=True)`.** uvicorn's reloader takes the app by its name and calls it without arguments, so a second factory stands beside the first: `create_app_with_worker`. `--role api` serves `create_app`, and runs no worker.
+
+**The worker inside the process** (`actio.worker.run_inside`):
+
+- **It works as the worker role does:** `jobs.work` with the same jobs, the same check of the database's migration each time it has connected, and the same file touched while it works when `ACTIO_ALIVE_FILE` names one. It opens no resources of its own: its jobs use the app's, the pool the routes use. The queue's pool and its listening connection are opened by `jobs.work`, as ever.
+- **It leaves the process's signals alone** (`on_signals=False`). The API listens for them, and tells it.
+- **It never ends the process.** In the worker role a worker that can't go on ends its process, and Docker starts it again. Inside the API nothing would: the API stays up without its database and says so at `/api/readyz`, and under `--reload` a server process that ended by itself isn't started again until the next save. So the worker says in the log why it stopped, at the error level, and starts again after `worker.TRIES_AGAIN_AFTER_S`, 10 seconds, each time:
+    - a database it can't reach, or that isn't migrated: one line, without a trace, in the error's own words, which say what to do: `The worker can't work: the database was never migrated, and this code needs 0009: run "actio --role migrate" first. It tries again in 10 s.`;
+    - anything else: `The worker ended with an error. It starts again in 10 s.`, with the trace.
+- **The pause,** because a database that isn't migrated answers at once: without it the worker would go round in a circle, and fill the log with the same line.
+- **Cancelled while it connects or while it waits to try again,** it ends at once. Cancelled while it works, it ends once the job in hand has finished, or has had its grace. Either way the cancellation is passed on.
+- **Once it was told to stop, nothing starts it again.** Told to stop while its database is away, Procrastinate's worker waits 30 seconds for a connection, to take itself off its list, and then raises its own error in place of the cancellation. Started again after that, the worker would work on, nobody would tell it to stop a second time, and the API's process would wait for it for ever. So when its task was asked to cancel (`Task.cancelling()`), the worker says the error as it otherwise would, without "tries again", and ends. A test replaces `jobs.work` with one that fails so, and fails if it is called a second time.
+
+**In the API's lifespan** (`actio.app`):
+
+- **The worker starts in a task** once the process's resources are open.
+- **Told to stop by a signal, it is told at the same moment as the answers being written** ([ADR 0022](0022-turns-that-run-apart-from-their-request.md)): `told_to_stop`, which runs inside the signal handler, leaves a second note for the event loop. The web server tells the application to shut down only once the requests it is answering have ended, up to 25 seconds later (`cli.WAITS_FOR_REQUESTS_S`). A job in hand that got its 15 seconds only then would outlast the 35 seconds Docker gives the API. Told at the signal, the worker's grace runs inside the server's wait, so a process that runs both takes no longer to stop than the API alone. A test holds `jobs.SHUTDOWN_GRACE_S` shorter than `cli.WAITS_FOR_REQUESTS_S`.
+- **It is told by cancelling its task, and only once.** Procrastinate's worker takes the first cancellation as "take no new job, and give the one in hand its grace", and then waits for its own shutdown without shielding it. A second cancellation would cancel that shutdown: the job in hand would lose its grace, and the worker would stay on Procrastinate's list. So a second signal, and the lifespan's exit after a signal, tell it nothing more. A test sends two real signals, SIGTERM then SIGINT, with a job in hand, then shuts the app down while the job is still in hand, and fails if the task is cancelled twice. Another sees that the worker takes no new job from the first signal on, while the app still serves.
+- **On the way out,** the lifespan tells the worker to stop if nothing has yet, as in a shutdown without a signal, before the turns are drained, so that the two graces run together. It drains the turns as before, and returns only once the worker's task has ended, while the process's resources are still open: the job in hand uses the database. It waits without a time limit. Told to stop while its database is away, Procrastinate waits up to 30 seconds more for a connection, as in the worker role, and whatever stops the process cuts that short.
+- **An app without the worker** does what it did before.
+- **A SIGINT that follows another signal is uvicorn's force quit,** and nothing of the application's: uvicorn then skips the application's shutdown, and the process ends at once. The job in hand is cut off and stays `doing`, with its worker still on Procrastinate's list, as an answer being written stays `running` (measured below). At a terminal that is a second Ctrl-C. Under `make dev` it is the first: see "Still not done".
+
+**Measured** before the build, on uvloop, which is the API's event loop, with `jobs.work(..., on_signals=False)` as a task beside other work: one cancellation, with a job of one second in hand, ended the task after 1.02 seconds, cancelled, with the job finished and no row left.
+
+**Measured on the built process,** `python -m actio --role all` against a scratch Postgres 17, the image pinned in `compose.yaml`:
+
+- **started on a migrated database that held one expired guest:** `/api/healthz` answered 0.64 seconds after the process was started, and the guest was gone after 0.73 seconds, by the worker's schedule alone. A second start within the same ten minutes didn't sweep again. Idle, the process held 4 connections to Postgres, as the worker's own process does;
+- **told to stop while idle:** at a SIGTERM it ended 0.15 seconds later, by the signal, after Procrastinate's `Stopped worker on all queues` and uvicorn's `Application shutdown complete.`, with no trace. At a SIGINT, with status 0 after 0.36 seconds;
+- **started on a database that was never migrated:** `/api/healthz` answered after 0.59 seconds, and `/api/readyz` said `"database":"migrations pending"`. The worker said its one line at once, and again 10 seconds later. Migrated meanwhile, it swept an expired guest 6.5 seconds after the migration had ended, with nothing started again by hand;
+- **Postgres restarted under it** (away for 0.9 seconds): the worker said once that it had stopped without being told to, and started again, as the worker role does. The API answered, and a sweep deferred afterwards ran 0.04 seconds later;
+- **Postgres stopped for 75 seconds:** the process stayed up, `/api/healthz` answered, and `/api/readyz` said `"database":"unreachable"`. The worker ended 30 seconds after the database had gone, with Procrastinate's error and its traces, as the worker's own process does, and said `The worker ended with an error. It starts again in 10 s.` Its next start waited 30 seconds for a connection, and said `The worker can't work: couldn't connect to the database: pool initialization incomplete after 30.0 sec. It tries again in 10 s.` With Postgres back, a deferred sweep ran 4.4 seconds after the database answered again;
+- **told to stop one second after its database was stopped:** the process ended 28.9 seconds after the SIGTERM, by the signal. In its log: Procrastinate's error and its traces, `The worker ended with an error.`, and uvicorn's `Application shutdown complete.` The worker was not started again.
+
+**Measured with a job in hand,** the app with the worker inside it, served by uvicorn, a second into a job of eight seconds:
+
+- **one SIGTERM,** as Docker and uvicorn's reloader send: the process ended 7.0 seconds later, when the job had finished. No row was left, the worker was off Procrastinate's list, and the log had no trace;
+- **two SIGINTs a tenth of a second apart,** as Ctrl-C under `make dev` reaches the server: the process ended after 0.37 seconds, with status 0. The job stayed `doing`, the worker stayed on the list, and the log had five traces and no `Application shutdown complete.`
+
+**Measured with `make dev`,** a session of it on the stack that `make up` had started:
+
+- it stopped the containers of the API, the web app and the worker. The native API and page answered through the proxy 11 seconds later, and `make smoke` passed;
+- **a sweep deferred as the application defers ran within 0.04 seconds,** by the worker inside the API's process. Procrastinate's lines for the job were in the terminal, under `[api]`;
+- **a Python file saved:** the reloader noticed after 0.12 seconds. The server shut down as at a SIGTERM (`Stopped worker on all queues`, `Application shutdown complete.`), and 0.99 seconds after the save the API was ready and its worker had started again. A sweep deferred then ran within 0.05 seconds;
+- **Ctrl-C:** `make dev` ended 0.4 seconds later, with nothing left running and no trace. The idle worker had stopped, 3 milliseconds after it was told, but the server skipped the application's shutdown: no `Waiting for application shutdown.` in its log. The same command line with `--role api`, which this step didn't change, did the same;
+- `make up` afterwards brought the stack back in 15 seconds.
+
+**The log of `all`:**
+
+- **uvicorn's default sets up only its own loggers.** So Actio's records below a warning never reach the API's log, and its warnings are written bare. The worker's lines, what the sweep deleted and Procrastinate's line for each job, would be lost.
+- **So `--role all` gives uvicorn a log config:** a deep copy of uvicorn's own, which keeps its formatters, handlers and loggers under their names (uvicorn writes into its formatters), with one more handler on stderr, in the worker role's format, on the root logger. `actio` and `procrastinate` log from `ACTIO_LOG_LEVEL`, and everything else from warnings up, or from the settings' level when that is higher. Below a warning, `httpx2` writes a line for each request to a model's server, the reloader one for each change it sees, and Alembic two each time the migration is read.
+- **Given to uvicorn, not set up by the command line,** because under `--reload` the server runs in a process of its own, started anew, which sets up its log from uvicorn's config alone.
+- **`--role api` logs as it did.**
+
+**What else differs from the worker role:**
+
+- **`ACTIO_ALIVE_FILE` is honoured the same way,** though no container runs `all`: unset, nothing is written.
+- **The process ends as the API's does.** uvicorn, once it has shut down well, sends itself the signal it was told with again, and a SIGTERM that Python doesn't handle ends a process by the signal: status 143 in a shell, not 0. Nothing restarts an `all` process by its status.
+
+**Still not done:**
+
+- **`/api/readyz` doesn't say whether the worker inside an `all` process works.** It is the next small step;
+- **Ctrl-C under `make dev` is a force quit.** The terminal sends the SIGINT to every process `make dev` started, and concurrently, which runs the API and the web app side by side ([ADR 0004](0004-local-development-stack.md)), sends each of them the same signal again. uvicorn takes the second as its force quit. So an answer being written isn't recorded as interrupted, and a job in hand stays `doing`, until something sweeps them. That is older than this step: the API alone was stopped the same way, and the measurement above found it. Putting it right is a step of its own;
+- the rest of the list of the revision above.
