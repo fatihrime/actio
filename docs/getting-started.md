@@ -22,7 +22,7 @@ The first run builds the images, which takes a few minutes; later runs take seco
 - <http://localhost:8080>: the chat. It needs a model to answer: see [Models](#models);
 - <http://localhost:8080/api/docs>: the API's interactive documentation;
 - <http://localhost:8080/api/healthz>: the API's health check;
-- <http://localhost:8080/api/readyz>: whether the API can do its work. It says `ready` when the database is reachable and migrated and Valkey answers, and otherwise names what is missing.
+- <http://localhost:8080/api/readyz>: whether the API can do its work. It says `ready` when the database is reachable and migrated and Valkey answers, and otherwise names what is missing. Under `make dev`, where the worker runs inside the API's process, it also says whether that worker works.
 
 `make smoke` checks them from the command line, and that a guest can start a session and is told the models and its usage limits. `make down` stops everything.
 
@@ -187,8 +187,8 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 **"Address already in use"**
 :   Another program holds a port Actio needs. That's 8080 for both modes, or `ACTIO_HTTP_PORT` if you changed it. `make dev` also needs 3000 (the web app) and 8000 (the API). Stop the other program, or change `ACTIO_HTTP_PORT`.
 
-**`/api/readyz` says `migrations pending` or `unreachable`**
-:   The API is running but can't do its work yet. `migrations pending`: the database is older than the code; `make up` and `make dev` both apply the missing migrations when you run them again. `unreachable`: Postgres or Valkey isn't running or refuses the password; `docker compose ps` shows their state, and the API's log says more.
+**`/api/readyz` says `migrations pending`, `unreachable` or `not working`**
+:   The API is running but can't do its work yet. `migrations pending`: the database is older than the code; `make up` and `make dev` both apply the missing migrations when you run them again. `unreachable`: Postgres or Valkey isn't running or refuses the password; `docker compose ps` shows their state, and the API's log says more. Under `make dev`, `"worker": "not working"`: the worker inside the API's process, which runs the background jobs, hasn't started yet, or can't work. It says why in the API's log, in lines that say `The worker can't work` or `The worker ended with an error`, and tries again every ten seconds.
 
 **"Too many new guests from your network", or another 429**
 :   A rate limit was reached. The page shows the answer, which says how long to wait; its `Retry-After` header says it in seconds. On your own machine, raise the limit in `.env` (see [Configuration](#configuration)) and run `make up` or `make dev` again.

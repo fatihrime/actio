@@ -24,7 +24,8 @@ check() {
 echo "Smoke test against $base"
 check "web page" / '>Actio</h1>'
 check "API health" /api/healthz '"status":"ok"'
-# Ready means: the database is reachable and migrated, and Valkey answers.
+# Ready means: the database is reachable and migrated, and Valkey answers. Under
+# `make dev`, where the worker runs inside the API's process, also that the worker works.
 check "API readiness" /api/readyz '"status":"ready"'
 check "API docs" /api/docs 'swagger-ui'
 
