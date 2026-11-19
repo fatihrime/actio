@@ -83,3 +83,13 @@ Caddy's config now holds a limit that protects the API: the size of a request ([
 - **The build checks the config** (`caddy validate`): a mistake in it stops the build, and the proxy that is running goes on as it was.
 - **Watching the file was tried first,** with the folder mounted and Caddy started with `--watch`. Caddy's documentation says that the feature "is intended for use only in local development environments!", and a watcher can catch a file half-written. So it was dropped for the image.
 - **The rules above hold for it,** as for the other images: its base is pinned by digest, and its container runs read-only, as a non-root user, without capabilities, with its two folders in memory. A test in `deploy/tests/` holds it to being built from `deploy/caddy/`, with nothing mounted, and to a build that checks the config.
+
+### 2026-11-19: the worker, a container with a restart policy and a file for its health
+
+`make up` runs one more container from the API's image: the worker, which runs the background jobs ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day). The rules above hold for it, and the tests in `deploy/tests/` check them as for every other container. Three things are new.
+
+- **A container that nothing reaches.** It sits on `backend` alone, beside Postgres and Valkey, and publishes no port. "Only the API can reach the data", above, was already untrue of the migration job ([ADR 0008](0008-postgres-through-sqlalchemy-and-psycopg.md)); the worker reaches it too. The three containers on `edge` are still Caddy, the web app and the API.
+- **The first health check that is a file.** With no port to probe, the worker touches a file on its own tmpfs every five seconds while it works, and its health check, `python -m actio.core.alive`, says whether the file was touched within the last twenty.
+- **The first restart policy other than `no`.** The worker ends when it can't go on, and `restart: on-failure` starts it again then, and not when it ended well. So it stays down with the rest of the stack after Docker itself was restarted, since Docker stops it first and it ends well; one that Docker couldn't stop comes back alone ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md) has what was measured). It is the only one: a test fails if another container gets a policy.
+
+It is also given 25 seconds to stop, longer than its grace for the job in hand, and an init process in front of it, as the web app has.

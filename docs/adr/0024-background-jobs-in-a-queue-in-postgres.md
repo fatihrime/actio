@@ -182,3 +182,89 @@ In a spike before the build: a throwaway project with Procrastinate 3.11.0, SQLA
     - **cleaning out failed and aborted jobs,** which stay in the table;
     - **more than one job at a time.**
 - **How to reverse it:** `defer`, `work` and `Job` are all the rest of the code sees. Moving to a table of our own, read with `FOR UPDATE SKIP LOCKED`, rewrites `actio.core.jobs` with the same three, and a migration drops the queue's objects, as 0009's downgrade does, and creates the table.
+
+## Revisions
+
+### 2026-11-19: the worker's container
+
+`make up` runs the worker too, as a container of the stack, held to the stack's rules ([ADR 0005](0005-container-images.md)). Two items of "Not done yet" are done with it: "the worker's container", with a `stop_grace_period` longer than `SHUTDOWN_GRACE_S`, and "a worker started on a database that was never migrated ends with a trace". `--role all`, which the decision said "comes with the worker's container", didn't: it comes with a worker in `make dev`, in the next step.
+
+**The container** (`worker` in `compose.yaml`):
+
+- **The API's image,** run as `actio --role worker`, locked down like every other container: a non-root user, a read-only root with `/tmp` in memory, no Linux capabilities, 256 MB at most, and a health check (below).
+- **On the internal network alone,** with no port. Nothing reaches it, and it reaches only the data services.
+- **Told only where its data is,** because the settings require both addresses, and where its file is (`ACTIO_ALIVE_FILE`). No models file, no plans file, no Ollama address, no rate limits: no job needs them.
+- **Started after the migration succeeded,** as the API is. Not after Valkey: no job uses it yet.
+
+**Started only on a migrated database.** Compose orders it after `migrate`, and the worker checks for itself as well:
+
+- **Each time it has connected,** the first time and after each start again, and before it takes a job, it reads the database's revision and compares it with the one its code expects, as `/api/readyz` does. When they differ it takes no job, and the process ends with one line and status 1: `actio: the database is at migration 0008, and this code needs 0009: run "actio --role migrate" first`, or, for a database that was never migrated, `the database was never migrated, and …`. That was a trace of 78 lines.
+- **A database that newer code migrated** is at a migration this code doesn't have, as after going back to an older commit. Migrating with this code couldn't help, so the line says something else: `the database is at migration 0010, and this code needs 0009: the database is ahead of this code`.
+- **When it can't ask,** because the database went away again in the moment after the worker had connected, the process ends with one line too, in the driver's words, and status 1.
+- **It reads the revision as Alembic does,** and Alembic would say in the log how it runs migrations: the worker's log leaves Alembic's info lines out, since it runs none.
+- **The check runs inside `jobs.work`** (its `check`), not before it: `work` listens for the stop signals from before it connects, and a check made before it would run with nobody listening.
+- **A database that can't be reached at the first start** is as before: the pool waits its 30 seconds, then one line and status 1.
+
+**Healthy while it touches a file.** The worker has no port for Docker to probe.
+
+- **Working means that Procrastinate's worker runs in this process:** from the moment a run of it has connected, and passed the check, until that run ends. While it does, the worker touches a file every 5 seconds. While it connects, while it waits to start again after it lost its database, and once it has stopped, nothing touches the file.
+- **The health check is `python -m actio.core.alive`:** healthy while the file was touched within the last 20 seconds, four beats, as a turn is given up on after four of its own ([ADR 0022](0022-turns-that-run-apart-from-their-request.md)). Otherwise it exits 1 with one line that says why: no variable, no file, a file it can't look at, or the file last touched so many seconds ago. Docker keeps that line in the container's health log.
+- **A file touched later than now isn't fresh either,** beyond one beat: its time is from a clock that was set back since, and it would say that the process works for as long as the clock takes to catch up.
+- **Docker says "unhealthy" later than the check does.** The check fails 20 seconds after the last beat; Docker reports the container unhealthy after ten failed checks in a row, five seconds apart, as for the other containers: about 70 seconds after the last beat.
+- **`actio.core.alive` imports only the standard library,** and reads `ACTIO_ALIVE_FILE` from its own environment, without the settings: Docker starts it every five seconds. The worker reads the same variable as its `alive_file` setting, and a test holds the two names together. Unset, as when the worker is run by hand, nothing is written.
+- **`actio.core.jobs` knows nothing of files.** `jobs.work` takes a plain callable, `on_beat`, and calls it once a run has connected and passed its check, then every `alive.BEAT_S` until that run ends. `actio.worker` passes the function that touches the file. A beat that fails, as on a full disk, is said once in the log, as a warning, and the worker goes on working; its health check then says that it isn't.
+- **What it proves:** that the worker's event loop turns, inside a run of Procrastinate's worker. **What it doesn't:** that a job succeeds, or that the database answers at this moment. A worker whose database has gone away goes on touching its file until Procrastinate's worker gives up, which can take 30 seconds.
+- **Not Procrastinate's own heartbeat,** which it keeps in the database for each worker. Asking for it would put the name of one of Procrastinate's tables into `compose.yaml`, outside the one module that may know it; it would take a connection at each probe; and it says that *a* worker is alive, not *this* one.
+
+**Started again when it failed, and only then: `restart: on-failure`.**
+
+- **The worker is built to end when it can't go on:** 30 seconds after it lost its database, with one line or with Procrastinate's error, and with whatever else Procrastinate's worker raises. Something has to start it again, and in this stack that is Docker. A stop that Procrastinate's worker made by itself is still started again inside the process, a second later (`STARTS_AGAIN_AFTER_S`): Docker sees only a process that ended.
+- **Measured** on Docker Engine 29.9.3 with Compose 5.7.0, in a scratch project:
+    - a container that exits with status 1 after one second is started again: 4 times in the first 5 seconds, 7 by 15 seconds, 8 by 30, 9 by 45. The pause between tries grows;
+    - one that exits with 1 after 12 seconds is started again each time, at once;
+    - one that exits with 0 is not started again;
+    - one stopped by hand (`docker compose stop`) stays stopped, whatever its status was;
+    - `docker compose config --format json` gives the value back as `"on-failure"`.
+- **Not `always` or `unless-stopped`.** Those two bring a container back whenever Docker itself starts again, as after a reboot. Nothing else of the stack comes back then, so the worker must not either, alone, trying to reach a Postgres that isn't there.
+- **With `on-failure`, the worker stays down after Docker was restarted because it ends well, not because of the policy.** Docker's documentation ("Start containers automatically") says of `on-failure`: "It doesn't restart the container if the daemon restarts". Measured, that isn't so: when Docker starts again it starts a container whose last end was a failure. The worker ends with status 0 when Docker stops it, whether it is working or waiting for its database, so it stays down like the rest (both measured below).
+- **A worker that Docker couldn't stop comes back alone.** When Docker or the machine goes down without stopping its containers, as when the power is lost, the worker's end counts as a failure, and Docker starts it again when it starts itself. It finds no Postgres, ends after 30 seconds with its one line, and is started again, every half minute, until `make up` brings the stack back or `make down` takes it away. That is harmless, and it is not what a stack should do: the answer is a restart policy for the whole stack, so that it comes back together, which is a decision of its own (below).
+- **The worker is the only container with a restart policy.** The API is built the other way: it stays up without its database and says so at `/api/readyz`. `migrate` keeps `restart: "no"`. A test in `deploy/tests/` holds this.
+- **An unhealthy worker is not started again:** Docker only says that it is unhealthy, to whoever looks. `make up` waits until every container is healthy, the worker too, and fails when one isn't. Both are measured below.
+
+**Measured on the stack,** `compose.yaml` as it is, in a project of its own beside the one people run, on the same Docker:
+
+- **`docker compose up --wait`** brought the seven containers up, the six that stay all healthy, in 13 seconds, with the images built. The worker swept an expired guest that was waiting for it as it started;
+- **`docker compose stop worker`** took 0.3 seconds, and the worker ended with status 0 and stayed stopped. Started again by hand, it was healthy 5.3 seconds later;
+- **its process killed inside the container:** Docker started it again, and it was healthy 5.7 seconds later. Killed through Docker (`docker kill`) it was left alone: Docker takes that for a stop by hand;
+- **Postgres restarted:** the worker started again by itself, as before it had a container, and Docker did not restart it;
+- **a worker that hangs** (its process halted with SIGSTOP): its health check first failed 24 seconds later, with `not working: /tmp/actio-worker-alive was last touched 24 seconds ago: …`. Docker called it unhealthy 71 seconds after it hung, and left it running. Let go on, it was healthy 0.6 seconds later;
+- **Postgres stopped:** the worker ended 30 seconds later, and Docker started it again. While it waited for its database its health check said `/tmp/actio-worker-alive doesn't exist`: a container that is started again gets an empty `/tmp`. With Postgres back after 62 seconds, it was healthy 16 seconds later;
+- **told to stop two seconds after Postgres was stopped:** Docker killed it after 25.2 seconds;
+- **a worker that never touches its file,** a mistake planted in a copy of the code: `docker compose up --wait` ended with status 1 after 67 seconds, `container … worker-1 is unhealthy`. So `make up` and `make e2e` fail on a worker that doesn't work.
+
+**Measured with Docker itself restarted** (`docker desktop restart`, twice, with the stack of `make up` running and control containers beside it):
+
+- **the stack stayed down,** all of it, the worker too: it had ended with status 0. The second time it was waiting for a database that had been stopped, and it ended with status 0 again;
+- **controls with `always` and `unless-stopped` came back;** one with no policy didn't;
+- **controls with `on-failure`:** one that ends with status 1 when it is told to stop came back, and so did one that doesn't listen and has to be killed. One that ends with status 0 stayed down;
+- **the worker's container started alone,** as Docker would start it, with Postgres stopped: it ended after 30 seconds with `actio: couldn't connect to the database: pool initialization incomplete after 30.0 sec`, and Docker started it again: three times in 110 seconds;
+- **`make up` afterwards** brought the stack back in 16 seconds.
+
+**Measured with `make dev`,** a session of it on the stack that `make up` had started: it stopped the worker's container with the API's and the web app's, and the container stayed stopped; the native API and page answered through the proxy 12 seconds later, and `make smoke` passed. `./scripts/with-dev-env.sh uv run actio --role worker` ran a worker beside it, which ended with status 0 at Ctrl-C.
+
+**Stopping:**
+
+- **`stop_grace_period: 25s`,** longer than `jobs.SHUTDOWN_GRACE_S`, 15 seconds, with room to take the worker off Procrastinate's list and close its pools. A test in `deploy/tests/` holds the two together, with five seconds of room at least.
+- **Told to stop just after it lost its database,** before Procrastinate's worker has noticed and stopped by itself, the worker would wait 30 seconds more for a connection (measured in the decision's "On the built worker, as it is now": status 1, 29.0 seconds after the signal). Docker cuts that short at 25 seconds. That is accepted: such a worker has nothing in hand that could be finished. One told to stop while it connects, or while it waits to start again, ends at once.
+- **`init: true`.** The worker listens for SIGTERM from before it connects. But as process 1 of a container a program gets no signal it has no handler for, and for the half second in which Python starts it has none. With an init process in front, a stop in that moment ends it at once instead of after 25 seconds. The web app's container has the same line, for Node.js.
+
+**Around it:**
+
+- **`make dev` stops the `worker` container too,** as it stops the API's and the web app's, in case `make up` left them running: a worker in a container must not go on working on the development database beside the native processes. `make dev` itself doesn't run a worker yet.
+- **`make e2e` runs the worker of `compose.yaml`,** untouched by its overlay, and shows its log lines too when the tests failed.
+
+**Still not done:**
+
+- **`--role all`, and a worker in `make dev`:** the next step;
+- **a stack that comes back after a reboot.** No container but the worker has a restart policy, so after Docker was restarted `make up` has to be run again; and a worker that Docker couldn't stop comes back alone until then. A policy for the whole stack would answer both;
+- the rest of the list above: retries; a queueing lock; jobs left `doing` by a worker that died; jobs cut off at a stop that stay `aborted`; cleaning out failed and aborted jobs; more than one job at a time.

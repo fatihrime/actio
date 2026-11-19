@@ -61,3 +61,7 @@ The `worker` role exists: `python -m actio --role worker` runs background jobs f
 
 - **`actio.worker` sits beside `actio.api`** in the import rules' layers: two ways into the same modules, and neither imports the other. The worker doesn't import the web framework either.
 - **`all`,** both roles in one process, comes with the worker's container, in a later step. Until then the worker is run by hand.
+
+### 2026-11-19: the worker's container, and `all` still to come
+
+`make up` runs the worker as a container of its own, from the same image as the API, beside it: production runs `api` and `worker` apart, as "Harder" above says ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day). `all` did not come with it, as the revision above said it would: it comes with a worker in `make dev`, in the next step. Until then `make dev` runs no worker, and one is run there by hand.
