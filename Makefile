@@ -27,14 +27,14 @@ up: .env ## Run the whole stack in containers, shaped like production, at http:/
 	docker compose up --detach --wait --build
 	@echo "Open http://localhost:8080 (API docs: /api/docs). 'make down' stops everything."
 
-dev: .env ## Run the stack at http://localhost:8080 with the API and web app native; Ctrl-C stops them
+dev: .env ## Run the stack at http://localhost:8080 with the API, its worker and the web app native; Ctrl-C stops them
 	docker compose stop api web worker # in case `make up` left them running
 	$(DEV_COMPOSE) up --detach --wait --build postgres valkey caddy # --build: the proxy's config is in its image
 	./scripts/with-dev-env.sh uv run actio --role migrate
 	@echo "Open http://localhost:8080 (API docs: /api/docs). 'make down' stops the containers."
 	./scripts/with-dev-env.sh pnpm exec concurrently --kill-others --names api,web \
 	    --prefix-colors cyan,magenta \
-	    "uv run actio --role api --reload" \
+	    "uv run actio --role all --reload" \
 	    "pnpm --dir apps/web dev"
 
 down: ## Stop all containers; their data is kept
