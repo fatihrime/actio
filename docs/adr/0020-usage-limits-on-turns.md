@@ -233,3 +233,12 @@ Not changed: the order of ledger and counters, what a refusal says, and a hold t
 - **The plans file has a third limit:** `[plans.<name>]` takes `answers_at_once`, how many answers one account may have being written at the same time, in all its conversations. Left out, there is none, as for the other two. So "a plan with neither limits nothing", above, is now a plan with none of the three. A guest may have 2 by default, an account 3.
 - **It is no window, and holds no credits.** It counts the account's turns that are running, from their rows in the database, and refuses one more before anything is held: a 429 with `at_once`, and without `window`, `resets_at` or `Retry-After`. A refusal at a usage limit is as it was.
 - **"Several answers written at once are each counted for what they really used"**, under "Harder", still holds, for fewer of them.
+
+### 2026-11-19: the worker gives up on turns whose process died
+
+"Nothing settles a turn whose process died", under "Not done yet", is answered by the job that goes through stale turns, which came with the worker ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "the worker gives up on turns nobody looks at").
+
+- **A turn whose process died is now given up on by the worker too,** every ten minutes, wherever it is, and not only when someone looks at its conversation. It costs nothing, as any interrupted turn: no row is written to the ledger for it. Its answer was never recorded, so there is nothing to count.
+- **Its hold needs no job.** The hold lasts a minute from the turn's last beat, and so does the turn's life: by the time the turn is stale, the hold has run out by itself. The job gives nothing back, and the worker has no usage-limits engine.
+- **A turn that ends after the worker gave up on it** is left as it was, and isn't charged, as one that someone looking gave up on (the revision of 2026-11-16 above).
+- **Still not done:** repeating a count that Valkey missed. "Not done yet" gave it to the same job; this one doesn't do it, and it is still open, with the nightly comparison. And a hold that ran out still shows as `reserved` in `GET /api/usage` until the account's next question, as found on the way in the revision of 2026-11-16.

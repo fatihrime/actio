@@ -80,3 +80,9 @@ Turns hold and settle their credits through the engine since [ADR 0020](0020-usa
 - **The time the engine is told is the application's own,** the moment a request arrived. Taking it from Valkey instead was considered and left: see ADR 0020.
 
 Still to come, as above: the nightly comparison of the two stores, and a job that settles what a process that died left held.
+
+### 2026-11-19: no job settles what a dead process left held
+
+"A job that settles what a process that died left held", still to come in the revision above, turned out not to be needed. The hold on a turn's credits lasts a minute, and is renewed while the turn is written ([ADR 0020](0020-usage-limits-on-turns.md), revision of 2026-11-16). So it runs out by itself a minute after its process died. The worker gives up on the turn itself, and gives nothing back ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "the worker gives up on turns nobody looks at").
+
+Still to come: the nightly comparison of the two stores, and repeating a count that Valkey missed.

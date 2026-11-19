@@ -385,3 +385,12 @@ The bullet "A SIGINT that follows another signal is uvicorn's force quit", in th
 - **started on a database that was never migrated:** `"database":"migrations pending"` and `"worker":"not working"`. Migrated meanwhile, the probe said `ready` 8.4 seconds after the migration had ended: the worker had tried again by itself;
 - **the `api` role on the same database:** `{"status":"ready","database":"ok","valkey":"ok"}`, as before;
 - **a `make dev` session:** the probe said `{"status":"ready","database":"ok","valkey":"ok","worker":"ok"}`, and `make smoke` passed. After a Python file was saved, it said `ready` again 0.96 seconds later, the worker inside included.
+
+### 2026-11-19: a second scheduled job, which gives up on stale turns
+
+The worker has a second job, `give-up-on-stale-turns` (`worker.GIVE_UP`), one of the two that "Context" names as waiting for it: turns left behind by a process that died. Why and how is in [ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "the worker gives up on turns nobody looks at".
+
+- **What it is:** every ten minutes, on the same schedule as the sweep, it gives up on a batch of turns that have been `running` and silent for a minute, in every conversation, as its own unit of work. It skips a turn another transaction holds, as the sweep skips its rows. A worker that starts runs it too, for the ten-minute mark that has just passed.
+- **What it needs:** the database alone, like the sweep. The worker still reads neither the models file nor the plans file, and no job of its uses Valkey.
+- **What the log gets:** Procrastinate's three lines at the info level for each run, that the job was deferred, that it starts, and that it ended: 432 more lines a day. And the job's own line, `gave up on stale turns: 2`, only when it gave up on any.
+- **Cut off at a stop,** it stays `aborted`, as "Not done yet" says of any job. As for the sweep, the next run comes ten minutes later.

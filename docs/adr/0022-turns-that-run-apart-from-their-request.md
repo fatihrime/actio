@@ -354,3 +354,43 @@ What is decided above holds for a turn that waits, as for one that is written: i
 - **a real `make dev` session, idle:** it ended 0.5 seconds after Ctrl-C, with both lines in the server's log.
 
 A test starts `actio --role all --reload` for real, and sends its server a SIGTERM and then a SIGINT while it waits for a request it is answering, which is when uvicorn would quit. It fails unless that request was answered and the application was shut down.
+
+### 2026-11-19: the worker gives up on turns nobody looks at
+
+**What was missing:** a turn that had been silent for a minute was given up on only when someone looked at its conversation, as "Alive" above says: read it, asked in it, or tried to read along or stop. A turn whose process died, in a conversation nobody opened again, stayed `running` for ever. "Not done yet" said so: "the job that goes through stale turns comes with the worker process". The worker has come ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)), and the job with it.
+
+**What the worker does now** (`give-up-on-stale-turns`, in `actio.worker`):
+
+- **Every ten minutes it gives up on the turns that have been silent for a minute,** in every conversation, as `interrupted`, ended at that moment. That is what whoever looks at a conversation does for its turn, by the same rule.
+- **One batch a run,** 500 turns at most (`turns.STALE_BATCH`), the longest silent first, as its own unit of work. What is left goes in the next run.
+- **It skips a turn that another transaction holds,** and never waits for one. One such is a turn that is being recorded at that moment, by a process that was only slow: it keeps the outcome it is given. So any number of runs can go at once, and none waits for a turn's process.
+- **It says in the log how many it gave up on,** in one line at the info level, `gave up on stale turns: 2`, and nothing when there were none.
+- **Whoever looks at a conversation still gives up on its turn at once.** The routes do as before.
+
+**The rule is written once** (`actio.chat.turns`): a turn is stale when it is `running` and hasn't said it is alive for `STALE_AFTER`. The routes' giving up for one conversation and the worker's for all of them go through the same function, and the count of answers being written (`being_written`, [ADR 0023](0023-answers-that-wait-their-turn.md)) counts the running turns that the rule leaves out. What giving up does can change in one place.
+
+**The batch is taken by a statement of its own,** and then given up on. Written first as one statement, the update with the batch as its subquery, it gave up on more than the batch: four turns where two were asked for, in its test. The plan read the subquery again for each turn it looked at, and each time the lock skipped the turns the update had already changed, so the next ones came. Two statements hold the batch to its size whatever the plan. The sweep of expired guests had the one-statement form too, and takes its batch the same way now ([ADR 0011](0011-rate-limits-as-token-buckets-in-valkey.md), revision of 2026-11-19).
+
+**Decided:**
+
+- **Every ten minutes, not every minute.** Nothing a person sees waits for this job. Whoever looks at a conversation gives up on its turn at that moment, and the limit on answers at once already leaves stale turns out of its count. The job is for the rows that nobody reads. Procrastinate writes three lines at the info level for every scheduled run: that the job was deferred, that it starts, and that it ended with `Success`. Every minute, that would be about 4,300 lines a day. A worker that starts also runs the ten-minute mark that has just passed, as for the sweep of expired guests.
+- **The job doesn't touch Valkey.** The hold on a turn's credits and the turn's stream are kept by the same beat that writes `alive_at`, for the same minute (see "Alive" above). So both have run out by themselves when the turn goes stale, and there is nothing to give back. The worker has neither the usage-limits engine nor the plans file.
+- **A turn the worker gave up on costs nothing, and its late answer isn't stored,** as for one that someone looking gave up on: its process finds the turn no longer `running` when it records it, and leaves it as it is (`finish` answers `left`). Nothing new, and a test holds it for the worker too.
+
+**What it costs:**
+
+- **Three more lines of Procrastinate's in the worker's log every ten minutes,** as the sweep has: 432 a day.
+- **Each side reads its own clock:** the process that writes `alive_at`, and the worker that judges it. On one machine they are one clock. On two, a worker whose clock is ahead by about 45 seconds or more would give up on turns that are alive: a beat comes every 15 seconds, and the minute is counted between two clocks.
+
+**Measured,** on the real worker process (`python -m actio --role worker`), against a Postgres of its own that the `migrate` role had migrated, and with a Valkey address at which nothing listens:
+
+- **three turns that a process had left `running` five minutes before, and one that was being written:** the three were `interrupted` 0.47 seconds after the process was started, by the schedule alone. Nobody deferred the job, and nobody read a conversation. The fourth was left running. The log said `gave up on stale turns: 3`, between Procrastinate's three lines for the job, which lasted 0.006 seconds. The queue was empty afterwards, and a SIGTERM ended the process with status 0 after 0.11 seconds;
+- **a table of 20,000 turns that had ended and 605 stale ones:** the first run gave up on 500 in 16 ms, the second on the other 105 in 5 ms, and a third found none in 2 ms. The statement that takes the batch took 1.5 ms. It read the 605 running turns and none of the others, through the index that allows one running turn a conversation (`uq_turns_conversation_id_running`), which holds only running turns. So the job needs no index of its own;
+- **in containers,** the stack of the end-to-end tests: the API's container was killed five seconds into an answer, when its reader had been sent five words, and it stayed down. Nobody read the conversation. The turn said `running` until the worker's next ten-minute mark, 3 minutes and 17 seconds after it was last heard from. Then the worker's container gave up on it: `interrupted`, with no answer and no row in the ledger, and `gave up on stale turns: 1` in its log.
+
+**Twenty-one mistakes were planted,** one at a time, in a scratch copy of the tree: in the rule, in the batch (its order, its limit, the lock that skips, the batch as a subquery of the update), in what giving up writes, in the count of answers at once, and in the worker's job (its commit, its clock, its line in the log, its schedule, its place in the list). Each failed at least one test. One of them, giving up without asking again whether the turn is stale, failed dozens and then made an older test wait for ever: a second question in a conversation that is still being answered, which that mistake lets through to a model that is held. Those two requests have a time limit now.
+
+**Still not done:**
+
+- **what a killed process had written is still lost,** though its stream may hold it for a minute. The next step keeps it;
+- **a hold that ran out still shows as held** in `GET /api/usage` until the account's next question, whoever gave up on the turn. That is put right where the usage is read, in a later step.
