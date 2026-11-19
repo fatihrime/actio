@@ -4,6 +4,7 @@ whom it tells that it works and that it stopped, what it does when it can't work
 when it is told to stop."""
 
 import asyncio
+import contextlib
 import dataclasses
 import itertools
 import logging
@@ -11,6 +12,7 @@ import os
 import signal
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,7 +25,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio import worker
+from actio.chat import turns
+from actio.chat.models import Turn
+from actio.chat.parts import TextPart
+from actio.chat.turns import STALE_AFTER
 from actio.core import jobs
+from actio.core.ids import new_id
 from actio.core.resources import open_resources
 from actio.core.settings import Settings
 from actio.identity import accounts, sessions
@@ -42,11 +49,40 @@ def the_sweep(listed: list[jobs.Job]) -> jobs.Job:
     return sweep
 
 
-async def test_the_sweep_runs_every_ten_minutes(settings: Settings, clock: Any) -> None:
-    async with open_resources(settings) as resources:
-        sweep = the_sweep(worker.listed(resources, clock=lambda: clock.now))
+def giving_up_on_stale_turns(listed: list[jobs.Job]) -> jobs.Job:
+    [giving_up] = [job for job in listed if job.name == worker.GIVE_UP]
+    return giving_up
 
-    assert sweep.every == "*/10 * * * *"
+
+async def a_turn(db: AsyncSession, *, heard_from: datetime) -> Turn:
+    """A new guest's question, with its turn running, begun and last heard from at
+    `heard_from`. Not committed."""
+    _, guest = await sessions.start_guest_session(db, now=heard_from)
+    begun = await turns.ask(
+        db,
+        user_id=guest.user_id,
+        conversation_id=new_id(),
+        message_id=new_id(),
+        parent_id=None,
+        parts=[TextPart(text="Name a bike part.")],
+        model="standard",
+        thinking=False,
+        turn_id=new_id(),
+        now=heard_from,
+    )
+    return begun.turn
+
+
+async def test_the_worker_sweeps_and_gives_up_on_stale_turns_every_ten_minutes(
+    settings: Settings, clock: Any
+) -> None:
+    async with open_resources(settings) as resources:
+        listed = worker.listed(resources, clock=lambda: clock.now)
+
+    assert [(job.name, job.every) for job in listed] == [
+        (worker.SWEEP, "*/10 * * * *"),
+        (worker.GIVE_UP, "*/10 * * * *"),
+    ]
 
 
 async def test_the_sweep_deletes_what_expired_by_the_clock_it_was_given(
@@ -99,6 +135,56 @@ async def test_a_sweep_that_finds_nothing_says_nothing(
         await the_sweep(worker.listed(resources, clock=lambda: clock.now)).run()
 
     assert (await db.scalars(select(User.id))).all() == [guest.user_id]
+    assert [record for record in caplog.records if record.name == "actio.worker"] == []
+
+
+async def test_the_worker_gives_up_on_stale_turns_by_the_clock_it_was_given(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The worker's clock is a century ahead here. By it one turn has been silent for a
+    minute, and by the machine's it hasn't begun. The other was heard from 10 seconds
+    ago. Nobody looks at either conversation."""
+    clock.now = datetime(2126, 11, 10, 12, 0, tzinfo=UTC)
+    silent = await a_turn(db, heard_from=clock.now - STALE_AFTER)
+    heard_from = await a_turn(db, heard_from=clock.now - timedelta(seconds=10))
+    await jobs.defer(db, worker.GIVE_UP)
+    await db.commit()
+    caplog.set_level(logging.INFO, logger="actio.worker")
+
+    async with open_resources(settings) as resources:
+        giving_up = giving_up_on_stale_turns(worker.listed(resources, clock=lambda: clock.now))
+        # Run when it was deferred only, not by its schedule as well.
+        await work_through(dataclasses.replace(giving_up, every=None))
+
+    found = await db.execute(select(Turn.id, Turn.status, Turn.finished_at))
+    assert {turn_id: (status, finished_at) for turn_id, status, finished_at in found} == {
+        silent.id: ("interrupted", clock.now),
+        heard_from.id: ("running", None),
+    }
+    said = [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == "actio.worker"
+    ]
+    assert said == [(logging.INFO, "gave up on stale turns: 1")]
+
+
+async def test_a_worker_that_finds_no_stale_turn_says_nothing(
+    db: AsyncSession, settings: Settings, clock: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The turn has been silent for a second short of a minute."""
+    await a_turn(db, heard_from=clock.now - STALE_AFTER + timedelta(seconds=1))
+    await db.commit()
+    caplog.set_level(logging.INFO, logger="actio.worker")
+
+    async with open_resources(settings) as resources:
+        await giving_up_on_stale_turns(worker.listed(resources, clock=lambda: clock.now)).run()
+
+    assert (await db.scalars(select(Turn.status))).all() == ["running"]
     assert [record for record in caplog.records if record.name == "actio.worker"] == []
 
 
@@ -166,6 +252,54 @@ async def test_the_worker_process_sweeps_by_its_schedule_and_ends_well_when_told
     assert "alembic" not in log
     assert (health.returncode, checked) == (0, (b"", b""))
     assert alive_file.is_file()
+
+
+async def test_the_worker_process_gives_up_on_a_stale_turn_by_its_schedule(
+    db: AsyncSession, migrated: str
+) -> None:
+    """Started as a deployment starts it, on a database that holds a turn whose process
+    died two minutes ago, by the machine's clock: the one the process reads. Nobody looks
+    at its conversation, and nobody defers the job: the worker's own schedule puts it in
+    the queue when it starts.
+
+    The process is in a group of its own, which is ended as one, pass or fail."""
+    turn = await a_turn(db, heard_from=datetime.now(UTC) - timedelta(minutes=2))
+    await db.commit()
+    environment = os.environ | {"ACTIO_DATABASE_URL": migrated, "ACTIO_VALKEY_URL": NOWHERE_VALKEY}
+
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "actio",
+        "--role",
+        "worker",
+        env=environment,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    ended_well = False
+    try:
+        # Until the turn is given up on, and the queue is empty: both jobs succeeded.
+        async with asyncio.timeout(30):
+            while await turn_and_queue(migrated, turn.id) != ("interrupted", 0):
+                assert process.returncode is None, await process.communicate()
+                await asyncio.sleep(0.1)
+        process.send_signal(signal.SIGTERM)
+        async with asyncio.timeout(10):
+            _, err = await process.communicate()
+        ended_well = True
+    finally:
+        if not ended_well:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            async with asyncio.timeout(10):
+                await process.communicate()
+
+    log = err.decode()
+    assert process.returncode == 0, log
+    assert " INFO actio.worker: gave up on stale turns: 1\n" in log
+    assert "Traceback" not in log
 
 
 async def test_the_worker_touches_its_file_only_when_its_settings_name_one(
@@ -574,6 +708,19 @@ async def left_in(database_url: str) -> tuple[int, int]:
     async with await psycopg.AsyncConnection.connect(database_url) as connection:
         cursor = await connection.execute(
             "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM procrastinate_jobs)"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        return row[0], row[1]
+
+
+async def turn_and_queue(database_url: str, turn_id: uuid.UUID) -> tuple[str, int]:
+    """The turn's status, and how many jobs are in the queue."""
+    async with await psycopg.AsyncConnection.connect(database_url) as connection:
+        cursor = await connection.execute(
+            "SELECT (SELECT status FROM turns WHERE id = %s),"
+            " (SELECT count(*) FROM procrastinate_jobs)",
+            [turn_id],
         )
         row = await cursor.fetchone()
         assert row is not None

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import ClientDisconnect
 from valkey.asyncio import Valkey
 
+from actio import worker
 from actio.api import turns as turn_routes
 from actio.api import ui_stream
 from actio.catalog import Gate
@@ -35,6 +36,7 @@ from actio.chat.events import EventsUnavailableError, TurnEvents
 from actio.chat.models import Conversation, Message, Turn
 from actio.chat.parts import TextPart
 from actio.core.ids import new_id
+from actio.core.resources import open_resources
 from actio.core.settings import Settings
 from actio.usage.models import UsageEntry
 from actio.usage.plans import Plans
@@ -725,6 +727,57 @@ async def test_a_turn_that_ends_after_it_was_given_up_on_is_left_as_it_was(
     assert await count(db, UsageEntry) == 0
     assert [(w["used"], w["reserved"]) for w in usage["windows"]] == [(0, 0), (0, 0)]
     assert said(reader) == "Sorry I'm late."  # whoever read along saw it written
+
+
+async def test_a_turn_that_ends_after_the_worker_gave_up_on_it_is_left_as_it_was(
+    scripted: Any,
+    settings: Settings,
+    db: AsyncSession,
+    clock: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """As above, but nobody looked at the conversation: the worker went through the
+    turns that had fallen silent, by the same clock as the app's. The answer that turns
+    up afterwards isn't stored, and isn't paid for. Half a minute later the
+    conversation takes a new question, and the turn keeps the moment the worker gave up
+    on it."""
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("Sorry "), hold, TextDelta("I'm late."), DONE)
+    chat = Chat(browser)
+    asked = chat.asking()
+    await held(model)
+    late = await the_turn(db)
+
+    clock.advance(seconds=60)  # no beat in the meantime: under test they are 15 real seconds apart
+    given_up_at = clock.now
+    async with open_resources(settings) as resources:
+        [giving_up] = [
+            job
+            for job in worker.listed(resources, clock=lambda: clock.now)
+            if job.name == worker.GIVE_UP
+        ]
+        await giving_up.run()
+    hold.set()
+    await ended(asked)
+    usage = (await browser.get("/api/usage")).json()
+    entries = await count(db, UsageEntry)
+    conversation = await chat.read()
+    clock.advance(seconds=30)
+    model.script = [TextDelta("Here now."), DONE]
+    new_question = {"id": str(new_id()), "parts": [{"type": "text", "text": "Still there?"}]}
+    # With a time limit: a conversation that was still taken would keep this waiting.
+    again = await asyncio.wait_for(
+        browser.post(f"{chat.path}/turns", json={"message": new_question}), PATIENCE_S
+    )
+
+    assert "it ended after it had been given up on" in caplog.text
+    assert [m["role"] for m in conversation["messages"]] == ["user"]
+    assert entries == 0
+    assert [(w["used"], w["reserved"]) for w in usage["windows"]] == [(0, 0), (0, 0)]
+    assert again.status_code == 200
+    assert said(again) == "Here now."
+    await db.refresh(late)
+    assert (late.status, late.finished_at, late.answer_id) == ("interrupted", given_up_at, None)
 
 
 # --- A shutdown -----------------------------------------------------------------------

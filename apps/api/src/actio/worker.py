@@ -18,6 +18,7 @@ from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from actio.chat import turns
 from actio.core import alive, jobs, schema
 from actio.core.resources import Resources, open_resources
 from actio.core.settings import Settings
@@ -31,6 +32,11 @@ SWEEP = "sweep-expired"
 """Deletes a batch of expired guests and sessions, every ten minutes. The API also
 sweeps after each new guest: a busy installation is kept clear by its newcomers, a
 quiet one by this."""
+
+GIVE_UP = "give-up-on-stale-turns"
+"""Gives up on a batch of stale turns, those a process that died left `running`, in
+every conversation, every ten minutes. Whoever looks at a conversation still gives up
+on its turn at once: this is for the conversations nobody looks at."""
 
 TRIES_AGAIN_AFTER_S = 10.0
 """How long the worker inside the API's process (`run_inside`) waits to try again, after
@@ -47,7 +53,10 @@ class NotMigratedError(Exception):
 
 def listed(resources: Resources, *, clock: Clock) -> list[jobs.Job]:
     """Every job a worker runs, each with what it needs."""
-    return [jobs.Job(SWEEP, partial(sweep_expired, resources, clock), every="*/10 * * * *")]
+    return [
+        jobs.Job(SWEEP, partial(sweep_expired, resources, clock), every="*/10 * * * *"),
+        jobs.Job(GIVE_UP, partial(give_up_on_stale_turns, resources, clock), every="*/10 * * * *"),
+    ]
 
 
 async def run(settings: Settings) -> None:
@@ -166,6 +175,15 @@ async def sweep_expired(resources: Resources, clock: Clock) -> None:
         await db.commit()
     if guests or expired_sessions:
         logger.info("deleted expired guests: %d, expired sessions: %d", guests, expired_sessions)
+
+
+async def give_up_on_stale_turns(resources: Resources, clock: Clock) -> None:
+    """Give up on a batch of stale turns, in every conversation, as its own unit of work."""
+    async with resources.database() as db:
+        given_up = await turns.give_up_on_stale_everywhere(db, now=clock())
+        await db.commit()
+    if given_up:
+        logger.info("gave up on stale turns: %d", len(given_up))
 
 
 async def _migrated(resources: Resources) -> None:

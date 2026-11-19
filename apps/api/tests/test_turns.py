@@ -2,9 +2,11 @@
 
 Starting and finishing turns in the ordinary way is covered through the API, in
 `test_turns_api.py`. Here: a turn that finishes after it was given up on, one whose
-conversation is gone, and what the database itself refuses.
+conversation is gone, the turns that nobody looks at and the worker gives up on, and
+what the database itself refuses.
 """
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -17,6 +19,7 @@ from actio.chat import conversations, tree, turns
 from actio.chat.models import Conversation, Message, Turn
 from actio.chat.parts import TextPart
 from actio.chat.turns import STALE_AFTER, Begun, Ending
+from actio.core.database import create_engine, create_session_factory
 from actio.core.ids import new_id
 from actio.identity import sessions
 from actio_llm import Timings, Usage
@@ -26,12 +29,17 @@ pytestmark = pytest.mark.anyio
 NOON = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 
 
-async def asked(db: AsyncSession, question: str = "Name a bike part.") -> Begun:
-    """A new account's first question, with its turn running."""
-    _, principal = await sessions.start_guest_session(db, now=NOON)
+async def asked(
+    db: AsyncSession, question: str = "Name a bike part.", *, by: uuid.UUID | None = None
+) -> Begun:
+    """The first question of a new conversation, with its turn running: a new account's,
+    or the account `by` names."""
+    if by is None:
+        _, principal = await sessions.start_guest_session(db, now=NOON)
+        by = principal.user_id
     begun = await turns.ask(
         db,
-        user_id=principal.user_id,
+        user_id=by,
         conversation_id=new_id(),
         message_id=new_id(),
         parent_id=None,
@@ -226,6 +234,133 @@ async def test_the_last_turn_of_a_question_is_the_one_that_is_shown(db: AsyncSes
 
     assert latest is not None
     assert (latest.id, latest.status, latest.thinking) == (again.turn.id, "running", True)
+
+
+# --- Turns nobody looks at, which the worker gives up on ------------------------------
+
+
+async def test_a_turn_nobody_looks_at_is_given_up_on_after_a_minute_of_silence(
+    db: AsyncSession,
+) -> None:
+    """No conversation is named, and none is read. A turn heard from a microsecond after
+    the other is a microsecond short of a minute's silence, and still running."""
+    silent, heard_from_later = await asked(db), await asked(db)
+    await turns.still_alive(db, heard_from_later.turn.id, now=NOON + timedelta(microseconds=1))
+    await db.commit()
+    now = NOON + STALE_AFTER
+
+    given_up = await turns.give_up_on_stale_everywhere(db, now=now)
+    await db.commit()
+
+    assert given_up == [silent.turn.id]
+    await db.refresh(silent.turn)
+    await db.refresh(heard_from_later.turn)
+    assert (silent.turn.status, silent.turn.finished_at) == ("interrupted", now)
+    assert (heard_from_later.turn.status, heard_from_later.turn.finished_at) == ("running", None)
+
+
+async def test_turns_that_ended_or_were_heard_from_are_left_alone(db: AsyncSession) -> None:
+    """Each was last heard from an hour ago, or nearly: a turn that has ended says
+    nothing more. Only the running one that was heard from 20 seconds ago did."""
+    ended_at = NOON + timedelta(seconds=5)
+    ended: list[Turn] = []
+    for ending in (Ending("completed"), Ending("stopped"), Ending("failed"), Ending("interrupted")):
+        begun = await asked(db)
+        await turns.finish(
+            db, begun.conversation.id, begun.turn.id, ending, answer_id=new_id(), now=ended_at
+        )
+        ended.append(begun.turn)
+    alive = await asked(db)
+    an_hour_later = NOON + timedelta(hours=1)
+    await turns.still_alive(db, alive.turn.id, now=an_hour_later - timedelta(seconds=20))
+    await db.commit()
+
+    given_up = await turns.give_up_on_stale_everywhere(db, now=an_hour_later)
+    await db.commit()
+
+    assert given_up == []
+    for turn in [*ended, alive.turn]:
+        await db.refresh(turn)
+    assert [(turn.status, turn.finished_at) for turn in ended] == [
+        ("completed", ended_at),
+        ("stopped", ended_at),
+        ("failed", ended_at),
+        ("interrupted", ended_at),
+    ]
+    assert (alive.turn.status, alive.turn.finished_at) == ("running", None)
+
+
+async def test_the_stale_turns_of_every_account_and_conversation_go_in_one_run(
+    db: AsyncSession,
+) -> None:
+    first, second = await asked(db), await asked(db)
+    first_again = await asked(db, "A second conversation", by=first.conversation.user_id)
+
+    given_up = await turns.give_up_on_stale_everywhere(db, now=NOON + STALE_AFTER)
+    await db.commit()
+
+    assert set(given_up) == {first.turn.id, second.turn.id, first_again.turn.id}
+    assert len(given_up) == 3
+    running = select(func.count()).select_from(Turn).where(Turn.status == "running")
+    assert await db.scalar(running) == 0
+
+
+async def test_one_run_gives_up_on_a_batch_at_most_the_longest_silent_first(
+    db: AsyncSession,
+) -> None:
+    begun = [await asked(db) for _ in range(5)]
+    for seconds, one in zip((30, 0, 20, 10, 40), begun, strict=True):
+        await turns.still_alive(db, one.turn.id, now=NOON + timedelta(seconds=seconds))
+    await db.commit()
+    all_stale = NOON + timedelta(hours=1)
+
+    async def a_run() -> set[uuid.UUID]:
+        given_up = await turns.give_up_on_stale_everywhere(db, now=all_stale, limit=2)
+        await db.commit()
+        return set(given_up)
+
+    # Silent since 0 and 10 seconds past noon, then 20 and 30, then 40, then none left.
+    assert await a_run() == {begun[1].turn.id, begun[3].turn.id}
+    assert await a_run() == {begun[2].turn.id, begun[0].turn.id}
+    assert await a_run() == {begun[4].turn.id}
+    assert await a_run() == set()
+
+
+async def test_a_stale_turn_that_is_being_recorded_is_skipped_not_waited_for(
+    db: AsyncSession, migrated: str
+) -> None:
+    """Its process was only slow, and is recording the turn when the worker comes: the
+    turn's row is held until that is committed. The worker doesn't wait for it, and
+    leaves the turn with the outcome it is given. Waiting would never end here, since
+    the transaction that holds the row waits for the worker: the time limit fails the
+    test instead."""
+    late, dead = await asked(db), await asked(db)
+    now = NOON + STALE_AFTER
+    engine = create_engine(migrated)
+    try:
+        async with create_session_factory(engine)() as other:
+            recorded = await turns.finish(
+                other,
+                late.conversation.id,
+                late.turn.id,
+                Ending("completed", [TextPart(text="Sorry I'm late.")], finish_reason="stop"),
+                answer_id=new_id(),
+                now=now,
+            )
+            async with asyncio.timeout(5):
+                given_up = await turns.give_up_on_stale_everywhere(db, now=now)
+                await db.commit()
+            await other.commit()
+
+        assert recorded == "recorded"
+        assert given_up == [dead.turn.id]
+        # The other transaction is over: the turn has its outcome, and nothing is left.
+        assert await turns.give_up_on_stale_everywhere(db, now=now) == []
+        await db.refresh(late.turn)
+        assert (late.turn.status, late.turn.finished_at) == ("completed", now)
+        assert late.turn.answer_id is not None
+    finally:
+        await engine.dispose()
 
 
 # --- What the database itself refuses -------------------------------------------------

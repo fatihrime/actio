@@ -13,7 +13,9 @@ writes the answer, if the model produced anything, and how the turn ended.
 One turn runs at a time in a conversation. While it runs, the process that writes its
 answer says every few seconds that it is still at it (`still_alive`). A turn whose
 process died would otherwise block its conversation for ever, so one that has been
-silent for too long is given up on, as `interrupted`, the next time someone looks.
+silent for too long is given up on, as `interrupted`: the next time someone looks at its
+conversation (`give_up_on_stale`), and by the worker, which goes through the turns of
+every conversation, those nobody looks at too (`give_up_on_stale_everywhere`).
 
 An account may also have only so many answers being written at once, in all its
 conversations together, when its plan says so: see `being_written`. A turn that would
@@ -27,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import BigInteger, func, literal, select, update
+from sqlalchemy import BigInteger, ColumnElement, and_, func, literal, not_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +46,9 @@ STALE_AFTER = timedelta(seconds=60)
 beats: a process that is only slow, or a database that was away for a moment, misses
 one or two. It is also how long the credits held for a turn stay held without being
 renewed, and how long what it streams is kept."""
+
+STALE_BATCH = 500
+"""How many stale turns one run of `give_up_on_stale_everywhere` gives up on at most."""
 
 TITLE_LENGTH = 60
 """A new conversation is named after its first question, cut to about this many
@@ -275,35 +280,51 @@ async def still_alive(db: AsyncSession, turn_id: uuid.UUID, *, now: datetime) ->
 
 
 async def give_up_on_stale(db: AsyncSession, conversation_id: uuid.UUID, *, now: datetime) -> None:
-    """Mark the conversation's turn as `interrupted` if it is running and hasn't said
-    so for `STALE_AFTER`: the process that was writing it is gone."""
-    await db.execute(
-        update(Turn)
-        .where(
-            Turn.conversation_id == conversation_id,
-            Turn.status == "running",
-            Turn.alive_at <= now - STALE_AFTER,
-        )
-        .values(status="interrupted", finished_at=now)
+    """Mark the conversation's turn as `interrupted` if it is stale: running, and it
+    hasn't said so for `STALE_AFTER`. The process that was writing it is gone."""
+    await _give_up(db, Turn.conversation_id == conversation_id, now=now)
+
+
+async def give_up_on_stale_everywhere(
+    db: AsyncSession, *, now: datetime, limit: int = STALE_BATCH
+) -> list[uuid.UUID]:
+    """Mark stale turns as `interrupted`, in every conversation, as `give_up_on_stale`
+    does for one: those in conversations nobody looks at too. Returns their ids.
+
+    It works in batches of `limit`, the longest silent first, and skips turns another
+    transaction holds instead of waiting for them: one that is being recorded at that
+    moment, by a process that was only slow, keeps what it is given. Any number of runs
+    can go at once.
+    """
+    # The batch is taken and held by a statement of its own. As a subquery of the
+    # update, the plan may read it once for each turn it looks at, and each time it
+    # skips the turns the update has changed already: the batch would grow past `limit`.
+    held = await db.scalars(
+        select(Turn.id)
+        .where(_stale(now))
+        .order_by(Turn.alive_at)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
     )
+    batch = list(held.all())
+    if not batch:
+        return []
+    return await _give_up(db, Turn.id.in_(batch), now=now)
 
 
 async def being_written(db: AsyncSession, user_id: uuid.UUID, *, now: datetime) -> int:
     """How many answers the account has being written, in all its conversations.
 
-    A turn counts while it is `running` and was heard from within `STALE_AFTER`: the
-    rule `give_up_on_stale` goes by. So a turn whose process died stops counting a
-    minute after it was last heard from, whether or not anyone has given up on it. A
-    turn that waits for its model's server is running, and counts."""
+    A turn counts while it is `running` and was heard from within `STALE_AFTER`: every
+    running turn that the rule for giving up on turns (`_stale`) leaves out. So a turn
+    whose process died stops counting a minute after it was last heard from, whether or
+    not anyone has given up on it. A turn that waits for its model's server is running,
+    and counts."""
     found = await db.scalar(
         select(func.count())
         .select_from(Turn)
         .join(Conversation, Turn.conversation_id == Conversation.id)
-        .where(
-            Conversation.user_id == user_id,
-            Turn.status == "running",
-            Turn.alive_at > now - STALE_AFTER,
-        )
+        .where(Conversation.user_id == user_id, Turn.status == "running", not_(_stale(now)))
     )
     return found or 0
 
@@ -379,6 +400,26 @@ async def _create(
         raise
     conversation.title = title_from(parts)
     return conversation
+
+
+def _stale(now: datetime) -> ColumnElement[bool]:
+    """The rule by which a turn is taken for dead at `now`: it is `running`, and hasn't
+    said that it is alive for `STALE_AFTER`. Written here only."""
+    return and_(Turn.status == "running", Turn.alive_at <= now - STALE_AFTER)
+
+
+async def _give_up(
+    db: AsyncSession, which: ColumnElement[bool], *, now: datetime
+) -> list[uuid.UUID]:
+    """Give up on the stale turns among `which`: each becomes `interrupted`, ended at
+    `now`. Returns their ids. Whoever gives up on turns does it through this."""
+    given_up = await db.scalars(
+        update(Turn)
+        .where(which, _stale(now))
+        .values(status="interrupted", finished_at=now)
+        .returning(Turn.id)
+    )
+    return list(given_up.all())
 
 
 async def _require_free(db: AsyncSession, conversation: Conversation, *, now: datetime) -> None:
