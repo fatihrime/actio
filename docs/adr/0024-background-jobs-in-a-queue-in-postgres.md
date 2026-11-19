@@ -347,3 +347,41 @@ In a spike before the build: a throwaway project with Procrastinate 3.11.0, SQLA
 "Ctrl-C under `make dev` is a force quit", in the list above, is done. A server that uvicorn's reloader started now takes the first signal it gets, and later ones change nothing: the application is shut down, and the job in hand gets its grace ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision of the same day). Measured there, a second into a job of eight seconds: the processes ended 7.3 seconds after Ctrl-C, with the job finished and its worker off Procrastinate's list, where the job had stayed `doing` before.
 
 The bullet "A SIGINT that follows another signal is uvicorn's force quit", in the revision above, still holds for a server started directly, as a container starts it or someone at a terminal without `--reload`.
+
+### 2026-11-19: readiness says whether the worker inside works
+
+"`/api/readyz` doesn't say whether the worker inside an `all` process works", in the list of the revision "`--role all`, and a worker in `make dev`", is done. Before, a worker inside the API that couldn't work said so in the log every ten seconds, and the probe went on saying `ready`.
+
+**What the probe answers** (`actio.api.health`):
+
+- **A fourth key, `worker`,** in a process that runs the worker inside it: `ok` or `not working`.
+- **`not working` makes the answer 503,** with the status `unavailable`, as a database that is away does. Such a process has two kinds of work, the requests and the jobs, and can't do one of them. `/api/healthz` still answers 200: as for a database that is away, starting the process again wouldn't help, and the worker inside tries again by itself.
+- **Where no worker runs, the key is left out,** not sent as `null`. So the `api` role answers exactly as it did, and whatever reads its answers whole, a script or a test, reads the same. The recorded description lists `worker` as an optional string, `ok` or `not working`, and never as `null` (pydantic's `SkipJsonSchema[None]`): the web app's generated type is `worker?: "ok" | "not working"`.
+- **It says `not working` in the log,** as a warning, as it does for the database and Valkey: `readiness: the worker inside this process isn't working`. Never why: the worker's own lines say that, as before, each time it tries.
+
+**When the worker inside works:**
+
+- **It says that it works as the worker role does,** through `jobs.work`'s `on_beat`: once a run of Procrastinate's worker has connected and passed its check of the migration, then every 5 seconds until that run ends.
+- **The probe says `not working`:**
+    - before the worker's first beat;
+    - from the moment the worker ends with an error, or finds that it can't work, until its next beat;
+    - once 20 seconds have passed since its last beat (`alive.STALE_AFTER_S`), whatever it is doing.
+- **The 20 seconds are the file check's rule,** the one by which the worker's container is healthy: four beats, so that a worker that is only slow misses one or two. Both ways of asking, the file and the probe, hold the worker to the same delay, and one rule is easier to hold than two that could come apart.
+- **A worker that ends is not working at once,** without waiting for its beat to go stale. `jobs.work` beats as soon as a run starts, before Procrastinate's worker has done anything. A run that fails right after that, every time, is started again by `run_inside` every 10 seconds (`worker.TRIES_AGAIN_AFTER_S`), which is sooner than 20: each try would note a fresh beat, and the probe would say `ok` for ever while the log says every ten seconds that the worker ended with an error. In the worker's own container that can't happen: the process ends, and its file goes with the container's `/tmp`. So each time `run_inside` comes back from a run with an error, of either kind, it says so to its caller (`on_stopped`), before its pause, and also when it had been told to stop and ends; and the app forgets the last beat (`LastBeat.forget`). Not when the worker ends by the cancellation that tells it to stop: then the process is shutting down.
+- **A stop that Procrastinate's worker made by itself raises nothing:** `jobs.work` starts it again a second later, inside the same call (`jobs.STARTS_AGAIN_AFTER_S`). There the last beat stays as it was, and the 20 seconds hold.
+- **The last beat is kept in memory,** not in a file: `alive.LastBeat`, beside the file's rule in `actio.core.alive`, which still imports only the standard library. It is told the time, like everything in `actio.core`. The app notes each beat by the event loop's clock (`loop.time()`), which doesn't jump when the machine's clock is set, so it needs none of the file's guard against a time later than now.
+- **`ACTIO_ALIVE_FILE` is honoured beside it, as before.** `actio.worker.run_inside` takes an `on_beat` of its caller's, and each beat calls it and touches the file, each whatever the other does: one that fails doesn't keep the other from being said, and what failed is said once in the log by `jobs.work`, as ever. The worker role is unchanged.
+
+**How the probe asks** (`actio.app`): `_WorkerInside` notes the worker's beats, and forgets the last one when `run_inside` says that the worker stopped. Its lifespan puts on the app's state what the probe calls to ask, `worker_works`, or `None` in an app without a worker. The route only calls what it finds there, as it reads the process's resources: `actio.api` imports neither `actio.app`, a layer above it, nor `actio.worker`, beside it.
+
+**What it changes around it:** `make dev` runs `--role all`, so `make smoke` there passes only once the worker inside works too. It retries for up to a minute while the stack starts, as before. `make up` runs the `api` role, whose answers didn't change.
+
+**What the file doesn't have:** in an `all` process that is told of a file (`ACTIO_ALIVE_FILE`), a run that fails at once still touches it, each time it is tried: the file is not taken back when the worker ends, as the beat in memory is. No container runs `all`. One that does should ask `/api/readyz`, not the file.
+
+**Measured** on the built process, `python -m actio --role all` against a scratch Postgres 17 and a scratch Valkey 9.1, the images pinned in `compose.yaml`:
+
+- **started on a migrated database:** `/api/readyz` answered 0.61 seconds after the process was started, and said `ready`, with `"worker":"ok"`, at 0.63 seconds;
+- **Postgres stopped under it:** the probe said `"database":"unreachable"` 0.2 seconds after the stop began, and `"worker":"not working"` 30.1 seconds after it, when Procrastinate's worker gave up and the worker ended with its error. In the first build, in which only a beat gone stale counted, that took 50.0 seconds: those 30, and the 20 of the last beat. With Postgres back, the probe said `ready` again 9.3 seconds after the database answered;
+- **started on a database that was never migrated:** `"database":"migrations pending"` and `"worker":"not working"`. Migrated meanwhile, the probe said `ready` 8.4 seconds after the migration had ended: the worker had tried again by itself;
+- **the `api` role on the same database:** `{"status":"ready","database":"ok","valkey":"ok"}`, as before;
+- **a `make dev` session:** the probe said `{"status":"ready","database":"ok","valkey":"ok","worker":"ok"}`, and `make smoke` passed. After a Python file was saved, it said `ready` again 0.96 seconds later, the worker inside included.
