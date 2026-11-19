@@ -29,7 +29,7 @@ flowchart LR
 ```
 
 - **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies need. A request to the API with a body over 2 MB it refuses itself, with a 413 in the API's own error format: a body that says its length before any of it is passed on, one sent in chunks once the limit is reached ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)). Its configuration, `deploy/caddy/Caddyfile`, is built into its image, as the API's code is into the API's: after a change to it, `make up` or `make dev` again applies it, and a mistake in it stops the build while the running proxy goes on as it was.
-- **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)), and `worker` runs background jobs (below). Today the API serves its interactive docs, two probes, guest sessions and accounts:
+- **The API** is one Python application, `actio`, built on FastAPI. It runs as several processes from the same code, chosen with `--role`: `api` serves HTTP, `migrate` applies database migrations and exits ([ADR 0008](adr/0008-postgres-through-sqlalchemy-and-psycopg.md)), `worker` runs background jobs (below), and `all` serves HTTP with the worker inside the same process, for the smallest installations and for `make dev`. Today the API serves its interactive docs, two probes, guest sessions and accounts:
     - `/api/healthz` answers whenever the process is alive;
     - `/api/readyz` answers 200 only when the database is reachable and migrated and Valkey answers. Otherwise it answers 503 and names what is missing;
     - `POST /api/session/guest` starts a session as a new guest and sets its cookie, `GET /api/me` says who the cookie belongs to, and `DELETE /api/session` ends it ([ADR 0009](adr/0009-sessions-in-the-database.md));
@@ -42,13 +42,14 @@ flowchart LR
     - a model's server writes only so many answers at once: Ollama one, unless the models file says otherwise. A turn that comes while its server is busy waits its turn inside the API, at a gate in front of the server, running like any other, and its model is asked once there is room ([ADR 0023](adr/0023-answers-that-wait-their-turn.md));
     - a turn costs credits, and an account has only so many per session and per week, from `config/plans.toml`. The most a turn can cost is held before a model is asked; a turn that doesn't fit is answered 429, with the moment the limit starts over. `GET /api/usage` says how much is used ([ADR 0020](adr/0020-usage-limits-on-turns.md));
     - a plan also says how many answers one account may have being written at once, and one more is answered 429, before anything is kept. An account reads along with an answer in six places at once at most: one more join is answered 429 too ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)).
-- **The worker** is the same application, run with `--role worker`, in a container of its own from the API's image. `make dev` doesn't run it yet: `./scripts/with-dev-env.sh uv run actio --role worker` does, by hand ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md)).
+- **The worker** is the same application, run with `--role worker`, in a container of its own from the API's image. `make dev` runs it inside the API's process instead, with `--role all`, and it reloads with the API ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md)).
     - It runs background jobs from a queue in Postgres, Procrastinate's, one at a time. A job is deferred in the transaction of the change it follows, so the two are committed together, or not at all.
     - A job can also have a schedule. Today there is one job: every ten minutes, the worker deletes expired guests and sessions, which the API otherwise deletes only after a new guest arrives.
     - It starts after the migration, and checks for itself that the database is at the migration its code expects. When it isn't, the worker takes no job, and ends with one line that says so.
     - Told to stop, by SIGTERM or Ctrl-C, it lets the job in hand finish for up to 15 seconds, and ends well, whenever it is told. A second signal changes nothing. Docker gives it 25 seconds.
     - It lives through a restart of the database: it stops, starts again a second later, and waits for the database as when it first started. When it can't go on, as 30 seconds after it lost its database, it ends, and Docker starts it again.
     - It has no port for Docker to probe. While it works it touches a file every five seconds, and its health check says whether it did so lately.
+    - Inside the API's process, it never ends that process: when it can't work, it says why in the log and tries again ten seconds later. It is told to stop at the same moment as the answers being written.
 - **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
 - **The web app** is a Next.js application: the chat ([ADR 0015](adr/0015-the-web-chat-calls-the-api-from-the-browser.md)).
     - **Its server sends only the frame of the page.** Everything of yours is fetched by the browser, straight from the API, with the session cookie. Nothing but the API handles a session.
@@ -89,7 +90,7 @@ Inside the API, the code is split into layers that only import downward, and a t
 ## Two ways to run it
 
 - **`make up`** runs everything in containers, shaped like production. See [ADR 0005](adr/0005-container-images.md).
-- **`make dev`** runs only Postgres, Valkey and Caddy in containers. The API and the web app run natively with hot reload, and Caddy reaches them through Docker Desktop. No worker runs there yet. See [ADR 0004](adr/0004-local-development-stack.md).
+- **`make dev`** runs only Postgres, Valkey and Caddy in containers. The API and the web app run natively with hot reload, and Caddy reaches them through Docker Desktop. The worker runs inside the API's process, and reloads with it. See [ADR 0004](adr/0004-local-development-stack.md).
 
 ## Security rules
 
@@ -105,7 +106,6 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 
 The next phases add:
 
-- **a worker in `make dev`, and `--role all`,** the API and the worker in one process, for the smallest installations ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md));
 - **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them. The router will also say when an answer waits for its server, and how many are ahead of it.
 
 ## Repository layout

@@ -121,12 +121,12 @@ What was used is kept in the database, in a ledger that only ever grows. See [AD
 
 ```sh
 make bootstrap   # checks your tools, installs everything, creates .env
-make dev         # starts the stack; Ctrl-C stops the API and the web app
+make dev         # starts the stack; Ctrl-C stops the API, with its worker, and the web app
 ```
 
 `make doctor` lists any missing tools, with install hints. You don't need Node.js itself: pnpm installs the version the project pins.
 
-In this mode, saving a Python file restarts the API, and the browser picks up changes to the web app by itself. The proxy's configuration, `deploy/caddy/Caddyfile`, is built into its image: after a change to it, run `make dev` (or `make up`) again to apply it. A mistake in it stops the build, with Caddy's own words, and the proxy that runs goes on as it was. `make dev` first stops any containers that `make up` started, so you can switch between the two modes freely. It runs no worker yet, the process behind the background jobs, such as the sweep of expired guests every ten minutes: `./scripts/with-dev-env.sh uv run actio --role worker` runs one beside it, until Ctrl-C. Postgres keeps its data in a Docker volume in both modes, so it survives restarts. Valkey keeps nothing on disk: after a restart the rate limits start full, and the usage limits are counted up again from the database.
+In this mode, saving a Python file restarts the API, and the worker that runs inside its process, the part behind the background jobs, such as the sweep of expired guests every ten minutes. The browser picks up changes to the web app by itself. The proxy's configuration, `deploy/caddy/Caddyfile`, is built into its image: after a change to it, run `make dev` (or `make up`) again to apply it. A mistake in it stops the build, with Caddy's own words, and the proxy that runs goes on as it was. `make dev` first stops any containers that `make up` started, so you can switch between the two modes freely. Postgres keeps its data in a Docker volume in both modes, so it survives restarts. Valkey keeps nothing on disk: after a restart the rate limits start full, and the usage limits are counted up again from the database.
 
 ## Talk to a local model from the terminal
 
