@@ -2,35 +2,37 @@
 
 Actio's own code is [MIT-licensed](LICENSE). Its dependencies are declared in the `pyproject.toml` files and `uv.lock` (Python), and in the `package.json` files and `pnpm-lock.yaml` (JavaScript). They are installed from the package registries: none of their code is copied into this repository.
 
-This file records what Actio's three container images ship: the API's, the web app's, and the proxy's. The API image was checked on 2026-11-11, and on 2026-11-14 for the one package it gained since (`tzdata`); the web image on 2026-11-14; the proxy image on 2026-11-18. Each check read the installed packages' own metadata, inside the built image.
+This file records what Actio's three container images ship: the API's, the web app's, and the proxy's. The API image was checked on 2026-11-11, on 2026-11-14 for the one package it gained since (`tzdata`), and on 2026-11-18 for the seven that came with the job queue; the web image on 2026-11-14; the proxy image on 2026-11-18. Each check read the installed packages' own metadata, inside the built image.
 
 ## Components under the LGPL
 
-Actio allows LGPL libraries that are used unmodified, as separate libraries ([ADR 0008](docs/adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). There are two:
+Actio allows LGPL libraries that are used unmodified, as separate libraries ([ADR 0008](docs/adr/0008-postgres-through-sqlalchemy-and-psycopg.md)). There are three:
 
 | Component | License | Shipped in | What it does | Source |
 |---|---|---|---|---|
 | psycopg and psycopg-binary 3.3 | LGPL-3.0-only | The API image | The Postgres driver | <https://github.com/psycopg/psycopg> |
+| psycopg-pool 3.3 | LGPL-3.0-only | The API image | The worker's pool of connections to Postgres, through Procrastinate ([ADR 0024](docs/adr/0024-background-jobs-in-a-queue-in-postgres.md)) | <https://github.com/psycopg/psycopg> |
 | libvips 8.18, as `@img/sharp-libvips-*` | LGPL-3.0-or-later | The web image | Image processing for Next.js's image optimizer, through `sharp` | <https://github.com/libvips/libvips> |
 
-- Both are used exactly as their projects publish them, and Actio links to neither statically.
-- You can replace either with a build of your own, by installing it over the one in the image: psycopg into the API image's virtual environment (`/app/.venv`), libvips into the web image's `node_modules`.
+- All three are used exactly as their projects publish them, and Actio links to none of them statically.
+- You can replace any of them with a build of your own, by installing it over the one in the image: psycopg and psycopg-pool into the API image's virtual environment (`/app/.venv`), libvips into the web image's `node_modules`.
 - The license text is at <https://www.gnu.org/licenses/lgpl-3.0.html>. Each package also carries its own copy.
 
 `psycopg-binary` bundles the libraries it needs to talk to Postgres, among them libpq (PostgreSQL License) and OpenSSL (Apache-2.0).
 
 ## Everything else the images ship
 
-**The API image** (Python, 39 packages besides Actio's own three): MIT, BSD-3-Clause, Apache-2.0, ISC and PSF-2.0 licenses, and one public-domain dedication.
+**The API image** (Python, 46 packages besides Actio's own three): MIT, BSD-3-Clause, Apache-2.0, ISC and PSF-2.0 licenses, and one public-domain dedication.
 
 | License | Packages |
 |---|---|
-| MIT | alembic, annotated-doc, annotated-types, anyio, argon2-cffi, argon2-cffi-bindings, fastapi, h11, httptools, mako, pydantic, pydantic-core, pydantic-settings, pyyaml, sqlalchemy, truststore, typing-inspection, valkey, watchfiles |
+| MIT | alembic, annotated-doc, annotated-types, anyio, argon2-cffi, argon2-cffi-bindings, attrs, croniter, fastapi, h11, httptools, mako, procrastinate, pydantic, pydantic-core, pydantic-settings, pyyaml, sqlalchemy, truststore, typing-inspection, valkey, watchfiles |
 | MIT-0 | cffi |
 | MIT and PSF-2.0 | greenlet |
 | MIT or Apache-2.0 | uvloop |
-| BSD-3-Clause | click, httpcore2, httpx2, idna, markupsafe, pycparser, python-dotenv, starlette, uvicorn, websockets |
+| BSD-3-Clause | asgiref, click, httpcore2, httpx2, idna, markupsafe, pycparser, python-dateutil, python-dotenv, starlette, uvicorn, websockets |
 | Apache-2.0 | opentelemetry-api, tzdata |
+| Apache-2.0 or BSD-2-Clause | packaging |
 | ISC | dnspython |
 | PSF-2.0 | typing-extensions |
 | The Unlicense (public domain) | email-validator |

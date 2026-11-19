@@ -19,6 +19,7 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
     "valkey>=6.2.0",
     "anyio>=4.16.0",
+    "procrastinate==3.11.0",
 ]
 
 [project.scripts]

@@ -18,6 +18,15 @@ MIGRATION_LOCK = 4_203_771_106
 long as nothing else in the database uses the same one."""
 
 
+def _described_by_a_model(name: str | None, type_: str, _parents: object) -> bool:
+    """Whether Alembic compares an object with the table models.
+
+    The job queue's tables are built by Procrastinate's own SQL (migration 0009), and no
+    model describes them. Compared, they would read as tables to drop.
+    """
+    return not (type_ == "table" and name is not None and name.startswith("procrastinate_"))
+
+
 def run_migrations() -> None:
     if context.is_offline_mode():
         raise RuntimeError("Actio's migrations run against a database, not into a SQL script")
@@ -29,7 +38,11 @@ def run_migrations() -> None:
     engine = create_engine(sqlalchemy_url(url), poolclass=pool.NullPool)
     try:
         with engine.connect() as connection:
-            context.configure(connection=connection, target_metadata=tables.metadata)
+            context.configure(
+                connection=connection,
+                target_metadata=tables.metadata,
+                include_name=_described_by_a_model,
+            )
             with context.begin_transaction():
                 # One migrator at a time. A second one waits here until the first
                 # commits, then finds the schema up to date and does nothing.

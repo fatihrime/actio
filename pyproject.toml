@@ -172,16 +172,17 @@ broken_contract_guidance = "Each package stands alone. The app is where they mee
 
 [[tool.importlinter.contracts]]
 id = "app-layers"
-name = "Inside the application, imports only point down: cli, app, api, the domain modules, core"
+name = "Inside the application, imports only point down: cli, app, api and worker, the domain modules, core"
 type = "layers"
 containers = ["actio"]
-# `api` is the HTTP interface. `tables` lists the domain modules' tables for the
-# migrations. Below them come the domain modules, then `core`. `chat` is above
-# `identity` because a conversation belongs to an account: its table points at theirs.
-# It is above `usage` because a turn is paid for: recording one writes the ledger too.
-# `catalog`, the models on offer, `identity` and `usage` have nothing to do with each
-# other, which `|` says: none imports another.
-layers = ["cli", "app", "api", "tables", "chat", "catalog | identity | usage", "core"]
+# `api` is the HTTP interface, and `worker` the process that runs background jobs: two
+# ways in, side by side, and neither imports the other. `tables` lists the domain
+# modules' tables for the migrations. Below them come the domain modules, then `core`.
+# `chat` is above `identity` because a conversation belongs to an account: its table
+# points at theirs. It is above `usage` because a turn is paid for: recording one writes
+# the ledger too. `catalog`, the models on offer, `identity` and `usage` have nothing to
+# do with each other, which `|` says: none imports another.
+layers = ["cli", "app", "api | worker", "tables", "chat", "catalog | identity | usage", "core"]
 # Every module directly under `actio` must be given a layer above, so a new one can't
 # skip the question of where it belongs.
 exhaustive = true
@@ -190,8 +191,24 @@ broken_contract_guidance = "A lower layer can't import a higher one. Move the sh
 
 [[tool.importlinter.contracts]]
 id = "web-framework-only-in-the-api"
-name = "core and the domain modules never import the web framework"
+name = "core, the domain modules and the worker never import the web framework"
 type = "forbidden"
-source_modules = ["actio.core", "actio.catalog", "actio.chat", "actio.identity", "actio.usage"]
+source_modules = [
+    "actio.core",
+    "actio.catalog",
+    "actio.chat",
+    "actio.identity",
+    "actio.usage",
+    "actio.worker",
+]
 forbidden_modules = ["fastapi", "starlette", "uvicorn"]
 broken_contract_guidance = "Processes that serve no HTTP use these modules too. HTTP belongs in actio.api."
+
+[[tool.importlinter.contracts]]
+id = "procrastinate-only-in-jobs"
+name = "Only actio.core.jobs imports Procrastinate"
+type = "forbidden"
+source_modules = ["actio", "actio_fakellm", "actio_llm", "actio_quota"]
+forbidden_modules = ["procrastinate"]
+ignore_imports = ["actio.core.jobs -> procrastinate"]
+broken_contract_guidance = "Defer a job with actio.core.jobs.defer, and list its handler in actio.worker. Keeping the queue behind one module keeps it replaceable (ADR 0024)."

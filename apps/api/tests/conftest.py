@@ -7,7 +7,12 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Iterable, Iterator
-from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+from contextlib import (
+    AbstractAsyncContextManager,
+    AsyncExitStack,
+    asynccontextmanager,
+    contextmanager,
+)
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -27,7 +32,7 @@ from actio.api.dependencies import get_clock, get_new_id
 from actio.app import create_app
 from actio.catalog import Catalog, CatalogFile, Gate, OfferedModel
 from actio.chat import running as turn_runner
-from actio.core import schema
+from actio.core import jobs, schema
 from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
 from actio.identity.passwords import Passwords
@@ -93,15 +98,28 @@ def passwords() -> Passwords:
 # --- Databases ------------------------------------------------------------------------
 
 
-@pytest.fixture
-def database_url(postgres_url: str) -> Iterator[str]:
-    """A new, empty database for one test, on the session's Postgres server."""
+@contextmanager
+def _empty_database(postgres_url: str) -> Iterator[str]:
     name = f"test_{uuid.uuid4().hex}"
     with psycopg.connect(postgres_url, autocommit=True) as server:
         server.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     yield f"{postgres_url.rsplit('/', 1)[0]}/{name}"
     with psycopg.connect(postgres_url, autocommit=True) as server:
         server.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+@pytest.fixture
+def database_url(postgres_url: str) -> Iterator[str]:
+    """A new, empty database for one test, on the session's Postgres server."""
+    with _empty_database(postgres_url) as url:
+        yield url
+
+
+@pytest.fixture
+def another_database_url(postgres_url: str) -> Iterator[str]:
+    """A second empty database, for a test that compares two."""
+    with _empty_database(postgres_url) as url:
+        yield url
 
 
 @pytest.fixture
@@ -118,6 +136,25 @@ async def db(migrated: str) -> AsyncIterator[AsyncSession]:
     async with create_session_factory(engine)() as session:
         yield session
     await engine.dispose()
+
+
+class WorkThrough(Protocol):
+    def __call__(self, *listed: jobs.Job) -> Awaitable[None]: ...
+
+
+@pytest.fixture
+def work_through(migrated: str) -> WorkThrough:
+    """Call with jobs for a worker on this test's database that runs what is queued for
+    them, and returns once nothing is left. It leaves the signals of the test's process
+    alone, and fails the test after ten seconds, or eleven with a job that never ends."""
+
+    async def work(*listed: jobs.Job) -> None:
+        async with asyncio.timeout(10):
+            await jobs.work(
+                listed, database_url=migrated, grace=1, until_idle=True, on_signals=False
+            )
+
+    return work
 
 
 # --- The app --------------------------------------------------------------------------

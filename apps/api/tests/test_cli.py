@@ -1,13 +1,16 @@
+import functools
 from pathlib import Path
 from typing import Any
 
 import psycopg
+import psycopg_pool
 import pytest
 import uvicorn
 from pydantic import ValidationError
 
-from actio import cli
+from actio import cli, worker
 from actio.core import schema
+from actio.core.settings import Settings
 
 DATABASE = "postgresql://actio:pw@127.0.0.1:1/actio"
 VALKEY = "valkey://127.0.0.1:1/0"
@@ -67,6 +70,61 @@ def test_reload_watches_only_the_api_package(monkeypatch: pytest.MonkeyPatch) ->
     [kwargs] = calls
     assert kwargs["reload"] is True
     assert kwargs["reload_dirs"] == [str(Path(cli.__file__).parent)]
+
+
+def test_the_worker_role_runs_the_worker_without_the_models_and_plans_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No job talks to a model yet."""
+    ran: list[Settings] = []
+
+    async def run(settings: Settings) -> None:
+        ran.append(settings)
+
+    monkeypatch.setattr(worker, "run", run)
+    monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it served HTTP"))
+    monkeypatch.setenv("ACTIO_MODELS_FILE", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ACTIO_PLANS_FILE", str(tmp_path / "missing-too.toml"))
+
+    cli.main(["--role", "worker"])
+
+    [settings] = ran
+    assert settings.database_url.get_secret_value() == DATABASE
+
+
+@pytest.mark.parametrize("role", ["migrate", "worker"])
+def test_reload_is_refused_for_a_role_that_serves_no_http(
+    role: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(worker, "run", lambda _settings: pytest.fail("the worker started"))
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", role, "--reload"])
+
+    assert stopped.value.code == 2
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        f"actio: error: --reload restarts the API's server; the {role} role has none"
+    )
+
+
+def test_a_worker_that_cant_connect_to_its_database_says_so_in_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The pool waits 30 seconds for its first connection; here, half of one. Nothing
+    listens where the settings point."""
+    monkeypatch.setattr(
+        psycopg_pool.AsyncConnectionPool,
+        "open",
+        functools.partialmethod(psycopg_pool.AsyncConnectionPool.open, timeout=0.5),
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "worker"])
+
+    assert stopped.value.code == 1
+    assert capsys.readouterr().err == (
+        "actio: couldn't connect to the database: pool initialization incomplete after 0.5 sec\n"
+    )
 
 
 def test_unknown_role_exits_with_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:

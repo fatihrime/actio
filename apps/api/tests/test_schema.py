@@ -1,6 +1,7 @@
 """Migrations, run against a real Postgres: each test gets its own empty database."""
 
 import asyncio
+import importlib.resources
 import os
 import subprocess
 import sys
@@ -90,10 +91,122 @@ def test_going_back_before_accounts_keeps_the_guests(database_url: str) -> None:
 
 
 def test_the_models_and_the_migrations_agree(database_url: str) -> None:
-    """Fails when a table model changes and no migration was written for it."""
+    """Fails when a table model changes and no migration was written for it. The job
+    queue's tables are in the database too, and no model describes them: the
+    comparison leaves them alone."""
     schema.upgrade(database_url)
 
     schema.check(database_url)
+
+
+QUEUE_OBJECTS = r"""
+    SELECT 'relation', relname, relkind::text FROM pg_class
+    WHERE relnamespace = current_schema()::regnamespace AND relname LIKE '%procrastinate%'
+    UNION ALL
+    SELECT 'routine', proname, prokind::text FROM pg_proc
+    WHERE pronamespace = current_schema()::regnamespace AND proname LIKE '%procrastinate%'
+    UNION ALL
+    SELECT 'type', typname, typtype::text FROM pg_type
+    WHERE typnamespace = current_schema()::regnamespace AND typname LIKE '%procrastinate%'
+"""
+"""Everything of the job queue's: tables, indexes and sequences, functions and
+procedures, and types. Procrastinate names them all after itself."""
+
+
+def queue_objects(database_url: str) -> set[tuple[str, str, str]]:
+    with psycopg.connect(database_url) as connection:
+        return {(kind, name, which) for kind, name, which in connection.execute(QUEUE_OBJECTS)}
+
+
+def test_the_job_queue_comes_with_its_migration_and_goes_with_it(database_url: str) -> None:
+    schema.upgrade(database_url)
+    built = queue_objects(database_url)
+
+    schema.downgrade(database_url, "0008")
+
+    assert {
+        ("relation", "procrastinate_jobs", "r"),
+        ("type", "procrastinate_job_status", "e"),
+    } < built
+    assert queue_objects(database_url) == set()
+    assert revisions_in(database_url) == ["0008"]
+    assert schema.upgrade(database_url) == schema.head()
+    assert queue_objects(database_url) == built
+
+
+QUEUE_CATALOG = {
+    "columns": r"""
+        SELECT table_name, column_name, data_type, udt_name, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name LIKE 'procrastinate\_%'
+    """,
+    "functions and procedures": r"""
+        SELECT proname, pg_get_function_identity_arguments(oid), pg_get_functiondef(oid)
+        FROM pg_proc
+        WHERE pronamespace = current_schema()::regnamespace AND proname LIKE 'procrastinate\_%'
+    """,
+    "enum labels": r"""
+        SELECT t.typname, array_agg(e.enumlabel ORDER BY e.enumsortorder)
+        FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid
+        WHERE t.typnamespace = current_schema()::regnamespace
+          AND t.typname LIKE 'procrastinate\_%'
+        GROUP BY t.typname
+    """,
+    "composite types": r"""
+        SELECT t.typname, a.attname, format_type(a.atttypid, a.atttypmod)
+        FROM pg_type t
+        JOIN pg_class c ON c.oid = t.typrelid AND c.relkind = 'c'
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+        WHERE t.typnamespace = current_schema()::regnamespace
+          AND t.typname LIKE 'procrastinate\_%'
+    """,
+    "indexes": r"""
+        SELECT indexname, indexdef FROM pg_indexes
+        WHERE schemaname = current_schema() AND tablename LIKE 'procrastinate\_%'
+    """,
+    "constraints": r"""
+        SELECT conrelid::regclass::text, conname, pg_get_constraintdef(oid)
+        FROM pg_constraint
+        WHERE connamespace = current_schema()::regnamespace
+          AND conrelid::regclass::text LIKE 'procrastinate\_%'
+    """,
+    "triggers": r"""
+        SELECT tgrelid::regclass::text, tgname, pg_get_triggerdef(oid)
+        FROM pg_trigger
+        WHERE NOT tgisinternal AND tgrelid::regclass::text LIKE 'procrastinate\_%'
+    """,
+}
+"""What the job queue is made of, as the database describes it."""
+
+
+def queue_catalog(database_url: str) -> dict[str, list[tuple[object, ...]]]:
+    with psycopg.connect(database_url) as connection:
+        return {
+            part: sorted(tuple(row) for row in connection.execute(query))
+            for part, query in QUEUE_CATALOG.items()
+        }
+
+
+def test_the_job_queue_is_the_one_the_installed_procrastinate_describes(
+    database_url: str, another_database_url: str
+) -> None:
+    """Our migrations apply Procrastinate's files up to a version they name. After an
+    upgrade of the package, its `schema.sql` describes a newer queue, until a migration
+    applies the files in between."""
+    schema.upgrade(database_url)
+    package = importlib.resources.files("procrastinate.sql")
+    whole = package.joinpath("schema.sql").read_text(encoding="utf-8")
+    with psycopg.connect(another_database_url) as connection:
+        connection.execute(whole)
+
+    ours, the_packages = queue_catalog(database_url), queue_catalog(another_database_url)
+
+    assert all(ours.values()), ours
+    assert ours == the_packages, (
+        "The job queue our migrations build isn't the one the installed Procrastinate "
+        "describes. Was Procrastinate upgraded? Then write the next migration: one that "
+        "applies its files after the version the last one names (ADR 0024)."
+    )
 
 
 @pytest.mark.anyio

@@ -4,25 +4,27 @@ Actio is one application that runs as different processes, chosen with ``--role`
 
 - ``api`` serves HTTP;
 - ``migrate`` brings the database schema up to date, then exits. It runs before the API
-  starts, as its own step, so the API never changes the schema it is serving from.
-
-The background worker role arrives with the job queue.
+  starts, as its own step, so the API never changes the schema it is serving from;
+- ``worker`` runs the background jobs, until it is told to stop.
 """
 
 import argparse
+import asyncio
+import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 import uvicorn
 
+from actio import worker
 from actio.catalog import CatalogError, read_file
-from actio.core import schema
+from actio.core import jobs, schema
 from actio.core.settings import Settings
 from actio.usage.plans import PlansError
 from actio.usage.plans import load as load_plans
 
-ROLES = ("api", "migrate")
+ROLES = ("api", "migrate", "worker")
 
 WAITS_FOR_REQUESTS_S = 25
 """How long the web server waits, when it is told to stop, for the requests it is
@@ -47,11 +49,24 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="restart the API when the code changes (development only)",
     )
     args = parser.parse_args(argv)
+    if args.reload and args.role != "api":
+        parser.error(f"--reload restarts the API's server; the {args.role} role has none")
 
     settings = Settings()
     if args.role == "migrate":
         revision = schema.upgrade(settings.database_url.get_secret_value())
         sys.stdout.write(f"The database schema is at migration {revision}.\n")
+        return
+    if args.role == "worker":
+        # No web server sets the log up here. One line a record, on stderr.
+        logging.basicConfig(
+            level=settings.log_level.upper(),
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+        try:
+            asyncio.run(worker.run(settings))
+        except jobs.DatabaseUnreachableError as error:
+            parser.exit(1, f"actio: {error}\n")
         return
 
     try:

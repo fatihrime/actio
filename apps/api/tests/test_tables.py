@@ -46,9 +46,12 @@ def test_a_table_module_brings_along_the_tables_it_points_at(module: str) -> Non
 
 
 def test_the_migrations_create_exactly_the_declared_tables(migrated: str) -> None:
+    """Besides the job queue's, which Procrastinate's own SQL builds: the tests of the
+    migrations hold those to the installed package."""
     with psycopg.connect(migrated) as connection:
         rows = connection.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            r" AND tablename NOT LIKE 'procrastinate\_%'"
         ).fetchall()
 
     assert {name for (name,) in rows} == set(tables.metadata.tables) | {"alembic_version"}
