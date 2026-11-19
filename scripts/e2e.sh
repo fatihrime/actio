@@ -73,6 +73,6 @@ status=$?
 
 if [ "$status" -ne 0 ]; then
   echo "What the containers logged last:" >&2
-  "${compose[@]}" logs --no-color --tail 30 api web caddy fakellm >&2
+  "${compose[@]}" logs --no-color --tail 30 api worker web caddy fakellm >&2
 fi
 exit "$status"

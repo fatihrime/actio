@@ -28,7 +28,7 @@ up: .env ## Run the whole stack in containers, shaped like production, at http:/
 	@echo "Open http://localhost:8080 (API docs: /api/docs). 'make down' stops everything."
 
 dev: .env ## Run the stack at http://localhost:8080 with the API and web app native; Ctrl-C stops them
-	docker compose stop api web # in case `make up` left them running
+	docker compose stop api web worker # in case `make up` left them running
 	$(DEV_COMPOSE) up --detach --wait --build postgres valkey caddy # --build: the proxy's config is in its image
 	./scripts/with-dev-env.sh uv run actio --role migrate
 	@echo "Open http://localhost:8080 (API docs: /api/docs). 'make down' stops the containers."

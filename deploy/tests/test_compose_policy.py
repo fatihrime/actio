@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -21,6 +21,7 @@ import pytest
 from actio.api.turns import MAX_QUESTION_CHARS
 from actio.chat.running import GRACE, LAST_WORDS
 from actio.cli import WAITS_FOR_REQUESTS_S
+from actio.core import alive, jobs
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILES = [
@@ -142,6 +143,76 @@ def test_the_migration_job_cannot_be_reached_or_reach_out(stack: dict[str, Any])
     assert set(stack["services"]["migrate"]["networks"]) <= internal
 
 
+def test_the_worker_starts_only_after_the_schema_is_migrated(stack: dict[str, Any]) -> None:
+    """It checks the schema itself too, and ends with one line when it isn't the one it
+    expects. Waiting for the migration means it never has to."""
+    depends_on = stack["services"]["worker"]["depends_on"]
+
+    assert depends_on["migrate"]["condition"] == "service_completed_successfully"
+
+
+def test_the_worker_cannot_be_reached_or_reach_out(stack: dict[str, Any]) -> None:
+    """It serves nothing, and needs only the data services. (No port either: the rule
+    for every container, above.)"""
+    internal = {name for name, network in stack["networks"].items() if network.get("internal")}
+
+    assert set(stack["services"]["worker"]["networks"]) <= internal
+
+
+def test_only_the_worker_is_started_again_and_only_when_it_failed(stack: dict[str, Any]) -> None:
+    """The worker ends when it can't go on, such as 30 seconds after it lost its
+    database, with a status that says so. Docker then starts it again, and only then:
+    not after it ended well because it was told to stop.
+
+    `on-failure`, and not `always` or `unless-stopped`: those two bring a container
+    back whenever Docker itself starts again. Nothing else of the stack comes back
+    then, and a worker alone would wait for a database that isn't there. With
+    `on-failure` Docker brings back only a container whose last end was a failure, and
+    the worker ends well when Docker stops it (both measured: ADR 0024).
+
+    Every other service has no policy: the API is built to stay up without its database,
+    and to say so at `/api/readyz`; a job runs once. See ADR 0024."""
+    restarting = {
+        name: svc["restart"]
+        for name, svc in stack["services"].items()
+        if svc.get("restart", "no") != "no"
+    }
+
+    assert restarting == {"worker": "on-failure"}
+
+
+def test_the_worker_is_given_the_time_it_takes_to_finish_the_job_in_hand(
+    stack: dict[str, Any],
+) -> None:
+    """Told to stop, the worker gives the job in hand `jobs.SHUTDOWN_GRACE_S` to finish,
+    then cuts it off, takes itself off the queue's list of workers and closes its
+    connections. Docker kills the container after `stop_grace_period`, ten seconds
+    unless the file says otherwise: longer than the grace, with room for what follows
+    it, which takes a fraction of a second while the database answers.
+
+    And an init process stands in front of it: a stop that comes before Python listens
+    for it, in its first half second, still ends it at once. See ADR 0024."""
+    worker = stack["services"]["worker"]
+    room_after_the_grace = timedelta(seconds=5)
+
+    assert timedelta(seconds=jobs.SHUTDOWN_GRACE_S) + room_after_the_grace <= docker_waits(worker)
+    assert worker["init"] is True
+
+
+def test_the_worker_is_healthy_while_it_touches_a_file_on_its_tmpfs(
+    stack: dict[str, Any],
+) -> None:
+    """It has no port to probe. While it works it touches the file it is told of, and
+    its health check says whether it did so lately (`actio.core.alive`). Its root
+    filesystem is read-only, so the file is on a tmpfs of its own."""
+    worker = stack["services"]["worker"]
+    alive_file = PurePosixPath(worker["environment"][alive.VARIABLE])
+    in_memory = [PurePosixPath(mount.split(":")[0]) for mount in worker["tmpfs"]]
+
+    assert worker["healthcheck"]["test"] == ["CMD", "python", "-m", "actio.core.alive"]
+    assert any(mount in alive_file.parents for mount in in_memory)
+
+
 def test_a_client_cannot_choose_the_address_it_is_counted_under(stack: dict[str, Any]) -> None:
     """Rate limits count per client address, which the API reads from `X-Forwarded-For`.
 
@@ -219,12 +290,16 @@ def test_the_api_is_given_the_time_it_takes_to_end_its_answers(stack: dict[str, 
     See ADR 0022."""
     answers_take = GRACE + LAST_WORDS
     server_waits = timedelta(seconds=WAITS_FOR_REQUESTS_S)
-    written = re.fullmatch(r"(?:(\d+)m)?(?:(\d+)s)?", stack["services"]["api"]["stop_grace_period"])
-    assert written is not None, "written as minutes and seconds, such as 35s or 1m5s"
-    docker_waits = timedelta(minutes=int(written[1] or 0), seconds=int(written[2] or 0))
 
     assert answers_take < server_waits
-    assert server_waits + LAST_WORDS < docker_waits
+    assert server_waits + LAST_WORDS < docker_waits(stack["services"]["api"])
+
+
+def docker_waits(svc: dict[str, Any]) -> timedelta:
+    """How long Docker waits for a container it told to stop, before it kills it."""
+    written = re.fullmatch(r"(?:(\d+)m)?(?:(\d+)s)?", svc["stop_grace_period"])
+    assert written is not None, "written as minutes and seconds, such as 35s or 1m5s"
+    return timedelta(minutes=int(written[1] or 0), seconds=int(written[2] or 0))
 
 
 CADDY_SIZES = {"B": 1, "KB": 1000, "KiB": 1024, "MB": 1000**2, "MiB": 1024**2}
@@ -391,7 +466,7 @@ def test_the_e2e_stack_is_the_real_one_with_a_fake_model_added(
 ) -> None:
     """Tests that pass on another stack than the one people run would prove little."""
     assert set(e2e["services"]) == set(stack["services"]) | {"fakellm"}
-    for name in ("caddy", "web", "migrate", "postgres", "valkey"):
+    for name in ("caddy", "web", "migrate", "worker", "postgres", "valkey"):
         assert e2e["services"][name] == stack["services"][name]
 
 

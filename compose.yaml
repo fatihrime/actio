@@ -9,7 +9,8 @@
 #   - the data services sit only on the internal network;
 #   - every container runs as a non-root user, read-only, without Linux capabilities,
 #     with a memory limit and a health check. A job that runs once and exits, such as
-#     `migrate`, has no health check: what depends on it waits for it to succeed.
+#     `migrate`, has no health check: what depends on it waits for it to succeed;
+#   - only the worker is started again by Docker, and only when it failed.
 name: actio
 
 x-hardening: &hardening
@@ -17,13 +18,13 @@ x-hardening: &hardening
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
 
-# The API and the migration job run the same image.
+# The API, the migration job and the worker run the same image.
 x-api-build: &api-build
   context: .
   dockerfile: apps/api/Dockerfile
 
-# Where the API finds its data, with the passwords from .env. They are generated as hex,
-# so they need no escaping inside a URL.
+# Where the API, the migration job and the worker find their data, with the passwords
+# from .env. They are generated as hex, so they need no escaping inside a URL.
 x-api-stores: &api-stores
   ACTIO_DATABASE_URL: postgresql://actio:${POSTGRES_PASSWORD:?run make bootstrap to create .env}@postgres:5432/actio
   ACTIO_VALKEY_URL: valkey://:${VALKEY_PASSWORD:?run make bootstrap to create .env}@valkey:6379/0
@@ -74,8 +75,8 @@ services:
       timeout: 3s
       retries: 10
 
-  # Brings the database schema up to date, then exits. The API starts only after it
-  # succeeded, so the API never serves from a schema it doesn't expect.
+  # Brings the database schema up to date, then exits. The API and the worker start only
+  # after it succeeded, so neither works on a schema it doesn't expect.
   migrate:
     build: *api-build
     <<: *hardening
@@ -144,6 +145,48 @@ services:
       timeout: 3s
       retries: 10
 
+  # Runs the background jobs, such as the sweep of expired guests, one at a time. See
+  # docs/adr/0024-background-jobs-in-a-queue-in-postgres.md.
+  worker:
+    build: *api-build
+    <<: *hardening
+    user: actio
+    # Python listens for the stop signal only once it has started. As process 1 a
+    # program gets no signal it has no handler for, so a stop in that first half
+    # second would wait out Docker's patience. An init process in front ends it at once.
+    init: true
+    tmpfs: [/tmp]
+    command: [actio, --role, worker]
+    environment:
+      <<: *api-stores # the settings require both; no job uses Valkey yet
+      # The file it touches every 5 seconds while it works, for its health check below.
+      # On the tmpfs: the root filesystem is read-only.
+      ACTIO_ALIVE_FILE: /tmp/actio-worker-alive
+    networks: [backend] # nothing reaches it, and it reaches only the data services
+    mem_limit: 256m
+    # It ends when it can't go on: 30 seconds after it lost its database, or with an
+    # error it has no answer to. Docker starts it again then, and only then: not when
+    # it ended well because it was told to stop. That is also why it stays down, like
+    # the rest of the stack, after Docker itself was restarted: Docker stops it first,
+    # and it ends well. Only one that Docker couldn't stop, as when the machine lost
+    # power, comes back by itself, alone, and tries every half minute until `make up`.
+    restart: on-failure
+    # Told to stop, it lets the job in hand finish for up to 15 seconds, then takes
+    # itself off the queue's list of workers and closes its connections. Docker's own
+    # patience is 10 seconds. One told to stop just after it lost its database, before
+    # it has noticed, would wait 30 seconds more for a connection: Docker cuts that
+    # short, and nothing is lost, since such a worker has no job that could be finished.
+    stop_grace_period: 25s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # It has no port to probe: healthy while it has touched the file above lately.
+      test: ["CMD", "python", "-m", "actio.core.alive"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   postgres:
     image: pgvector/pgvector:0.8.7-pg17@sha256:7d0a41464797aeb9862dfdc0bbf1526b82cfd324cdd8036df19e3545f4a9ccb8
     <<: *hardening
@@ -195,7 +238,7 @@ services:
 networks:
   edge: {} # Caddy, the web app and the API
   backend:
-    internal: true # no route out: only the API reaches the data services
+    internal: true # no route out: only the API, migrate and the worker reach the data
 
 volumes:
   postgres-data:
