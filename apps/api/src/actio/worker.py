@@ -1,4 +1,5 @@
-"""The worker: the process that runs background jobs (`actio --role worker`).
+"""The worker: the process that runs background jobs (`actio --role worker`), or the
+part of the API's process that does (`actio --role all`, `run_inside`).
 
 A job is deferred by its name, in the transaction of the change it follows
 (`actio.core.jobs.defer`). Every job a worker can run is listed here, in `listed`, with
@@ -8,6 +9,7 @@ This is a top layer, like `actio.api`: it reads the clock, and passes the time t
 functions it calls as `now`.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -29,6 +31,13 @@ SWEEP = "sweep-expired"
 sweeps after each new guest: a busy installation is kept clear by its newcomers, a
 quiet one by this."""
 
+TRIES_AGAIN_AFTER_S = 10.0
+"""How long the worker inside the API's process (`run_inside`) waits to try again, after
+it couldn't work or ended with an error.
+
+A database that isn't migrated answers at once: without a pause the worker would go
+round in a circle, and fill the log with the same line."""
+
 
 class NotMigratedError(Exception):
     """The database isn't at the migration this code expects, so the worker doesn't
@@ -47,16 +56,66 @@ async def run(settings: Settings) -> None:
     migrated (`NotMigratedError`). While it works, it touches `settings.alive_file`, if
     there is one, for its health check to look at (`actio.core.alive`)."""
     async with open_resources(settings) as resources:
-        await jobs.work(
-            listed(resources, clock=_now),
-            database_url=settings.database_url.get_secret_value(),
-            check=partial(_migrated, resources),
-            on_beat=(
-                partial(alive.touch, settings.alive_file)
-                if settings.alive_file is not None
-                else None
-            ),
-        )
+        await _work(settings, resources, on_signals=True)
+
+
+async def run_inside(settings: Settings, resources: Resources) -> None:
+    """Run the jobs inside the API's process (`actio --role all`), on that process's
+    `resources`, until the task this runs in is cancelled.
+
+    It works as `run` does, with two differences:
+
+    - it leaves the process's signals alone. Whoever runs it hears them, and tells it to
+      stop by cancelling its task, once: a second cancellation would cut off the job in
+      hand;
+    - nothing but that ends it. A worker that can't work ends its own process, which is
+      started again; this one's process serves the API, which stays up without its
+      database. So it says in the log why it can't work, in one line for a database it
+      can't reach or that isn't migrated, with the trace for anything else, and tries
+      again after `TRIES_AGAIN_AFTER_S`. Once it was told to stop, it ends instead: an
+      error can come in place of the cancellation, as Procrastinate's does when it can't
+      take its worker off its list.
+    """
+    while True:
+        try:
+            await _work(settings, resources, on_signals=False)
+        except (jobs.DatabaseUnreachableError, NotMigratedError) as error:
+            # Its own words say what is wrong, and what to do about it: no trace.
+            logger.error("The worker can't work: %s.%s", error, _then("It tries again"))
+        except Exception:
+            logger.exception("The worker ended with an error.%s", _then("It starts again"))
+        else:
+            return  # `work` returns only when a signal told it to stop, and here it hears none
+        if _told_to_stop():
+            return
+        await asyncio.sleep(TRIES_AGAIN_AFTER_S)
+
+
+async def _work(settings: Settings, resources: Resources, *, on_signals: bool) -> None:
+    """One worker on `resources`, with every job of `listed`, which checks its database
+    each time it has connected, and touches `settings.alive_file` while it works, if the
+    settings name one."""
+    await jobs.work(
+        listed(resources, clock=_now),
+        database_url=settings.database_url.get_secret_value(),
+        on_signals=on_signals,
+        check=partial(_migrated, resources),
+        on_beat=(
+            partial(alive.touch, settings.alive_file) if settings.alive_file is not None else None
+        ),
+    )
+
+
+def _told_to_stop() -> bool:
+    """Whether the task this runs in was asked to cancel."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
+def _then(again: str) -> str:
+    """What the worker inside the API does after it couldn't work: `again`, after the
+    pause, or nothing, once it was told to stop."""
+    return "" if _told_to_stop() else f" {again} in {TRIES_AGAIN_AFTER_S:g} s."
 
 
 async def sweep_expired(resources: Resources, clock: Clock) -> None:

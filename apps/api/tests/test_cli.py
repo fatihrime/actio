@@ -1,5 +1,10 @@
 import asyncio
+import copy
 import functools
+import logging
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -7,10 +12,11 @@ import psycopg
 import psycopg_pool
 import pytest
 import uvicorn
+import uvicorn.config
 from pydantic import ValidationError
 
 from actio import cli, worker
-from actio.core import schema
+from actio.core import jobs, schema
 from actio.core.settings import Settings
 
 DATABASE = "postgresql://actio:pw@127.0.0.1:1/actio"
@@ -45,6 +51,26 @@ def test_api_role_serves_the_app_factory_with_settings(monkeypatch: pytest.Monke
     assert kwargs["server_header"] is False
     assert kwargs["forwarded_allow_ips"] == "*"
     assert kwargs["reload"] is False
+    assert "log_config" not in kwargs  # uvicorn's own
+
+
+def test_the_all_role_serves_the_app_with_the_worker_as_the_api_role_serves_the_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setenv("ACTIO_PORT", "9000")
+    monkeypatch.setenv("ACTIO_FORWARDED_ALLOW_IPS", "*")
+
+    cli.main(["--role", "api"])
+    cli.main(["--role", "all"])
+
+    [(api, served_as_api), (both, served_as_all)] = calls
+    assert api == ("actio.app:create_app",)
+    assert both == ("actio.app:create_app_with_worker",)
+    assert "log_config" in served_as_all
+    del served_as_all["log_config"]  # see the tests of the log below
+    assert served_as_all == served_as_api  # host, port, the wait at a stop, and the rest
 
 
 def test_the_server_is_told_how_long_to_wait_for_its_requests_when_it_stops(
@@ -62,15 +88,127 @@ def test_the_server_is_told_how_long_to_wait_for_its_requests_when_it_stops(
     assert kwargs["timeout_graceful_shutdown"] == cli.WAITS_FOR_REQUESTS_S == 25
 
 
-def test_reload_watches_only_the_api_package(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_process_that_runs_the_worker_too_is_given_no_longer_to_stop_than_the_api() -> None:
+    """In the all role the worker is told to stop at the signal, at the same moment as
+    the answers, so the job in hand has its grace while the web server waits for its
+    requests. Shorter than that wait, the grace is over before the server shuts the
+    application down, and the time Docker gives the API is enough for both (checked in
+    deploy/tests). Told only then, the worker's grace would come on top of the server's
+    wait."""
+    assert jobs.SHUTDOWN_GRACE_S < cli.WAITS_FOR_REQUESTS_S
+
+
+@pytest.mark.parametrize("role", ["api", "all"])
+def test_reload_watches_only_the_api_package(role: str, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(uvicorn, "run", lambda *_args, **kwargs: calls.append(kwargs))
 
-    cli.main(["--role", "api", "--reload"])
+    cli.main(["--role", role, "--reload"])
 
     [kwargs] = calls
     assert kwargs["reload"] is True
     assert kwargs["reload_dirs"] == [str(Path(cli.__file__).parent)]
+
+
+@contextmanager
+def logging_put_back() -> Iterator[None]:
+    """Whatever the test sets up in the log is undone afterwards, pass or fail: each
+    logger's level, handlers and propagation, the root's included. A logger made
+    meanwhile is left as a new one is."""
+    manager = logging.root.manager
+
+    def loggers() -> list[logging.Logger]:
+        named = list(manager.loggerDict.values())
+        return [logging.root, *(found for found in named if isinstance(found, logging.Logger))]
+
+    before = {
+        logger: (logger.level, list(logger.handlers), logger.propagate, logger.disabled)
+        for logger in loggers()
+    }
+    try:
+        yield
+    finally:
+        for logger in loggers():
+            level, handlers, propagate, disabled = before.get(
+                logger, (logging.NOTSET, [], True, False)
+            )
+            logger.setLevel(level)
+            logger.handlers = handlers
+            logger.propagate = propagate
+            logger.disabled = disabled
+
+
+WRITTEN_AS_THE_WORKER_DOES = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} ")
+"""The start of a line of the worker's log: the time."""
+
+
+@pytest.mark.parametrize(
+    ("level", "written", "left_out"),
+    [
+        (
+            "debug",
+            [
+                ("actio.worker", logging.DEBUG),
+                ("procrastinate.worker", logging.DEBUG),
+                ("httpx2", logging.WARNING),
+            ],
+            [("httpx2", logging.INFO), ("alembic.runtime.migration", logging.INFO)],
+        ),
+        (
+            "error",
+            [
+                ("actio.worker", logging.ERROR),
+                ("procrastinate.worker", logging.ERROR),
+                ("httpx2", logging.ERROR),
+            ],
+            [
+                ("actio.worker", logging.WARNING),
+                ("procrastinate.worker", logging.WARNING),
+                ("httpx2", logging.WARNING),
+            ],
+        ),
+    ],
+)
+def test_the_all_role_logs_actio_and_the_queue_from_the_settings_level_and_the_rest_from_warnings(
+    level: str,
+    written: list[tuple[str, int]],
+    left_out: list[tuple[str, int]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The worker's lines, such as what the sweep deleted, are Actio's and the queue's.
+    Other libraries say a lot below a warning: a line for each request to a model's
+    server, for each change the reloader sees, two each time Alembic reads the
+    database's migration.
+
+    The log is set up as uvicorn sets it up, from what it was given, and records are
+    sent through it. uvicorn's own lines are written as uvicorn writes them, once."""
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setenv("ACTIO_LOG_LEVEL", level)
+    uvicorns_own = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+
+    cli.main(["--role", "all"])
+
+    [(args, kwargs)] = calls
+    given = kwargs["log_config"]
+    with logging_put_back():
+        uvicorn.Config(*args, **kwargs)  # sets the log up, as `uvicorn.run` does
+        for name, at in [*written, *left_out]:
+            logging.getLogger(name).log(at, "a record of %s", name)
+        logging.getLogger("uvicorn.error").error("a record of uvicorn's")
+    said = [
+        WRITTEN_AS_THE_WORKER_DOES.sub("<time> ", line)
+        for line in capsys.readouterr().err.splitlines()
+    ]
+
+    assert said == [
+        *(f"<time> {logging.getLevelName(at)} {name}: a record of {name}" for name, at in written),
+        "ERROR:    a record of uvicorn's",
+    ]
+    for part in ("formatters", "handlers", "loggers"):
+        assert {name: given[part][name] for name in uvicorns_own[part]} == uvicorns_own[part]
+    assert uvicorns_own == uvicorn.config.LOGGING_CONFIG  # given a copy, not its own
 
 
 def test_the_worker_role_runs_the_worker_without_the_models_and_plans_files(
@@ -222,8 +360,9 @@ def test_the_api_does_not_start_without_its_models_file(
     assert said.count("\n") == 1  # one line to read, not a stack of them
 
 
+@pytest.mark.parametrize("role", ["api", "all"])
 def test_a_mistake_in_the_models_file_is_said_in_one_line(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    role: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     broken = tmp_path / "models.toml"
     broken.write_text(MODELS.read_text().replace('default = "standard"', 'default = "best"'))
@@ -231,7 +370,7 @@ def test_a_mistake_in_the_models_file_is_said_in_one_line(
     monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it started"))
 
     with pytest.raises(SystemExit) as stopped:
-        cli.main(["--role", "api"])
+        cli.main(["--role", role])
 
     assert stopped.value.code == 2
     assert capsys.readouterr().err == (
@@ -256,8 +395,9 @@ def test_the_api_does_not_start_without_its_plans_file(
     assert said.count("\n") == 1
 
 
+@pytest.mark.parametrize("role", ["api", "all"])
 def test_a_mistake_in_the_plans_file_is_said_in_one_line(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    role: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     broken = tmp_path / "plans.toml"
     broken.write_text(PLANS.read_text().replace('guests = "guest"', 'guests = "visitor"'))
@@ -265,7 +405,7 @@ def test_a_mistake_in_the_plans_file_is_said_in_one_line(
     monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it started"))
 
     with pytest.raises(SystemExit) as stopped:
-        cli.main(["--role", "api"])
+        cli.main(["--role", role])
 
     assert stopped.value.code == 2
     assert capsys.readouterr().err == (

@@ -1,4 +1,5 @@
-"""Builds the FastAPI application. ``uvicorn --factory`` calls :func:`create_app`."""
+"""Builds the FastAPI application. ``uvicorn --factory`` calls :func:`create_app`, or
+:func:`create_app_with_worker` for the API with the worker inside it."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -6,7 +7,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 
-from actio import __version__
+from actio import __version__, worker
 from actio.api import catalog as catalog_routes
 from actio.api import conversations, health, identity, problems, turns, usage
 from actio.api.same_origin import SameOriginOnly
@@ -14,7 +15,7 @@ from actio.catalog import Catalog, open_catalog
 from actio.chat.events import TurnEvents
 from actio.chat.readers import TurnReaders
 from actio.chat.running import TurnRunner
-from actio.core.resources import open_resources
+from actio.core.resources import Resources, open_resources
 from actio.core.settings import Settings
 from actio.core.signals import on_stop_signal
 from actio.identity.passwords import Passwords
@@ -48,6 +49,7 @@ def create_app(
     passwords: Passwords | None = None,
     catalog: Catalog | None = None,
     plans: Plans | None = None,
+    with_worker: bool = False,
 ) -> FastAPI:
     """The application. Without `settings`, they are read from the environment.
 
@@ -55,6 +57,9 @@ def create_app(
     served by a fake, and `plans`, with limits a test can reach. Without them, the
     models file and the plans file are read when the app starts, and a mistake in
     either stops the app from starting.
+
+    `with_worker` runs the worker inside the app, on the app's resources, for as long
+    as the app runs (`actio.worker.run_inside`).
     """
     settings = settings or Settings()
 
@@ -83,19 +88,32 @@ def create_app(
             )
             app.state.turn_runner = runner = TurnRunner()
             app.state.turn_readers = TurnReaders()
+            inside = _WorkerInside(settings, resources) if with_worker else None
+            if inside is not None:
+                # It ends before the resources are closed: the job in hand uses them.
+                stack.push_async_callback(inside.ended)
             # The web server tells the application to shut down only after the
             # requests it was answering have ended. The answers being written have to
             # hear it sooner, so that they end while their readers are still there.
+            # So does the worker: the job in hand gets its grace while the web server
+            # waits for its requests, not after.
             loop = asyncio.get_running_loop()
 
             def told_to_stop() -> None:
-                # Inside a signal handler: only a note for the loop is left here.
+                # Inside a signal handler: only notes for the loop are left here.
                 loop.call_soon_threadsafe(runner.stopping)
+                if inside is not None:
+                    loop.call_soon_threadsafe(inside.stop)
 
             stack.callback(on_stop_signal(told_to_stop))
-            # Registered last, so it runs first on the way out: whatever is still being
-            # written is ended and recorded while the database is still open.
+            # Registered after the rest, so it runs before it on the way out: whatever
+            # is still being written is ended and recorded while the database is still
+            # open.
             stack.push_async_callback(runner.drain)
+            if inside is not None:
+                # Before that, the worker is told to stop, if nothing told it yet: its
+                # grace and the answers' run together.
+                stack.callback(inside.stop)
             yield
 
     app = FastAPI(
@@ -123,3 +141,38 @@ def create_app(
     app.include_router(catalog_routes.router)
     app.include_router(usage.router)
     return app
+
+
+def create_app_with_worker() -> FastAPI:
+    """The application with the worker inside it: `actio --role all`. uvicorn calls a
+    factory without arguments, by its name, so this one stands apart."""
+    return create_app(with_worker=True)
+
+
+class _WorkerInside:
+    """The worker, run in a task of the app's process, and told to stop once.
+
+    It is told by cancelling that task. Procrastinate's worker takes the first
+    cancellation as "take no new job, and give the one in hand its grace"
+    (`jobs.SHUTDOWN_GRACE_S`). A second would cut that job off, and leave the worker on
+    the queue's list of workers. So whoever tells it again changes nothing.
+    """
+
+    def __init__(self, settings: Settings, resources: Resources) -> None:
+        self._task = asyncio.create_task(worker.run_inside(settings, resources), name="worker")
+        self._told = False
+
+    def stop(self) -> None:
+        """Tell the worker to stop, the first time only."""
+        if not self._told:
+            self._told = True
+            self._task.cancel()
+
+    async def ended(self) -> None:
+        """Tell the worker to stop, if nothing told it yet, and wait until it has.
+
+        Without a time limit: told to stop while its database is away, Procrastinate
+        waits 30 seconds for a connection, as the worker's own process does, and
+        whatever stops the process cuts that short."""
+        self.stop()
+        await asyncio.wait({self._task})

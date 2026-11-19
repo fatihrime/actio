@@ -457,6 +457,7 @@ class OpenApp(Protocol):
         passwords: Passwords | None = None,
         catalog: Catalog | None = None,
         plans: Plans | None = None,
+        with_worker: bool = False,
     ) -> AbstractAsyncContextManager[httpx.AsyncClient]: ...
 
 
@@ -472,6 +473,7 @@ def open_app(clock: Clock, catalog: Catalog, server_ids: ServerIds) -> OpenApp:
     from `server_ids`. `address` is the network address the app sees the requests come
     from. `passwords` replaces the cheap password hasher, to watch it, `catalog` the
     fake models, and `plans` the usage limits, which are otherwise out of reach.
+    `with_worker=True` runs the worker inside the app, as `actio --role all` does.
     """
     fake_models = catalog
 
@@ -483,6 +485,7 @@ def open_app(clock: Clock, catalog: Catalog, server_ids: ServerIds) -> OpenApp:
         passwords: Passwords | None = None,
         catalog: Catalog | None = None,
         plans: Plans | None = None,
+        with_worker: bool = False,
     ) -> AsyncIterator[httpx.AsyncClient]:
         offered = catalog or fake_models
         app = create_app(
@@ -490,6 +493,7 @@ def open_app(clock: Clock, catalog: Catalog, server_ids: ServerIds) -> OpenApp:
             passwords=passwords or cheap_passwords(),
             catalog=offered,
             plans=plans or plans_for_tests(models=[model.name for model in offered]),
+            with_worker=with_worker,
         )
         app.dependency_overrides[get_clock] = lambda: lambda: clock.now
         app.dependency_overrides[get_new_id] = lambda: server_ids
