@@ -24,6 +24,13 @@ def revisions_in(database_url: str) -> list[str]:
         return [row[0] for row in connection.execute("SELECT version_num FROM alembic_version")]
 
 
+def test_the_code_knows_its_own_migrations_and_no_others() -> None:
+    """A database at a migration this code doesn't have was migrated by newer code."""
+    assert schema.knows(schema.head())
+    assert schema.knows("0001")
+    assert not schema.knows("9999")
+
+
 def test_upgrade_brings_an_empty_database_to_the_head(database_url: str) -> None:
     assert revisions_in(database_url) == []
 

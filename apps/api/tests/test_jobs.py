@@ -23,7 +23,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from actio.core import jobs
+from actio.core import alive, jobs
 from actio.core.database import create_engine, create_session_factory
 from actio.identity import sessions
 from actio.identity.models import User
@@ -218,6 +218,162 @@ async def test_a_worker_cancelled_while_it_connects_leaves_nothing_running() -> 
     await asyncio.wait([worker], timeout=10)
 
     assert worker.cancelled()
+    assert asyncio.all_tasks() == before
+
+
+@pytest.mark.anyio
+async def test_a_worker_checks_once_it_has_connected_and_then_says_at_once_that_it_works(
+    migrated: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A beat an hour long: the first is the one that comes when the worker starts."""
+    monkeypatch.setattr(alive, "BEAT_S", 3600.0)
+    happened: list[str] = []
+
+    async def check() -> None:
+        happened.append("checked")
+
+    worker = asyncio.create_task(
+        jobs.work(
+            [],
+            database_url=migrated,
+            on_signals=False,
+            check=check,
+            on_beat=lambda: happened.append("beat"),
+        )
+    )
+    try:
+        await until(lambda: "beat" in happened, within=10)
+    finally:
+        worker.cancel()
+        await asyncio.wait([worker], timeout=10)
+
+    assert happened == ["checked", "beat"]
+
+
+@pytest.mark.anyio
+async def test_a_worker_says_again_and_again_that_it_works_and_never_once_it_stopped(
+    migrated: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(alive, "BEAT_S", 0.05)
+    beats: list[float] = []
+    worker = asyncio.create_task(
+        jobs.work(
+            [],
+            database_url=migrated,
+            on_signals=False,
+            on_beat=lambda: beats.append(time.monotonic()),
+        )
+    )
+    try:
+        await until(lambda: len(beats) >= 3, within=10)
+    finally:
+        worker.cancel()
+        await asyncio.wait([worker], timeout=10)
+    stopped_with = len(beats)
+    await asyncio.sleep(0.25)  # five beats' time
+
+    assert worker.cancelled()
+    assert len(beats) == stopped_with
+
+
+@pytest.mark.anyio
+async def test_a_worker_that_cannot_connect_neither_checks_nor_says_that_it_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing listens where it is told to connect, so it is still trying, for ten
+    beats, when it is cancelled."""
+    monkeypatch.setattr(alive, "BEAT_S", 0.05)
+    happened: list[str] = []
+
+    async def check() -> None:
+        happened.append("checked")
+
+    worker = asyncio.create_task(
+        jobs.work(
+            [],
+            database_url="postgresql://actio:pw@127.0.0.1:1/actio",
+            on_signals=False,
+            check=check,
+            on_beat=lambda: happened.append("beat"),
+        )
+    )
+    await asyncio.sleep(0.5)
+
+    worker.cancel()
+    await asyncio.wait([worker], timeout=10)
+
+    assert worker.cancelled()
+    assert happened == []
+
+
+@pytest.mark.anyio
+async def test_a_worker_that_cannot_say_that_it_works_says_so_once_and_goes_on_working(
+    db: AsyncSession,
+    migrated: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """As when the disk its file is on is full."""
+    monkeypatch.setattr(alive, "BEAT_S", 0.05)
+    tries: list[bool] = []
+
+    def full_disk() -> None:
+        tries.append(True)
+        raise OSError(28, "No space left on device")
+
+    noted = Noted()
+    worker = asyncio.create_task(
+        jobs.work(
+            [jobs.Job("note", noted)], database_url=migrated, on_signals=False, on_beat=full_disk
+        )
+    )
+    try:
+        await until(lambda: len(tries) >= 4, within=10)
+        await jobs.defer(db, "note", n=1)
+        await db.commit()
+        await until(lambda: noted.runs == [{"n": 1}])
+
+        assert not worker.done()
+    finally:
+        worker.cancel()
+        await asyncio.wait([worker], timeout=10)
+
+    said = [
+        record
+        for record in caplog.records
+        if record.name == "actio.core.jobs" and "couldn't say that it works" in record.getMessage()
+    ]
+    assert len(tries) >= 4
+    assert [record.levelno for record in said] == [logging.WARNING]
+    assert said[0].exc_info is not None
+    assert "No space left on device" in str(said[0].exc_info[1])
+
+
+@pytest.mark.anyio
+async def test_a_worker_whose_check_fails_runs_no_job_and_ends_with_the_checks_error(
+    db: AsyncSession, migrated: str
+) -> None:
+    """The job is in the queue before the worker starts, so a worker that took jobs
+    before its check would run it. The worker's pool is closed: nothing of it is left
+    running."""
+    noted = Noted()
+    await jobs.defer(db, "note", n=1)
+    await db.commit()
+    refused = RuntimeError("not the database this code expects")
+
+    async def check() -> None:
+        raise refused
+
+    before = asyncio.all_tasks()
+    with pytest.raises(RuntimeError) as ended:
+        async with asyncio.timeout(10):
+            await jobs.work(
+                [jobs.Job("note", noted)], database_url=migrated, on_signals=False, check=check
+            )
+
+    assert ended.value is refused
+    assert noted.runs == []
+    assert await queue_of(migrated) == [("note", "todo")]
     assert asyncio.all_tasks() == before
 
 
@@ -473,22 +629,42 @@ def started_again(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
 
 @pytest.mark.anyio
 async def test_a_worker_lives_through_its_database_going_away_for_a_moment(
-    db: AsyncSession, migrated: str, postgres_url: str, caplog: pytest.LogCaptureFixture
+    db: AsyncSession,
+    migrated: str,
+    postgres_url: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The database refuses connections, and those it had are cut, as when it restarts.
     Procrastinate's worker can't listen for new jobs again at once, and stops. The same
-    call of `work` starts it again once the database is back, and runs the next job.
+    call of `work` starts it again once the database is back, checks it again, runs the
+    next job, and says again that it works.
 
     Only this test's database goes away, not the server the other tests share.
 
     The worker has a job with a schedule, as the real one has the sweep: Procrastinate
     watches the connection that listens only while something is scheduled."""
+    monkeypatch.setattr(alive, "BEAT_S", 0.05)
+    checks: list[bool] = []
+    beats: list[tuple[int, int]] = []
+    """For each beat, what had happened by then: how often the worker had checked its
+    database, and how often it had said that it starts again."""
+
+    async def check() -> None:
+        checks.append(True)
+
     noted = Noted()
     yearly = jobs.Job("new-year", Noted(), every="0 0 1 1 *")
     database = migrated.rsplit("/", 1)[1]
     allow = sql.SQL("ALTER DATABASE {} WITH ALLOW_CONNECTIONS {}")
     worker = asyncio.create_task(
-        jobs.work([jobs.Job("note", noted), yearly], database_url=migrated, on_signals=False)
+        jobs.work(
+            [jobs.Job("note", noted), yearly],
+            database_url=migrated,
+            on_signals=False,
+            check=check,
+            on_beat=lambda: beats.append((len(checks), len(started_again(caplog)))),
+        )
     )
     try:
         await jobs.defer(db, "note", n=1)
@@ -516,6 +692,8 @@ async def test_a_worker_lives_through_its_database_going_away_for_a_moment(
         await jobs.defer(db, "note", n=2)
         await db.commit()
         await until(lambda: len(noted.runs) == 2)
+        beaten = len(beats)
+        await until(lambda: len(beats) >= beaten + 3)
 
         assert not worker.done()  # the same call of `work`, which hasn't returned
     finally:
@@ -524,3 +702,9 @@ async def test_a_worker_lives_through_its_database_going_away_for_a_moment(
 
     assert noted.runs == [{"n": 1}, {"n": 2}]
     assert len(started_again(caplog)) == 1
+    assert checks == [True, True]  # when it first connected, and when it was back
+    # While it waited to start again, a second and then for its database, it didn't say
+    # that it works: no beat between the word that it starts again and the next check.
+    assert (1, 0) in beats
+    assert (1, 1) not in beats
+    assert (2, 1) in beats

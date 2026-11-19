@@ -63,9 +63,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             level=settings.log_level.upper(),
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
+        # Reading which migration the database is at makes Alembic say, at the info
+        # level, how it would run migrations. The worker runs none.
+        logging.getLogger("alembic").setLevel(logging.WARNING)
         try:
             asyncio.run(worker.run(settings))
-        except jobs.DatabaseUnreachableError as error:
+        except (jobs.DatabaseUnreachableError, worker.NotMigratedError) as error:
             parser.exit(1, f"actio: {error}\n")
         return
 

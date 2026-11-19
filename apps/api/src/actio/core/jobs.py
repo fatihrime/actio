@@ -25,6 +25,7 @@ from procrastinate import exceptions as queue_errors
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from actio.core import alive
 from actio.core.signals import STOP_SIGNALS
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,8 @@ async def work(
     grace: float = SHUTDOWN_GRACE_S,
     until_idle: bool = False,
     on_signals: bool = True,
+    check: Callable[[], Awaitable[None]] | None = None,
+    on_beat: Callable[[], None] | None = None,
 ) -> None:
     """Run the jobs of `listed` as they are deferred, and those with a schedule by it,
     until the process is told to stop (SIGTERM or SIGINT). Then return.
@@ -127,13 +130,30 @@ async def work(
     Procrastinate's does when it loses its database, starts again after
     `STARTS_AGAIN_AFTER_S`, and waits for the database as it did the first time.
 
+    `check` is awaited each time the worker has connected, the first time and after
+    each start again, before it takes a job. What it raises ends `work` with that
+    exception, as anything else the worker raises does: such as a database that isn't
+    at the migration the code expects.
+
+    `on_beat` is called while the worker works: once it has connected and passed
+    `check`, and every `alive.BEAT_S` after that, until that run of the worker ends.
+    Not while it connects, nor while it waits to start again. One that fails is said
+    once in the log, and the worker goes on.
+
     `until_idle` returns once nothing is left to run. `on_signals=False` leaves the
     process's signals alone: a test runs a worker so, and stops it by cancelling it.
     """
     signals = _StopSignals() if on_signals else None
     try:
         while True:
-            await _work_once(listed, database_url=database_url, grace=grace, until_idle=until_idle)
+            await _work_once(
+                listed,
+                database_url=database_url,
+                grace=grace,
+                until_idle=until_idle,
+                check=check,
+                on_beat=on_beat,
+            )
             if until_idle or (signals is not None and signals.told):
                 return
             logger.warning(
@@ -197,7 +217,13 @@ class _StopSignals:
 
 
 async def _work_once(
-    listed: Sequence[Job], *, database_url: str, grace: float, until_idle: bool
+    listed: Sequence[Job],
+    *,
+    database_url: str,
+    grace: float,
+    until_idle: bool,
+    check: Callable[[], Awaitable[None]] | None,
+    on_beat: Callable[[], None] | None,
 ) -> None:
     """One run of Procrastinate's worker, on a pool of its own, closed at the end."""
     app = procrastinate.App(
@@ -213,16 +239,46 @@ async def _work_once(
         except psycopg.OperationalError as error:
             # The pool's own wait for its first connection, which it logged its tries at.
             raise DatabaseUnreachableError(f"couldn't connect to the database: {error}") from error
-        await app.run_worker_async(
-            wait=not until_idle,
-            delete_jobs="successful",
-            shutdown_graceful_timeout=grace,
-            install_signal_handlers=False,  # `work` listens for them
-        )
+        if check is not None:
+            await check()
+        beats = asyncio.create_task(_beat(on_beat)) if on_beat is not None else None
+        try:
+            await app.run_worker_async(
+                wait=not until_idle,
+                delete_jobs="successful",
+                shutdown_graceful_timeout=grace,
+                install_signal_handlers=False,  # `work` listens for them
+            )
+        finally:
+            if beats is not None:
+                beats.cancel()
+                await asyncio.wait({beats})  # no beat after the run has ended
     finally:
         # Also when the worker was cancelled while it was still connecting: the pool
         # would go on trying behind its back.
         await app.close_async()
+
+
+async def _beat(on_beat: Callable[[], None]) -> None:
+    """Call `on_beat` now, and every `alive.BEAT_S` after, until cancelled.
+
+    One that fails is said in the log once, not at every beat, until one succeeds
+    again. The worker goes on: that it can't say so doesn't stop it working."""
+    failing = False
+    while True:
+        try:
+            on_beat()
+        except Exception:
+            if not failing:
+                logger.warning(
+                    "The worker couldn't say that it works, and goes on working. Its health"
+                    " check will say that it doesn't.",
+                    exc_info=True,
+                )
+            failing = True
+        else:
+            failing = False
+        await asyncio.sleep(alive.BEAT_S)
 
 
 def _handler(job: Job) -> Callable[..., Awaitable[None]]:

@@ -9,6 +9,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from alembic.util import CommandError
 from sqlalchemy import Connection
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -29,6 +30,15 @@ def head() -> str:
     if revision is None:
         raise RuntimeError("actio/migrations holds no migration")
     return revision
+
+
+def knows(revision: str) -> bool:
+    """Whether this code has the migration `revision`. One it doesn't have was applied
+    by newer code: the database is ahead of this code, not behind it."""
+    try:
+        return ScriptDirectory.from_config(_config()).get_revision(revision) is not None
+    except CommandError:
+        return False
 
 
 def upgrade(database_url: str) -> str:

@@ -9,10 +9,12 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -98,15 +100,22 @@ async def test_a_sweep_that_finds_nothing_says_nothing(
 
 @pytest.mark.parametrize("told", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
 async def test_the_worker_process_sweeps_by_its_schedule_and_ends_well_when_told_to_stop(
-    told: signal.Signals, db: AsyncSession, migrated: str
+    told: signal.Signals, db: AsyncSession, migrated: str, tmp_path: Path
 ) -> None:
     """Started as a deployment starts it, and stopped as Docker stops it, or as Ctrl-C
     does. Nobody defers the job: it is the sweep, which the worker's own schedule puts
     in the queue when it starts. What it finds is a guest whose day ended yesterday, by
-    the machine's clock: the one the process reads."""
+    the machine's clock: the one the process reads.
+
+    While it works, its health check, run as Docker runs it, finds it working."""
     await sessions.start_guest_session(db, now=datetime.now(UTC) - timedelta(days=2))
     await db.commit()
-    environment = os.environ | {"ACTIO_DATABASE_URL": migrated, "ACTIO_VALKEY_URL": NOWHERE_VALKEY}
+    alive_file = tmp_path / "alive"
+    environment = os.environ | {
+        "ACTIO_DATABASE_URL": migrated,
+        "ACTIO_VALKEY_URL": NOWHERE_VALKEY,
+        "ACTIO_ALIVE_FILE": str(alive_file),
+    }
 
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -124,6 +133,16 @@ async def test_the_worker_process_sweeps_by_its_schedule_and_ends_well_when_told
             while await left_in(migrated) != (0, 0):
                 assert process.returncode is None, await process.communicate()
                 await asyncio.sleep(0.1)
+        health = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "actio.core.alive",
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        async with asyncio.timeout(10):
+            checked = await health.communicate()
         process.send_signal(told)
         async with asyncio.timeout(10):
             out, err = await process.communicate()
@@ -139,6 +158,58 @@ async def test_the_worker_process_sweeps_by_its_schedule_and_ends_well_when_told
     # The log is set up by the process itself: one line a record, at the info level.
     assert " INFO actio.worker: deleted expired guests: 1, expired sessions: 0\n" in log
     assert f" INFO actio.core.jobs: told to stop ({told.name})\n" in log
+    # It read which migration the database is at, and ran none: nothing of Alembic's.
+    assert "alembic" not in log
+    assert (health.returncode, checked) == (0, (b"", b""))
+    assert alive_file.is_file()
+
+
+async def test_the_worker_touches_its_file_only_when_its_settings_name_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run by hand, it is told of no file, and writes none. Here nothing connects: the
+    worker itself is replaced by one that notes what it was given."""
+    given: list[dict[str, Any]] = []
+
+    async def work(_listed: list[jobs.Job], **options: Any) -> None:
+        given.append(options)
+
+    monkeypatch.setattr(jobs, "work", work)
+    database, valkey = SecretStr(NOWHERE_DATABASE), SecretStr(NOWHERE_VALKEY)
+    alive_file = tmp_path / "alive"
+
+    await worker.run(Settings(database_url=database, valkey_url=valkey))
+    await worker.run(Settings(database_url=database, valkey_url=valkey, alive_file=alive_file))
+
+    by_hand, in_a_container = given
+    assert by_hand["on_beat"] is None
+    in_a_container["on_beat"]()
+    assert alive_file.is_file()
+
+
+async def test_a_worker_that_cant_ask_the_database_for_its_migration_says_so_in_one_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The database went away again in the moment after the worker had connected. Here
+    nothing ever listened: the worker itself is replaced by one that only makes the
+    check it was given. What comes out is the error the command line ends on with one
+    line, in the driver's own words, without the line SQLAlchemy adds about itself."""
+
+    async def work(_listed: list[jobs.Job], **options: Any) -> None:
+        await options["check"]()
+
+    monkeypatch.setattr(jobs, "work", work)
+    nowhere = Settings(
+        database_url=SecretStr(NOWHERE_DATABASE), valkey_url=SecretStr(NOWHERE_VALKEY)
+    )
+
+    with pytest.raises(jobs.DatabaseUnreachableError) as refused:
+        await worker.run(nowhere)
+
+    said = str(refused.value)
+    assert said.startswith("couldn't read the database's migration: connection failed")
+    assert "\n" not in said
+    assert "sqlalche.me" not in said
 
 
 async def test_the_worker_process_told_to_stop_while_it_connects_ends_well() -> None:

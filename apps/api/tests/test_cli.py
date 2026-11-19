@@ -1,3 +1,4 @@
+import asyncio
 import functools
 from pathlib import Path
 from typing import Any
@@ -124,6 +125,65 @@ def test_a_worker_that_cant_connect_to_its_database_says_so_in_one_line(
     assert stopped.value.code == 1
     assert capsys.readouterr().err == (
         "actio: couldn't connect to the database: pool initialization incomplete after 0.5 sec\n"
+    )
+
+
+def no_longer_than_ten_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the worker ten seconds. One that starts where it should have refused to
+    would work for ever, and the test with it: so the test fails instead."""
+    run = worker.run
+
+    async def within_ten_seconds(settings: Settings) -> None:
+        async with asyncio.timeout(10):
+            await run(settings)
+
+    monkeypatch.setattr(worker, "run", within_ten_seconds)
+
+
+@pytest.mark.parametrize("at", [None, "0008"], ids=["never migrated", "an older migration"])
+def test_a_worker_on_a_database_that_isnt_migrated_says_so_in_one_line(
+    at: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    database_url: str,
+) -> None:
+    """It connects, and finds that its jobs' tables aren't the ones it was written for:
+    the queue's own, the first time, are missing. It takes no job then."""
+    if at is not None:
+        schema.upgrade(database_url)
+        schema.downgrade(database_url, at)
+    monkeypatch.setenv("ACTIO_DATABASE_URL", database_url)
+    no_longer_than_ten_seconds(monkeypatch)
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "worker"])
+
+    assert stopped.value.code == 1
+    where = "was never migrated" if at is None else f"is at migration {at}"
+    assert capsys.readouterr().err == (
+        f"actio: the database {where}, and this code needs {schema.head()}:"
+        ' run "actio --role migrate" first\n'
+    )
+
+
+def test_a_worker_on_a_database_that_newer_code_migrated_doesnt_say_to_migrate(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], database_url: str
+) -> None:
+    """The database is at a migration this code doesn't have, as after going back to an
+    older commit. Migrating with this code couldn't help, so it isn't what the line says."""
+    schema.upgrade(database_url)
+    with psycopg.connect(database_url) as connection:
+        connection.execute("UPDATE alembic_version SET version_num = '9999'")
+    monkeypatch.setenv("ACTIO_DATABASE_URL", database_url)
+    no_longer_than_ten_seconds(monkeypatch)
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "worker"])
+
+    assert stopped.value.code == 1
+    assert capsys.readouterr().err == (
+        f"actio: the database is at migration 9999, and this code needs {schema.head()}:"
+        " the database is ahead of this code\n"
     )
 
 

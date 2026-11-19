@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     """Where the Ollama server is, as seen from this process. From inside a container,
     ``127.0.0.1`` is the container itself: ``compose.yaml`` points at the host instead."""
 
+    alive_file: Path | None = None
+    """A file the worker touches while it works, for a health check to look at
+    (``actio.core.alive``). ``compose.yaml`` sets it for the worker's container. Unset,
+    nothing is written."""
+
     # --- Rate limits, written as `30/hour`: 30 at once, then one more every two minutes.
     # An address is the client's IPv4 address, or its IPv6 /64 network. Several people
     # behind one router share an address, and so share these.

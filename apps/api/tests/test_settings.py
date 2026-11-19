@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from actio.core import alive
 from actio.core.rate_limit import Rate
 from actio.core.settings import Settings
 
@@ -151,6 +152,20 @@ def test_prices_and_plans_are_in_the_file_beside_the_models_unless_told_otherwis
 def test_ollamas_address_is_a_server_not_a_path_on_one(url: str) -> None:
     with pytest.raises(ValidationError, match="ollama_url"):
         Settings(ollama_url=url)
+
+
+@pytest.mark.usefixtures("stores")
+def test_the_worker_touches_no_file_unless_it_is_told_where(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its health check reads the same variable straight from its environment, without
+    the settings, to stay quick to start (`actio.core.alive`)."""
+    assert Settings().alive_file is None
+
+    monkeypatch.setenv(alive.VARIABLE, "/run/actio/alive")
+
+    assert alive.VARIABLE == "ACTIO_ALIVE_FILE"
+    assert Settings().alive_file == Path("/run/actio/alive")
 
 
 @pytest.mark.usefixtures("stores")
