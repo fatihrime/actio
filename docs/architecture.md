@@ -2,7 +2,7 @@
 
 ## Today
 
-`make up` runs five containers behind one address, <http://localhost:8080>, after a sixth, `migrate`, has brought the database schema up to date and exited:
+`make up` runs six containers, after a seventh, `migrate`, has brought the database schema up to date and exited. Five serve one address, <http://localhost:8080>; the sixth, the worker, runs the background jobs, and nothing reaches it:
 
 ```mermaid
 flowchart LR
@@ -14,6 +14,7 @@ flowchart LR
     end
     subgraph backend ["backend network: internal, no route out"]
         migrate["migrate<br>runs once, first"]
+        worker["Worker<br>background jobs"]
         postgres[("Postgres 17<br>with pgvector")]
         valkey[("Valkey 9")]
     end
@@ -23,6 +24,7 @@ flowchart LR
     migrate -->|"schema changes"| postgres
     api --> postgres
     api --> valkey
+    worker --> postgres
     api -->|"host.docker.internal"| ollama
 ```
 
@@ -40,11 +42,13 @@ flowchart LR
     - a model's server writes only so many answers at once: Ollama one, unless the models file says otherwise. A turn that comes while its server is busy waits its turn inside the API, at a gate in front of the server, running like any other, and its model is asked once there is room ([ADR 0023](adr/0023-answers-that-wait-their-turn.md));
     - a turn costs credits, and an account has only so many per session and per week, from `config/plans.toml`. The most a turn can cost is held before a model is asked; a turn that doesn't fit is answered 429, with the moment the limit starts over. `GET /api/usage` says how much is used ([ADR 0020](adr/0020-usage-limits-on-turns.md));
     - a plan also says how many answers one account may have being written at once, and one more is answered 429, before anything is kept. An account reads along with an answer in six places at once at most: one more join is answered 429 too ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)).
-- **The worker** is the same application, run with `--role worker`. It isn't one of the containers yet: `uv run actio --role worker` runs it ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md)).
+- **The worker** is the same application, run with `--role worker`, in a container of its own from the API's image. `make dev` doesn't run it yet: `./scripts/with-dev-env.sh uv run actio --role worker` does, by hand ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md)).
     - It runs background jobs from a queue in Postgres, Procrastinate's, one at a time. A job is deferred in the transaction of the change it follows, so the two are committed together, or not at all.
     - A job can also have a schedule. Today there is one job: every ten minutes, the worker deletes expired guests and sessions, which the API otherwise deletes only after a new guest arrives.
-    - Told to stop, by SIGTERM or Ctrl-C, it lets the job in hand finish for up to 15 seconds, and ends well, whenever it is told. A second signal changes nothing.
-    - It lives through a restart of the database: it stops, starts again a second later, and waits for the database as when it first started.
+    - It starts after the migration, and checks for itself that the database is at the migration its code expects. When it isn't, the worker takes no job, and ends with one line that says so.
+    - Told to stop, by SIGTERM or Ctrl-C, it lets the job in hand finish for up to 15 seconds, and ends well, whenever it is told. A second signal changes nothing. Docker gives it 25 seconds.
+    - It lives through a restart of the database: it stops, starts again a second later, and waits for the database as when it first started. When it can't go on, as 30 seconds after it lost its database, it ends, and Docker starts it again.
+    - It has no port for Docker to probe. While it works it touches a file every five seconds, and its health check says whether it did so lately.
 - **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
 - **The web app** is a Next.js application: the chat ([ADR 0015](adr/0015-the-web-chat-calls-the-api-from-the-browser.md)).
     - **Its server sends only the frame of the page.** Everything of yours is fetched by the browser, straight from the API, with the session cookie. Nothing but the API handles a session.
@@ -58,7 +62,7 @@ flowchart LR
     - **The usage limits are the server's to count.** A meter under the list shows what the API said was used, read again after every turn. That a limit is reached, the page learns from a question being refused; it then says how long to wait, sends nothing meanwhile, and offers a model that costs nothing where there is one ([ADR 0021](adr/0021-usage-limits-in-the-page.md)).
     - **An answer is shown as the markdown it is written in:** headings, tables, coloured code, formulas and diagrams. It is a model's text, so it can do nothing else: HTML in it is shown as text, no picture is fetched, and a link opens only after you have seen its address ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
     - **Its types for the API are generated** from the API's recorded description, `apps/api/openapi.json`, so a change to the API that the page doesn't follow fails to compile.
-- **Postgres and Valkey** sit on an internal network. Only the API and the migration job can reach them, and they can't reach the internet. The API connects to both.
+- **Postgres and Valkey** sit on an internal network. Only the API, the migration job and the worker can reach them, and they can't reach the internet. The API connects to both, the worker to Postgres.
     - Postgres holds six tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, the turns in which a model answered, and the usage ledger: what each turn used, in rows that are only ever added. Beside them is the queue of background jobs, in Procrastinate's own tables.
     - Valkey holds what is counted fast: the rate limits' counters, one number per client address or email address that has made an attempt lately, under a hashed name; and each account's usage counters, with the credits held for answers being written.
     - Valkey also holds what each running turn streams, in a stream of its own, so that an answer can be read by more than one reader and from its beginning. A stream is deleted a minute after its turn has ended.
@@ -74,7 +78,7 @@ Inside the API, the code is split into layers that only import downward, and a t
 | `actio.catalog` | The models on offer: reading `config/models.toml`, asking a model's server about it, and the gate where answers wait while that server is busy |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
 | `actio.usage` | Usage limits: reading `config/plans.toml`, holding credits before a request and counting them after it through the [engine](reference/quota.md), and the ledger |
-| `actio.core` | Settings, ids, the database connection and its migrations, the queue of background jobs, the rate limiter, reading a file in `config/`, hearing the signal that stops the process |
+| `actio.core` | Settings, ids, the database connection and its migrations, the queue of background jobs, the file the worker touches while it works and the health check that reads it, the rate limiter, reading a file in `config/`, hearing the signal that stops the process |
 
 | Path | Goes to |
 |---|---|
@@ -85,7 +89,7 @@ Inside the API, the code is split into layers that only import downward, and a t
 ## Two ways to run it
 
 - **`make up`** runs everything in containers, shaped like production. See [ADR 0005](adr/0005-container-images.md).
-- **`make dev`** runs only Postgres, Valkey and Caddy in containers. The API and the web app run natively with hot reload, and Caddy reaches them through Docker Desktop. See [ADR 0004](adr/0004-local-development-stack.md).
+- **`make dev`** runs only Postgres, Valkey and Caddy in containers. The API and the web app run natively with hot reload, and Caddy reaches them through Docker Desktop. No worker runs there yet. See [ADR 0004](adr/0004-local-development-stack.md).
 
 ## Security rules
 
@@ -94,13 +98,14 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 - only Caddy publishes a port, and only on 127.0.0.1;
 - every image is pinned by digest, including the base images of the images Actio builds;
 - the data services sit only on the internal network;
-- every container runs as a non-root user, on a read-only filesystem, without Linux capabilities, with a memory limit and a health check.
+- every container runs as a non-root user, on a read-only filesystem, without Linux capabilities, with a memory limit and a health check;
+- only the worker is started again by Docker, and only when it failed.
 
 ## Planned
 
 The next phases add:
 
-- **the worker's container,** so that `make up` runs the worker too, and `--role all`, the API and the worker in one process, for the smallest installations ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md));
+- **a worker in `make dev`, and `--role all`,** the API and the worker in one process, for the smallest installations ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md));
 - **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them. The router will also say when an answer waits for its server, and how many are ahead of it.
 
 ## Repository layout
