@@ -206,3 +206,11 @@ The plans file of the stack gives guests and accounts what people get, two and t
 **Not tested here: the gate in front of a model's server.** The page can't choose a model, and the stack's model, the fake, has to stay without a gate: the tests run side by side, and would otherwise wait for each other's answers. The API's suite tests the gate.
 
 That makes 33 tests, in about 20 seconds. The two new ones were run five times over, five at a time: 10 of 10 passed.
+
+### 2026-11-19: CI runs them without Ubuntu's package archive when it has to
+
+The job that runs these tests in CI installed the browser with `playwright install --with-deps`, which first asks Ubuntu's package archive for the system packages a browser can use. On 2026-11-19 the archive answered 503 for a quarter of an hour and more, and the job failed twice, at 12:18 and at 12:27 UTC, before a single test had run. Nothing in the repository had changed that: the other three jobs of the same run passed.
+
+- **What the archive adds is fonts.** The job's own log says so: every library the browser needs was on the runner already, which ships browsers of its own, and nine packages of fonts were to be fetched. No test here depends on a font: they read what the page says, and pass on a laptop with other fonts.
+- **So a failure of that step is a warning now, not the job's end.** The step tries the same command as before. When it fails, it says so in the run's summary and installs the browser alone. Playwright installs the packages first and the browser after, so one that failed on the packages has downloaded no browser yet.
+- **Why only now:** the job has run on every push since 2026-11-14, and until this day the archive had always answered.

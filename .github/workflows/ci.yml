@@ -75,8 +75,18 @@ jobs:
         with:
           cache: true
           require-lockfile: true
-      - name: Install the browser the tests drive, and the system libraries it needs
-        run: pnpm --dir apps/web exec playwright install --with-deps --only-shell chromium
+      # The system packages come from Ubuntu's archive, which is away now and then: on
+      # 2026-11-19 it answered 503 for a quarter of an hour and more, and this job
+      # failed twice before a single test had run. The runner already has the libraries
+      # the browser needs; what the archive adds are fonts, which no test depends on.
+      # So when it doesn't deliver, the job says so and installs the browser alone.
+      # Playwright installs the packages first and the browser after: one that failed
+      # on the packages has downloaded no browser yet.
+      - name: Install the browser the tests drive, and the system packages it can use
+        run: |
+          pnpm --dir apps/web exec playwright install --with-deps --only-shell chromium && exit 0
+          echo "::warning::Ubuntu's archive didn't deliver the browser's system packages. Installing the browser alone: the tests run with what the runner has."
+          pnpm --dir apps/web exec playwright install --only-shell chromium
       # Builds the images, starts the stack with a fake model in Ollama's place, runs
       # the tests against it in the browser, and takes it down again.
       - name: Run the end-to-end tests
