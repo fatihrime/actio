@@ -6,6 +6,12 @@ healthy while the file was touched within `STALE_AFTER_S` (`fresh`). Where the f
 both read from `ACTIO_ALIVE_FILE`: the worker through its settings, the check straight
 from its own environment.
 
+The worker inside the API's process (`actio --role all`) is asked over HTTP instead, by
+the readiness probe. That process keeps its worker's last beat in memory, and holds it
+to the same rule (`LastBeat`). It also forgets that beat when its worker ends with an
+error, or finds that it can't work: there no process ends with it, and the worker is
+started again sooner than `STALE_AFTER_S`, with a beat of its own each time.
+
 Docker runs the check every few seconds, each time in a new process. So this module
 imports nothing but the standard library: not the settings, and nothing that connects.
 """
@@ -50,6 +56,30 @@ def fresh(path: Path, *, now: float) -> bool:
     to catch up."""
     ago = age(path, now=now)
     return ago is not None and -BEAT_S <= ago <= STALE_AFTER_S
+
+
+class LastBeat:
+    """When a process last said that it works, kept in memory: the file's rule, for a
+    process that is asked over HTTP, and a way to say at once that it stopped.
+
+    The times are the caller's, from a clock that never goes back, such as the event
+    loop's: a beat is never later than now, as a file's time can be."""
+
+    def __init__(self) -> None:
+        self._at: float | None = None
+
+    def beat(self, now: float) -> None:
+        """Note that the process said, at `now`, that it works."""
+        self._at = now
+
+    def forget(self) -> None:
+        """Note that the process stopped working: nothing is fresh until its next beat."""
+        self._at = None
+
+    def fresh(self, *, now: float) -> bool:
+        """Whether the last beat was within `STALE_AFTER_S` before `now`. Not before
+        the first one, nor after `forget` until the next."""
+        return self._at is not None and now - self._at <= STALE_AFTER_S
 
 
 def main() -> int:

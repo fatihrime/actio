@@ -16,6 +16,7 @@ from actio.catalog import Catalog, open_catalog
 from actio.chat.events import TurnEvents
 from actio.chat.readers import TurnReaders
 from actio.chat.running import TurnRunner
+from actio.core import alive
 from actio.core.resources import Resources, open_resources
 from actio.core.settings import Settings
 from actio.core.signals import on_stop_signal
@@ -60,7 +61,7 @@ def create_app(
     either stops the app from starting.
 
     `with_worker` runs the worker inside the app, on the app's resources, for as long
-    as the app runs (`actio.worker.run_inside`).
+    as the app runs (`actio.worker.run_inside`), and `/api/readyz` says whether it works.
     """
     settings = settings or Settings()
 
@@ -90,6 +91,9 @@ def create_app(
             app.state.turn_runner = runner = TurnRunner()
             app.state.turn_readers = TurnReaders()
             inside = _WorkerInside(settings, resources) if with_worker else None
+            # What the readiness probe asks whether the worker works: nothing, in an
+            # app that runs none.
+            app.state.worker_works = inside.works if inside is not None else None
             if inside is not None:
                 # It ends before the resources are closed: the job in hand uses them.
                 stack.push_async_callback(inside.ended)
@@ -164,11 +168,31 @@ class _WorkerInside:
     cancellation as "take no new job, and give the one in hand its grace"
     (`jobs.SHUTDOWN_GRACE_S`). A second would cut that job off, and leave the worker on
     the queue's list of workers. So whoever tells it again changes nothing.
+
+    Each time the worker says that it works, its beat is noted by the event loop's
+    clock, which doesn't jump, for `works` to look at. Each time it ends with an error
+    or can't work, the beat is forgotten.
     """
 
     def __init__(self, settings: Settings, resources: Resources) -> None:
-        self._task = asyncio.create_task(worker.run_inside(settings, resources), name="worker")
+        self._clock = asyncio.get_running_loop().time
+        self._last_beat = alive.LastBeat()
+        self._task = asyncio.create_task(
+            worker.run_inside(
+                settings, resources, on_beat=self._beat, on_stopped=self._last_beat.forget
+            ),
+            name="worker",
+        )
         self._told = False
+
+    def _beat(self) -> None:
+        self._last_beat.beat(self._clock())
+
+    def works(self) -> bool:
+        """Whether the worker works now: it said so within `alive.STALE_AFTER_S`, as the
+        worker's file has to be touched for its container to be healthy, and hasn't
+        ended with an error or found that it can't work since."""
+        return self._last_beat.fresh(now=self._clock())
 
     def stop(self) -> None:
         """Tell the worker to stop, the first time only."""

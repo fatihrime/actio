@@ -4,7 +4,8 @@ An app created with the worker runs the jobs, on the app's own resources, and on
 created without runs none. Shut down, it waits for the job in hand. Told to stop by a
 signal, the worker stops at once, while the app still serves, and is told only once. On
 a database that isn't migrated yet, the app serves, and its worker starts once it is.
-And the process itself, started as a deployment starts it, and told to stop.
+Its readiness probe says whether its worker works. And the process itself, started as a
+deployment starts it, and told to stop.
 
 The worker of an app here runs jobs of the test's own, in place of the real ones
 (`lists`), except in the process.
@@ -34,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import actio.app
 from actio import worker
 from actio.chat.running import TurnRunner
-from actio.core import jobs, schema
+from actio.core import alive, jobs, schema
 from actio.core.database import create_engine, create_session_factory
 from actio.core.resources import Resources, open_resources
 from actio.core.settings import Settings
@@ -410,6 +411,134 @@ async def test_an_app_on_a_database_that_isnt_migrated_serves_and_its_worker_sta
     )
 
 
+def readiness_said(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """What the readiness probe said in the log."""
+    return [record for record in caplog.records if record.name == "actio.api.health"]
+
+
+async def test_an_app_whose_worker_works_is_ready(
+    db: AsyncSession, settings: Settings, open_app: Any, lists: Lists
+) -> None:
+    """The worker has run a job, so it has said that it works: it says so once it has
+    connected and passed its check, before it takes a job."""
+    noted = Noted()
+    lists(jobs.Job("note", noted))
+    await jobs.defer(db, "note", n=1)
+    await db.commit()
+
+    async with asyncio.timeout(20), open_app(settings, with_worker=True) as browser:
+        await until(lambda: noted.runs == [{"n": 1}], within=10)
+        response = await browser.get("/api/readyz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "database": "ok", "valkey": "ok", "worker": "ok"}
+
+
+async def test_an_app_whose_worker_cant_work_is_not_ready_and_says_only_that(
+    settings: Settings,
+    migrated: str,
+    open_app: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The database is migrated and Valkey answers: only the worker is missing. Why it
+    can't work, its own lines in the log say, and the probe's line doesn't. The worker
+    itself is replaced by one that ends with an error each time, and so never says that
+    it works."""
+    assert migrated
+    tried = asyncio.Event()
+
+    async def work(_listed: list[jobs.Job], **_options: Any) -> None:
+        tried.set()
+        raise RuntimeError("something nobody expected")
+
+    monkeypatch.setattr(jobs, "work", work)
+
+    async with asyncio.timeout(20), open_app(settings, with_worker=True) as browser:
+        await tried.wait()
+        response = await browser.get("/api/readyz")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "database": "ok",
+        "valkey": "ok",
+        "worker": "not working",
+    }
+    [said] = readiness_said(caplog)
+    assert said.levelno == logging.WARNING
+    assert said.getMessage() == "readiness: the worker inside this process isn't working"
+
+
+async def test_an_app_whose_worker_said_that_it_works_and_then_ended_is_not_ready_at_once(
+    settings: Settings,
+    migrated: str,
+    open_app: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """As a worker each of whose runs fails right after it has connected: a run says
+    first that it works, and the worker inside the API starts again sooner than that
+    goes stale. Here its beat is a moment old when the probe asks, and the probe says
+    all the same that it isn't working. The pause before it tries again is an hour, so
+    that no new beat comes in between. The worker itself is replaced by one that says
+    that it works, and ends with an error."""
+    assert migrated
+    monkeypatch.setattr(worker, "TRIES_AGAIN_AFTER_S", 3600.0)
+
+    async def work(_listed: list[jobs.Job], **options: Any) -> None:
+        options["on_beat"]()
+        raise RuntimeError("something nobody expected")
+
+    monkeypatch.setattr(jobs, "work", work)
+
+    async with asyncio.timeout(20), open_app(settings, with_worker=True) as browser:
+        await until(lambda: "The worker ended with an error." in caplog.text, within=10)
+        response = await browser.get("/api/readyz")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "database": "ok",
+        "valkey": "ok",
+        "worker": "not working",
+    }
+
+
+async def test_an_app_whose_worker_stopped_saying_that_it_works_is_not_ready_once_that_is_old(
+    settings: Settings, migrated: str, open_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As a worker whose event loop no longer turns would. The probe first asks while
+    the beat is fresh by the 20 seconds that ship, then what is old is made a fifth of a
+    second. The worker itself is replaced by one that says once that it works, then
+    nothing more."""
+    assert migrated
+    said_it_works = asyncio.Event()
+
+    async def work(_listed: list[jobs.Job], **options: Any) -> None:
+        options["on_beat"]()
+        said_it_works.set()
+        await asyncio.Event().wait()  # until it is told to stop
+
+    monkeypatch.setattr(jobs, "work", work)
+
+    async with asyncio.timeout(20), open_app(settings, with_worker=True) as browser:
+        await said_it_works.wait()
+        fresh = await browser.get("/api/readyz")
+        monkeypatch.setattr(alive, "STALE_AFTER_S", 0.2)
+        await asyncio.sleep(0.3)
+        old = await browser.get("/api/readyz")
+
+    assert (fresh.status_code, fresh.json()["worker"]) == (200, "ok")
+    assert old.status_code == 503
+    assert old.json() == {
+        "status": "unavailable",
+        "database": "ok",
+        "valkey": "ok",
+        "worker": "not working",
+    }
+
+
 def a_free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -434,7 +563,8 @@ async def test_the_all_process_serves_sweeps_by_the_workers_schedule_and_ends_wh
     """Started as a deployment starts it, and stopped as Docker stops it. Nobody defers
     the sweep: the worker's own schedule puts it in the queue when it starts. What it
     finds is a guest whose day ended yesterday, by the machine's clock: the one the
-    process reads.
+    process reads. Once it has swept, the readiness probe finds the worker working: not
+    the process ready, since nothing answers where its Valkey should be.
 
     It ends as the API's process ends: uvicorn, once it has shut down, sends itself the
     signal it was told with again, and a SIGTERM that Python doesn't handle ends a
@@ -474,6 +604,8 @@ async def test_the_all_process_serves_sweeps_by_the_workers_schedule_and_ends_wh
             while await left_in(migrated) != (0, 0):
                 assert process.returncode is None, await process.communicate()
                 await asyncio.sleep(0.1)
+        async with asyncio.timeout(10), httpx2.AsyncClient() as client:
+            ready = await client.get(f"http://127.0.0.1:{port}/api/readyz")
         process.send_signal(signal.SIGTERM)
         async with asyncio.timeout(10):
             out, err = await process.communicate()
@@ -486,6 +618,10 @@ async def test_the_all_process_serves_sweeps_by_the_workers_schedule_and_ends_wh
     log = err.decode()
     assert ended_with == -signal.SIGTERM, log
     assert healthy.status_code == 200
+    assert (ready.status_code, ready.json()) == (
+        503,
+        {"status": "unavailable", "database": "ok", "valkey": "unreachable", "worker": "ok"},
+    )
     assert "Traceback" not in log
     # uvicorn's lines as uvicorn writes them, and the worker's as the worker role does.
     assert "INFO:     Application startup complete.\n" in log

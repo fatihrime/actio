@@ -1,6 +1,7 @@
 """The worker process: the jobs it runs, and the process itself, started as it is in a
 deployment and told to stop. And the worker inside the API's process (`run_inside`):
-what it does when it can't work, and when it is told to stop."""
+whom it tells that it works and that it stopped, what it does when it can't work, and
+when it is told to stop."""
 
 import asyncio
 import dataclasses
@@ -305,6 +306,52 @@ async def test_inside_the_api_the_worker_leaves_the_signals_alone_and_touches_it
     assert alive_file.is_file()
 
 
+async def test_inside_the_api_a_beat_touches_the_file_and_tells_whoever_runs_the_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each half is done whatever the other does, and what failed is raised for
+    `jobs.work` to say: a file that can't be touched, here a path through a file, and a
+    caller that fails to hear. The worker itself is replaced by one that notes what it
+    was given."""
+    given: list[dict[str, Any]] = []
+
+    async def work(_listed: list[jobs.Job], **options: Any) -> None:
+        given.append(options)
+
+    monkeypatch.setattr(jobs, "work", work)
+    heard: list[str] = []
+
+    def hear() -> None:
+        heard.append("beat")
+
+    def fail_to_hear() -> None:
+        heard.append("beat, then failed")
+        raise RuntimeError("couldn't note the beat")
+
+    (tmp_path / "a-file").write_text("not a folder")
+    alive_file, untouchable = tmp_path / "alive", tmp_path / "a-file" / "alive"
+
+    async with open_resources(nowhere()) as resources, asyncio.timeout(5):
+        await worker.run_inside(nowhere(alive_file=alive_file), resources, on_beat=hear)
+        await worker.run_inside(nowhere(alive_file=untouchable), resources, on_beat=hear)
+        await worker.run_inside(nowhere(alive_file=alive_file), resources, on_beat=fail_to_hear)
+
+    both, cant_touch, cant_hear = (options["on_beat"] for options in given)
+    both()
+    assert alive_file.is_file()
+    assert heard == ["beat"]
+
+    with pytest.raises(NotADirectoryError):
+        cant_touch()
+    assert heard == ["beat", "beat"]
+
+    alive_file.unlink()
+    with pytest.raises(RuntimeError, match="couldn't note the beat"):
+        cant_hear()
+    assert heard == ["beat", "beat", "beat, then failed"]
+    assert alive_file.is_file()
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -382,6 +429,49 @@ async def test_inside_the_api_a_worker_that_ends_with_another_error_says_it_with
     assert inside.cancelled()
 
 
+async def test_inside_the_api_a_worker_that_ended_says_so_each_time_before_it_tries_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whoever runs it then forgets that it said it works. It can't work, ends with
+    another error, and then works: it says that it stopped after each of the first two,
+    before its pause, and neither while it works nor when it is told to stop. The worker
+    itself is replaced by one that does so."""
+    monkeypatch.setattr(worker, "TRIES_AGAIN_AFTER_S", 0.1)
+    happened: list[tuple[str, float]] = []
+    working = asyncio.Event()
+
+    async def work(_listed: list[jobs.Job], **_options: Any) -> None:
+        happened.append(("tried", time.monotonic()))
+        tries = [what for what, _ in happened if what == "tried"]
+        if len(tries) == 1:
+            raise worker.NotMigratedError("the database was never migrated")
+        if len(tries) == 2:
+            raise RuntimeError("something nobody expected")
+        working.set()
+        await asyncio.Event().wait()  # it works, until it is told to stop
+
+    def stopped() -> None:
+        happened.append(("stopped", time.monotonic()))
+
+    monkeypatch.setattr(jobs, "work", work)
+    async with open_resources(nowhere()) as resources:
+        inside = asyncio.create_task(worker.run_inside(nowhere(), resources, on_stopped=stopped))
+        try:
+            async with asyncio.timeout(5):
+                await working.wait()
+            await asyncio.sleep(0.3)  # three pauses' worth, while it works
+        finally:
+            inside.cancel()
+            await asyncio.wait([inside], timeout=5)
+
+    assert [what for what, _ in happened] == ["tried", "stopped", "tried", "stopped", "tried"]
+    # Each said before the pause, not after it.
+    at = [when for _, when in happened]
+    assert at[2] - at[1] >= 0.1
+    assert at[4] - at[3] >= 0.1
+    assert inside.cancelled()
+
+
 async def test_inside_the_api_a_worker_told_to_stop_while_it_waits_to_try_again_ends_at_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -434,14 +524,15 @@ async def test_inside_the_api_a_worker_whose_stop_ends_in_an_error_is_not_starte
     """Told to stop while its database is away, Procrastinate's worker waits for a
     connection to take itself off its list, and then raises its own error in place of
     the cancellation. The worker was told to stop all the same: it says what happened,
-    and ends. Started again, it would work on, and nothing would tell it to stop again:
-    its process would wait for it for ever.
+    and that it stopped, and ends. Started again, it would work on, and nothing would
+    tell it to stop again: its process would wait for it for ever.
 
     The worker itself is replaced by one that fails so when it is cancelled: the first
     time it runs only, so that one that was started again can still be ended, and the
     test fails instead of hanging."""
     monkeypatch.setattr(worker, "TRIES_AGAIN_AFTER_S", 0.05)
     tries: list[bool] = []
+    stopped: list[bool] = []
     working = asyncio.Event()
 
     async def work(_listed: list[jobs.Job], **_options: Any) -> None:
@@ -456,7 +547,9 @@ async def test_inside_the_api_a_worker_whose_stop_ends_in_an_error_is_not_starte
 
     monkeypatch.setattr(jobs, "work", work)
     async with open_resources(nowhere()) as resources:
-        inside = asyncio.create_task(worker.run_inside(nowhere(), resources))
+        inside = asyncio.create_task(
+            worker.run_inside(nowhere(), resources, on_stopped=lambda: stopped.append(True))
+        )
         try:
             async with asyncio.timeout(5):
                 await working.wait()
@@ -469,6 +562,7 @@ async def test_inside_the_api_a_worker_whose_stop_ends_in_an_error_is_not_starte
 
     assert ended == {inside}
     assert tries == [True]
+    assert stopped == [True]
     assert inside.cancelled() or inside.exception() is None  # nothing left to retrieve
     [said] = said_inside(caplog)
     assert said.getMessage() == says

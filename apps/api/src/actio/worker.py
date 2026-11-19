@@ -14,6 +14,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -59,9 +60,21 @@ async def run(settings: Settings) -> None:
         await _work(settings, resources, on_signals=True)
 
 
-async def run_inside(settings: Settings, resources: Resources) -> None:
+async def run_inside(
+    settings: Settings,
+    resources: Resources,
+    *,
+    on_beat: Callable[[], None] | None = None,
+    on_stopped: Callable[[], None] | None = None,
+) -> None:
     """Run the jobs inside the API's process (`actio --role all`), on that process's
     `resources`, until the task this runs in is cancelled.
+
+    `on_beat` is called each time the worker says that it works, beside the touch of
+    `settings.alive_file`, which is as in `run`. Each is done whatever the other does.
+    `on_stopped` is called each time the worker has ended with an error or couldn't
+    work, for whatever its beats said is over: before it waits to try again, or before
+    it ends, when it had been told to stop. Not when it ends by the cancellation itself.
 
     It works as `run` does, with two differences:
 
@@ -78,7 +91,7 @@ async def run_inside(settings: Settings, resources: Resources) -> None:
     """
     while True:
         try:
-            await _work(settings, resources, on_signals=False)
+            await _work(settings, resources, on_signals=False, on_beat=on_beat)
         except (jobs.DatabaseUnreachableError, NotMigratedError) as error:
             # Its own words say what is wrong, and what to do about it: no trace.
             logger.error("The worker can't work: %s.%s", error, _then("It tries again"))
@@ -86,24 +99,52 @@ async def run_inside(settings: Settings, resources: Resources) -> None:
             logger.exception("The worker ended with an error.%s", _then("It starts again"))
         else:
             return  # `work` returns only when a signal told it to stop, and here it hears none
+        if on_stopped is not None:
+            # Its last beat may be fresh: a run beats as soon as it has connected.
+            on_stopped()
         if _told_to_stop():
             return
         await asyncio.sleep(TRIES_AGAIN_AFTER_S)
 
 
-async def _work(settings: Settings, resources: Resources, *, on_signals: bool) -> None:
+async def _work(
+    settings: Settings,
+    resources: Resources,
+    *,
+    on_signals: bool,
+    on_beat: Callable[[], None] | None = None,
+) -> None:
     """One worker on `resources`, with every job of `listed`, which checks its database
-    each time it has connected, and touches `settings.alive_file` while it works, if the
-    settings name one."""
+    each time it has connected, and while it works touches `settings.alive_file`, if
+    the settings name one, and calls `on_beat`, if there is one."""
     await jobs.work(
         listed(resources, clock=_now),
         database_url=settings.database_url.get_secret_value(),
         on_signals=on_signals,
         check=partial(_migrated, resources),
-        on_beat=(
-            partial(alive.touch, settings.alive_file) if settings.alive_file is not None else None
-        ),
+        on_beat=_beat(settings.alive_file, on_beat),
     )
+
+
+def _beat(alive_file: Path | None, also: Callable[[], None] | None) -> Callable[[], None] | None:
+    """What the worker does each time it says that it works: call `also`, and touch
+    `alive_file`. `None` when there is neither.
+
+    Each is done whatever the other does: one that fails doesn't keep the other from
+    being said. What failed is raised all the same, for `jobs.work` to say in the log."""
+    if alive_file is None:
+        return also
+    touch = partial(alive.touch, alive_file)
+    if also is None:
+        return touch
+
+    def both() -> None:
+        try:
+            also()
+        finally:
+            touch()
+
+    return both
 
 
 def _told_to_stop() -> bool:

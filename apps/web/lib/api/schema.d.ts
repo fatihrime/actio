@@ -33,7 +33,8 @@ export interface paths {
         };
         /**
          * Readyz
-         * @description 200 when the database is reachable and migrated and Valkey answers; 503 otherwise.
+         * @description 200 when the database is reachable and migrated, Valkey answers, and the worker
+         *     works, where this process runs one inside it; 503 otherwise.
          */
         get: operations["readyz"];
         put?: never;
@@ -567,6 +568,11 @@ export interface components {
          * Readiness
          * @description What is missing, by name. Never why: a failure's details go to the log, because
          *     they can name hosts and users.
+         *
+         *     `worker` is there only in a process that runs the worker inside it, as
+         *     `actio --role all` does. It is `not working` before the worker has said that it
+         *     works, from the moment the worker ends with an error or can't work until it says so
+         *     again, and once it hasn't said so for 20 seconds, whatever it is doing.
          */
         Readiness: {
             /**
@@ -584,6 +590,11 @@ export interface components {
              * @enum {string}
              */
             valkey: "ok" | "unreachable";
+            /**
+             * Worker
+             * @enum {string}
+             */
+            worker?: "ok" | "not working";
         };
         /**
          * ReasoningPart

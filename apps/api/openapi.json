@@ -34,7 +34,7 @@
           "health"
         ],
         "summary": "Readyz",
-        "description": "200 when the database is reachable and migrated and Valkey answers; 503 otherwise.",
+        "description": "200 when the database is reachable and migrated, Valkey answers, and the worker\nworks, where this process runs one inside it; 503 otherwise.",
         "operationId": "readyz",
         "responses": {
           "200": {
@@ -1564,6 +1564,14 @@
               "unreachable"
             ],
             "title": "Valkey"
+          },
+          "worker": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "not working"
+            ],
+            "title": "Worker"
           }
         },
         "type": "object",
@@ -1573,7 +1581,7 @@
           "valkey"
         ],
         "title": "Readiness",
-        "description": "What is missing, by name. Never why: a failure's details go to the log, because\nthey can name hosts and users."
+        "description": "What is missing, by name. Never why: a failure's details go to the log, because\nthey can name hosts and users.\n\n`worker` is there only in a process that runs the worker inside it, as\n`actio --role all` does. It is `not working` before the worker has said that it\nworks, from the moment the worker ends with an error or can't work until it says so\nagain, and once it hasn't said so for 20 seconds, whatever it is doing."
       },
       "ReasoningPart": {
         "properties": {

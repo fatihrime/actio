@@ -1,4 +1,5 @@
 """The file a process touches while it works, and the health check that looks at it.
+And the same rule kept in memory, for the worker inside the API's process.
 
 A file is made old with `os.utime`, and `fresh` is told the time: no test waits for a
 file to go stale."""
@@ -60,6 +61,40 @@ def test_a_file_touched_later_than_now_is_not_fresh_beyond_a_beat(tmp_path: Path
     assert alive.fresh(path, now=TOUCHED - alive.BEAT_S)
     assert not alive.fresh(path, now=TOUCHED - alive.BEAT_S - 0.5)
     assert not alive.fresh(path, now=TOUCHED - 600)
+
+
+def test_a_beat_kept_in_memory_is_fresh_for_four_beats_and_no_longer() -> None:
+    last = alive.LastBeat()
+    assert not last.fresh(now=TOUCHED)  # nothing has said that it works
+
+    last.beat(TOUCHED)
+
+    assert last.fresh(now=TOUCHED)
+    assert last.fresh(now=TOUCHED + alive.STALE_AFTER_S)
+    assert not last.fresh(now=TOUCHED + alive.STALE_AFTER_S + 0.5)
+
+
+def test_a_new_beat_kept_in_memory_makes_it_fresh_again() -> None:
+    last = alive.LastBeat()
+    last.beat(TOUCHED)
+    later = TOUCHED + 600
+    assert not last.fresh(now=later)
+
+    last.beat(later)
+
+    assert last.fresh(now=later + alive.STALE_AFTER_S)
+
+
+def test_a_beat_kept_in_memory_and_forgotten_is_not_fresh_until_the_next() -> None:
+    """As when the worker inside the API ends a second after it said that it works."""
+    last = alive.LastBeat()
+    last.beat(TOUCHED)
+
+    last.forget()
+
+    assert not last.fresh(now=TOUCHED + 1)
+    last.beat(TOUCHED + 2)
+    assert last.fresh(now=TOUCHED + 2)
 
 
 def test_the_module_loads_nothing_but_the_standard_library() -> None:
