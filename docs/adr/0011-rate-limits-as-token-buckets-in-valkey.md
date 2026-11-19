@@ -123,3 +123,12 @@ Separately, a guest expires after a day ([ADR 0009](0009-sessions-in-the-databas
     - a challenge for guests on a public demo, and a limit on requests in general: the routes that cost little are not limited;
     - limits per API key, which come with the gateway.
 - **How to reverse it:** routes ask for a limit by name, such as `await limits.log_in(email)`. Counting somewhere else changes `actio.core.rate_limit`, and nothing above it.
+
+## Revisions
+
+### 2026-11-18: the scheduled sweep
+
+"Not done yet" above listed a scheduled sweep. It came with the worker process ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)):
+
+- **Every ten minutes,** the worker deletes a batch of expired guests and sessions, the same batch a new guest's sweep deletes. A worker that starts sweeps at once, unless another has since the last ten-minute mark.
+- **The sweep after each new guest stays.** A busy installation is kept clear by its newcomers, a quiet one by the schedule. Both skip rows the other holds, so neither waits.

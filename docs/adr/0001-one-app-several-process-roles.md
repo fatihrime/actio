@@ -52,3 +52,12 @@ Automated checks enforce the module boundaries instead of the network. From Phas
     - a crash in one module takes down its whole process, so production runs `api` and `worker` separately;
     - scaling happens per role, not per module.
 - **How to reverse it:** a module with a clean boundary, such as media jobs, can move into its own service. It gets its own entry point, and its in-process calls are replaced by an API.
+
+## Revisions
+
+### 2026-11-18: the worker role
+
+The `worker` role exists: `python -m actio --role worker` runs background jobs from a queue in Postgres, through Procrastinate ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)). A job is deferred in the transaction of the change it follows, so the two commit together.
+
+- **`actio.worker` sits beside `actio.api`** in the import rules' layers: two ways into the same modules, and neither imports the other. The worker doesn't import the web framework either.
+- **`all`,** both roles in one process, comes with the worker's container, in a later step. Until then the worker is run by hand.

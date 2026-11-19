@@ -78,3 +78,7 @@ Email and password arrived with [ADR 0010](0010-accounts-with-a-password.md). Fo
 
 - **New guests are limited per client address,** 30 an hour by default. A browser that already has a session doesn't use the allowance up.
 - **Expired guests are deleted** with what they own, in batches, each time a new guest is created. A scheduled sweep, for installations where no new guest arrives, comes with the worker process.
+
+### 2026-11-18: a scheduled sweep
+
+The worker process arrived ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)), and with it the scheduled sweep: every ten minutes it deletes a batch of expired guests and sessions, and a worker that starts sweeps at once, unless another has since the last ten-minute mark. The API still sweeps after each new guest.

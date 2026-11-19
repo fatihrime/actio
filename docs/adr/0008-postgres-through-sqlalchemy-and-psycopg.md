@@ -80,3 +80,13 @@ We chose **SQLAlchemy 2 on psycopg 3,** and **migrations as a job.**
 - **How to reverse it:**
     - SQLAlchemy hides the driver: moving to asyncpg is a dependency and one word in a URL, as long as nothing depends on psycopg directly;
     - migrating at start-up instead would be one call to the same function the job uses.
+
+## Revisions
+
+### 2026-11-18: the job queue shares the transaction
+
+The job queue arrived, with Procrastinate ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)):
+
+- **A job is deferred through the connection of the session's own transaction.** SQLAlchemy hands Procrastinate the psycopg connection under it, and the job's row is written there. So the job commits with the change it follows, or not at all, and the API opens no second pool for the queue.
+- **The queue's tables are built by migration 0009,** from Procrastinate's own SQL, and no table model describes them. Alembic leaves them out when it compares the models with the database.
+- **The worker has a pool of its own,** from psycopg-pool, under LGPL-3.0-only like psycopg. It is used unmodified, and listed in the notices file beside psycopg.
