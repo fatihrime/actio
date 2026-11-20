@@ -225,7 +225,7 @@ async def test_a_server_that_is_too_slow_to_start_is_unavailable(fake: Fake) -> 
 
 
 async def test_models_lists_what_the_server_offers(fake: Fake) -> None:
-    assert await fake().models() == ["fake-chat"]
+    assert await fake().models() == ["fake-chat", "fake-quiet"]
 
 
 # --- Responses written here ----------------------------------------------------------

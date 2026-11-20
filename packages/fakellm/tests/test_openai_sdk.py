@@ -51,7 +51,7 @@ async def test_sdk_reads_a_stream_with_usage(sdk: AsyncOpenAI) -> None:
 
 
 async def test_sdk_lists_the_models(sdk: AsyncOpenAI) -> None:
-    assert [model.id async for model in sdk.models.list()] == ["fake-chat"]
+    assert [model.id async for model in sdk.models.list()] == ["fake-chat", "fake-quiet"]
 
 
 async def test_sdk_raises_not_found_for_an_unknown_model(sdk: AsyncOpenAI) -> None:

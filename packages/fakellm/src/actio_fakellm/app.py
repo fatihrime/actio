@@ -1,8 +1,13 @@
 """The fakellm app: OpenAI's Chat Completions API with predictable answers.
 
-Every reply echoes the last user message as "Echo: <text>". Each word, with the
-whitespace after it, counts as one token. A test can therefore predict every byte of a
-response, streamed or not, and the usage numbers that come with it.
+Every reply of `fake-chat` echoes the last user message as "Echo: <text>". Each word,
+with the whitespace after it, counts as one token. A test can therefore predict every
+byte of a response, streamed or not, and the usage numbers that come with it.
+
+`fake-quiet`, the second model served by default (`QUIET`), says nothing by itself: its
+reply has no text, and ends as a finished reply does. It says only what `[[say: ...]]`
+tells it to, as a model asked for a conversation's title would: an echo would be the
+same words for every conversation.
 
 A test can also script the reply, with directives in the last user message:
 
@@ -13,14 +18,17 @@ A test can also script the reply, with directives in the last user message:
     [[drop: 2]]               stream 2 tokens, then end the stream without finishing it
     [[delay: 0.5]]            wait this many seconds before answering
     [[pace: 0.05]]            wait this many seconds between the pieces of a streamed reply
+    [[say: Flat tyres]]       for `fake-quiet`, the reply's text; several are joined by a
+                              space, in order. `fake-chat` echoes as ever
 
-Directives are left out of the echoed text. They live in the message, not in a control
-API, so the fake keeps no state between requests, and a test that drives the whole stack
-can script it by typing into a chat box.
+Directives are left out of the echoed text, and work alike for both models. They live in
+the message, not in a control API, so the fake keeps no state between requests, and a
+test that drives the whole stack can script it by typing into a chat box.
 
-After a tool's result (a last message with the role `tool`), the reply echoes that
-result and no directive applies. An agent loop scripted to call a tool therefore gets a
-plain answer on its next step, instead of the same tool call again.
+After a tool's result (a last message with the role `tool`), `fake-chat` echoes that
+result, `fake-quiet` says nothing, and no directive applies. An agent loop scripted to
+call a tool therefore gets a plain answer on its next step, instead of the same tool
+call again.
 """
 
 import asyncio
@@ -57,7 +65,10 @@ from actio_fakellm.schemas import (
     Usage,
 )
 
-DEFAULT_MODELS = ("fake-chat",)
+QUIET = "fake-quiet"
+"""The model that says nothing by itself, and only what `[[say: ...]]` tells it to.
+Served under any other name, the fake echoes."""
+DEFAULT_MODELS = ("fake-chat", QUIET)
 MAX_DELAY_S = 30.0
 MAX_PACE_S = 5.0
 
@@ -78,6 +89,8 @@ class Script:
 
     reasoning: list[str] = field(default_factory=list)
     answer: list[str] = field(default_factory=list)
+    said: list[str] = field(default_factory=list)
+    """What `[[say: ...]]` told the quiet model to say, in order."""
     calls: list[tuple[str, str]] = field(default_factory=list)
     """Tool calls, each a name and its arguments as JSON text."""
     fail: tuple[int, str | None] | None = None
@@ -196,10 +209,12 @@ def create_app(
 
 
 def read_script(request: ChatCompletionRequest) -> Script:
-    """The reply's script: an echo, changed by the directives in the last user message."""
+    """The reply's script: an echo, or for the quiet model what it was told to say,
+    changed by the directives in the last user message."""
+    quiet = request.model == QUIET
     last = request.messages[-1]
     if last.role == "tool":
-        return Script(answer=_TOKEN.findall(f"Echo: {last.text()}"))
+        return Script(answer=[] if quiet else _TOKEN.findall(f"Echo: {last.text()}"))
 
     text = next((m.text() for m in reversed(request.messages) if m.role == "user"), "")
     directives = _DIRECTIVE.findall(text)
@@ -215,7 +230,8 @@ def read_script(request: ChatCompletionRequest) -> Script:
     if directives:  # leave them out of the echo, and tidy the spaces they leave behind
         text = " ".join(_DIRECTIVE.sub(" ", text).split())
     if not script.calls:
-        script.answer = _TOKEN.findall(f"Echo: {text}")
+        reply = " ".join(script.said) if quiet else f"Echo: {text}"
+        script.answer = _TOKEN.findall(reply)
     return script
 
 
@@ -246,6 +262,10 @@ def _apply(script: Script, name: str, value: str) -> None:
             script.pace_s = float(value)
             if not 0 <= script.pace_s <= MAX_PACE_S:
                 raise ValueError(value)
+        case "say":
+            if not value:
+                raise ValueError(value)
+            script.said.append(value)
         case _:
             raise ScriptError(f"unknown directive [[{name}: ...]]")
 

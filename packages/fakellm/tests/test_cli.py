@@ -22,11 +22,11 @@ def served_models(app: Any) -> list[str]:
     return [model["id"] for model in TestClient(app).get("/v1/models").json()["data"]]
 
 
-def test_defaults_serve_the_default_model_on_localhost(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_defaults_serve_the_default_models_on_localhost(monkeypatch: pytest.MonkeyPatch) -> None:
     app, kwargs = run_cli(monkeypatch, [])
 
     assert kwargs == {"host": "127.0.0.1", "port": 8100, "server_header": False}
-    assert served_models(app) == ["fake-chat"]
+    assert served_models(app) == ["fake-chat", "fake-quiet"]
 
 
 def test_flags_choose_the_port_and_models(monkeypatch: pytest.MonkeyPatch) -> None:

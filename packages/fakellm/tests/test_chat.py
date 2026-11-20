@@ -131,7 +131,10 @@ async def test_models_lists_the_served_models(client: httpx.AsyncClient) -> None
 
     assert response.json() == {
         "object": "list",
-        "data": [{"id": "fake-chat", "object": "model", "created": 0, "owned_by": "fakellm"}],
+        "data": [
+            {"id": "fake-chat", "object": "model", "created": 0, "owned_by": "fakellm"},
+            {"id": "fake-quiet", "object": "model", "created": 0, "owned_by": "fakellm"},
+        ],
     }
 
 
@@ -340,6 +343,7 @@ async def test_pace_changes_nothing_in_a_reply_that_is_not_streamed(
         "[[pace: -0.1]]",
         "[[pace: 60]]",
         "[[pace: slowly]]",
+        "[[say: ]]",
     ],
 )
 async def test_a_directive_that_cannot_be_read_is_a_400(
@@ -352,3 +356,89 @@ async def test_a_directive_that_cannot_be_read_is_a_400(
     error = response.json()["error"]
     assert error["message"].startswith("fakellm: ")
     assert error["param"] == "messages"
+
+
+# --- The quiet model: it says only what it is told ------------------------------------
+
+
+def asking_quietly(content: str, **fields: Any) -> dict[str, Any]:
+    return asking(content, **fields) | {"model": "fake-quiet"}
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [{"role": "user", "content": "How do I fix a flat tyre?"}],
+        [
+            {"role": "user", "content": "[[call: get_weather]] Weather?"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "tool", "tool_call_id": "call_fake_000001", "content": "18 degrees"},
+        ],
+    ],
+    ids=["a question", "a tool's result"],
+)
+async def test_the_quiet_model_says_nothing_by_itself_and_finishes(
+    client: httpx.AsyncClient, messages: list[dict[str, Any]]
+) -> None:
+    response = await client.post(URL, json={"model": "fake-quiet", "messages": messages})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["model"] == "fake-quiet"
+    assert body["choices"] == [
+        {"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}
+    ]
+    assert body["usage"]["completion_tokens"] == 0
+    assert body["usage"]["prompt_tokens"] > 0  # what it read is counted as ever
+
+
+async def test_the_quiet_model_streams_a_finished_reply_without_text(
+    client: httpx.AsyncClient,
+) -> None:
+    request = asking_quietly("How do I fix a flat tyre?", stream_options={"include_usage": True})
+
+    events = await stream_events(client, request)
+
+    assert events[-1] == "[DONE]"
+    chunks = [json.loads(event) for event in events[:-1]]
+    deltas = [c["choices"][0]["delta"] for c in chunks if c["choices"]]
+    assert "".join(delta["content"] or "" for delta in deltas) == ""
+    assert [c["choices"][0]["finish_reason"] for c in chunks if c["choices"]] == [None, "stop"]
+    assert chunks[-1]["usage"]["completion_tokens"] == 0
+
+
+@pytest.mark.parametrize(
+    ("content", "said"),
+    [
+        ("[[say: Flat tyres]] How do I fix a puncture?", "Flat tyres"),
+        ("[[say: Flat]] How do I fix a puncture? [[say: tyres]]", "Flat tyres"),
+    ],
+    ids=["once", "twice, in order"],
+)
+async def test_the_quiet_model_says_what_it_is_told(
+    client: httpx.AsyncClient, content: str, said: str
+) -> None:
+    response = await client.post(URL, json=asking_quietly(content))
+
+    choice = response.json()["choices"][0]
+    assert choice["message"]["content"] == said
+    assert choice["finish_reason"] == "stop"
+    assert response.json()["usage"]["completion_tokens"] == 2
+
+
+async def test_the_quiet_model_takes_the_other_directives_too(
+    client: httpx.AsyncClient,
+) -> None:
+    request = asking_quietly("[[think: tyres]] [[say: Flat tyres]] How do I fix a puncture?")
+
+    message = (await client.post(URL, json=request)).json()["choices"][0]["message"]
+
+    assert message == {"role": "assistant", "content": "Flat tyres", "reasoning": "tyres"}
+
+
+async def test_the_echoing_model_leaves_what_it_is_told_to_say_out_of_its_echo(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(URL, json=asking("[[say: Flat tyres]] How do I fix it?"))
+
+    assert response.json()["choices"][0]["message"]["content"] == "Echo: How do I fix it?"
