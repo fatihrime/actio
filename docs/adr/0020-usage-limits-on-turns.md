@@ -242,3 +242,16 @@ Not changed: the order of ledger and counters, what a refusal says, and a hold t
 - **Its hold needs no job.** The hold lasts a minute from the turn's last beat, and so does the turn's life: by the time the turn is stale, the hold has run out by itself. The job gives nothing back, and the worker has no usage-limits engine.
 - **A turn that ends after the worker gave up on it** is left as it was, and isn't charged, as one that someone looking gave up on (the revision of 2026-11-16 above).
 - **Still not done:** repeating a count that Valkey missed. "Not done yet" gave it to the same job; this one doesn't do it, and it is still open, with the nightly comparison. And a hold that ran out still shows as `reserved` in `GET /api/usage` until the account's next question, as found on the way in the revision of 2026-11-16.
+
+### 2026-11-19: a turn whose process died keeps what it had written, and still costs nothing
+
+"What it had written was lost with it", under "Not done yet", and "its answer was never recorded", in the revision above, no longer hold. A running turn saves what its answer holds with every beat, and a turn whose process died is given up on with that as its answer: what it had written by its last beat ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "what a dead process had written is kept").
+
+- **It still costs nothing,** as any interrupted turn, whoever gives up on it: no row is written to the ledger for it, and nothing in `actio.usage` changed. Its reader didn't stop it, and the fault was Actio's own.
+- **Its hold needs no job,** as before: it has run out by itself by the time the turn is stale.
+- **"Ended after it had been given up on: nothing, and its answer isn't stored",** in the table of the revision of 2026-11-16, now means what the turn wrote after its last beat. What that beat had saved was kept as its answer when it was given up on. When it ends after all, nothing is added to that, and nothing is charged.
+- **One more row** for the table of what is counted:
+
+    | The turn | Costs |
+    |---|---|
+    | Given up on, because its process died | Nothing. What it had written by its last beat is kept |

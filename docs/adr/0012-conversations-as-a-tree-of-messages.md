@@ -98,3 +98,9 @@ A conversation is what a person and a model said to each other. Storing it has t
     - titles are empty until someone renames a conversation. Automatic titles come with the worker process;
     - no search, and no limit yet on how long a message or a conversation can be. Turns set the limits on what comes in.
 - **How to reverse it:** a tree holds every flat list. Going back to one means keeping each conversation's shown branch and dropping the others, which loses data. The stored parts are Actio's own format, so changing it is a migration that nothing outside has to follow.
+
+## Revisions
+
+### 2026-11-19: an answer kept from a dead process is dated when it was written
+
+"`last_active_at`, the time a message was last added" doesn't hold for an answer that is kept from a dead process. A turn whose process died is given up on with what it had written by its last beat as its answer ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "what a dead process had written is kept"). That message is added when someone looks at the conversation, or when the worker comes by, up to ten minutes later. It is dated at the turn's last beat instead, and so is the conversation's `last_active_at`: the time it was written. Dated when it was added, the conversation would move to the top of its owner's list without its owner having done anything in it.

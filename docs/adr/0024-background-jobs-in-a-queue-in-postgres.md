@@ -394,3 +394,12 @@ The worker has a second job, `give-up-on-stale-turns` (`worker.GIVE_UP`), one of
 - **What it needs:** the database alone, like the sweep. The worker still reads neither the models file nor the plans file, and no job of its uses Valkey.
 - **What the log gets:** Procrastinate's three lines at the info level for each run, that the job was deferred, that it starts, and that it ended: 432 more lines a day. And the job's own line, `gave up on stale turns: 2`, only when it gave up on any.
 - **Cut off at a stop,** it stays `aborted`, as "Not done yet" says of any job. As for the sweep, the next run comes ten minutes later.
+
+### 2026-11-19: the second job keeps what a dead turn had written
+
+The job that gives up on stale turns now keeps each turn's draft as its answer ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "what a dead process had written is kept"). Two things in the revision above change with it:
+
+- **It also skips a turn whose conversation another transaction holds,** not only a turn that is held itself, and leaves it for the next run. It still waits for no row.
+- **It writes turn by turn,** where it wrote a batch in one statement: each kept answer is a message, written as any answer is. A run over 500 turns took 1.7 seconds, where it took 16 ms.
+
+It still needs the database alone.

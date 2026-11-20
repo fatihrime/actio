@@ -394,3 +394,57 @@ A test starts `actio --role all --reload` for real, and sends its server a SIGTE
 
 - **what a killed process had written is still lost,** though its stream may hold it for a minute. The next step keeps it;
 - **a hold that ran out still shows as held** in `GET /api/usage` until the account's next question, whoever gave up on the turn. That is put right where the usage is read, in a later step.
+
+### 2026-11-19: what a dead process had written is kept
+
+**What was missing:** a turn whose process died was given up on as `interrupted` with nothing kept. What it had written existed only in the dead process, and in its stream in Valkey for a minute more. "Not done yet" said so, "what a killed process had written is lost", and so did the revision above.
+
+**What is done** (`actio.chat.turns`, `actio.chat.answering`):
+
+- **Each beat saves a draft:** what the answer holds so far, reasoning and text as message parts, with the id its message will have. It goes on the turn's row (`draft`, migration 0010), in the statement that writes `alive_at`: one round trip, as before. A turn that has written nothing yet, waiting at its gate or for the model's first word, saves none.
+- **Whatever ends a turn empties its draft,** in the statement that writes the outcome. The database allows a draft on a running turn only.
+- **Giving up records an ending.** A stale turn with a draft becomes `interrupted` with the draft as its answer: a message under the draft's id, the turn's `answer_id` pointing at it, the conversation showing it. That is what a shutdown records for an interrupted turn, and it is written by the same code: `finish` and giving up both go through `_end`. A stale turn without a draft is given up on as before, with no answer.
+- **The kept answer is dated at the turn's last beat,** when the draft was saved: the message's `created_at`, and the conversation's `last_active_at`. The turn's `finished_at` is still the moment it was given up on.
+- **It costs nothing,** as any interrupted turn: no row in the ledger. Its hold has run out by itself, as before.
+- **A draft that can't be kept never keeps its turn `running`.** There are two: one this code can't read, written by another version of it; and one whose answer's id a message already has. Readers are told that id while the answer is written, and whoever sends a message chooses the message's id, so a reader can give it to a message of its own. Either way the turn is given up on without an answer, and a warning in the log names it. Left alone, the second would have stopped the worker at that turn in every run, for every account, and failed every read of that conversation. Nothing else is caught: a database that fails still fails the job, or the request.
+- **A question sent under the id of a kept answer is refused as any taken id is,** with a 409. Whoever asks gives up on a stale turn before the new message's id is looked up, so the kept answer is there to be found. Looked up first, the id would have seemed free, and the database would have refused the question afterwards, as an error nobody had expected.
+
+**The locks.** Writing an answer changes the conversation's row, so giving up now holds the conversation as well as the turn.
+
+- **Whoever looks** (`give_up_on_stale`) first asks, in one statement that holds nothing and changes nothing, whether the conversation has a stale turn at all. Every read of a conversation does, and nearly always finds none. Only if there is one does it lock the conversation's row, then the turn's, in the order `ask` and `finish` take them. Then it asks again whether the turn is stale, and records. It waits for the locks if it has to: whoever holds them is about to be done.
+- **The worker** (`give_up_on_stale_everywhere`) takes its batch of turns as before, skipping those another transaction holds. Then it takes their conversations, in one statement, skipping those another transaction holds: someone reading one, a question being asked, the turn's own late `finish`. A turn whose conversation it didn't get is left as it is, draft and all, for the next run.
+- **The worker never waits for a row's lock.** It takes turn before conversation, the other way round from everyone else. Taken by waiting, that order could wait in a circle with someone who holds the conversation and waits for the turn. Taken by skipping, it waits for neither.
+- **One wait is left, and it is for no row the worker takes.** If another transaction is at that moment adding a message under the very id of the answer the worker is keeping, the worker's insert waits until that transaction has ended, and then finds the id taken: see "A draft that can't be kept", above. That transaction is a question being asked in another conversation. It has its locks already and needs none of the worker's, so there is no circle in it, and it is over in a moment.
+
+**Decided:**
+
+- **The draft is saved with the beat, every 15 seconds,** not with every piece. One statement serves both, and a write for every piece of an answer would be a round trip to the database for every token.
+- **Not from the turn's stream in Valkey.** The stream runs out at the very moment the turn turns stale: both last a minute from the same beat. Valkey keeps nothing on disk. And the stream's bytes are in the format the browser reads, which `actio.api.ui_stream` writes: neither `actio.chat` nor the worker may import it.
+- **The answer keeps the id the stream named.** So the id is saved with the draft. A reader who saw the answer arrive finds it under the same id, and nobody who gives up has to be handed one: no route changes.
+- **One column, not a table of its own.** The draft is rewritten whole at each beat, and used once at most, by whoever gives up. It comes along when a running turn's row is read, as for a conversation's page, and is in nothing the API answers.
+- **Dated at the last beat.** Dated when it was given up on, the worker would move a conversation to the top of its owner's list ten minutes after the owner last did anything in it.
+
+**What it costs:**
+
+- **A write of the whole answer so far, every 15 seconds,** for each running turn, where a beat wrote one time.
+- **Giving up takes the conversation's lock.** Someone who looks at a conversation with a stale turn waits for whoever holds it, and the worker leaves such a turn for ten minutes more.
+- **About 15 seconds of an answer are lost:** what it wrote after its last beat. More when its last beats didn't reach the database: a beat that fails is only tried again at the next. A turn that dies before its first beat keeps nothing, as before.
+- **Going back to the code from before this step needs the migration undone first,** or the drafts emptied. That code gives up on a turn with one statement that leaves its draft where it is, which the table's check refuses. What is kept can be that much shorter than what a reader had been shown. It can also hold one piece more: a piece is taken into the answer before it is streamed, and a beat can come in between.
+
+**Measured,** on a Postgres 17 of its own, migrated by the `migrate` role:
+
+- **a beat:** 1.9 ms without a draft, as before: the median of 200, each with its commit. With a draft of 2,000 characters 2.0 ms, with 16,000 2.8 ms, and with 64,000 3.7 ms;
+- **a look at a conversation that has no stale turn:** 2.4 ms with its commit, in one statement that holds nothing;
+- **a run of the worker over 600 stale turns, two in three with a draft of 2,000 characters:** 500 given up on in 1.7 seconds, the other 100 in 0.3, and 400 answers kept. That is 3.4 ms a turn, where a run of 500 took 16 ms when giving up was one statement: each kept answer is written as any answer is, in a savepoint of its own. The conversations of a batch are held that long.
+
+**And in containers,** the stack of the end-to-end tests, in a real browser. Two guests each asked a question whose answer comes a word a second. The API's container was killed 23 seconds in, 7 seconds after each turn's first beat, and started again 69 seconds later:
+
+- **the guest who came back** had been shown 22 words. After a reload the page showed the answer as the beat had saved it, 14 words, with "The server was restarted while this answer was being written." and **Try again**. The turn was `interrupted` at the moment of the reload. The answer and the conversation were dated at the beat, 77 seconds earlier. Nothing was counted as used;
+- **the guest who never came back:** the turn said `running`, draft and all, until the worker's next ten-minute mark, 6 minutes after its last beat. Then the worker's container gave up on it, with the same outcome: the answer kept, dated at the beat and shown by the conversation, no row in the ledger, and `gave up on stale turns: 1` in its log.
+
+**Twenty-four mistakes were planted,** one at a time, in a scratch copy of the tree: in the draft and the beat; in giving up (the draft left out, the answer's date and its id, the two drafts that can't be kept, the savepoint); in the locks (the look that holds nothing, the second look under the locks, the order of conversation and turn, the worker waiting for a turn or for a conversation); in asking (the id looked up before a stale turn is given up on); and in the table (the check, and a JSON null for no draft). Twenty failed a test at once. Four failed none, and each got its test: the second look under the locks, which the review had named; the order of the two locks for whoever looks; that nothing but a taken id counts as a draft that can't be kept; and that asking for another answer gives up on a stale turn first.
+
+**Still not done:**
+
+- **what a process wrote after its last beat is lost,** and a turn that dies before its first beat keeps nothing;
+- **a hold that ran out still shows as held** in `GET /api/usage` until the account's next question, as the revision above says.

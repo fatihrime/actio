@@ -194,3 +194,11 @@ Two items of "Not done yet" are done, in [ADR 0023](0023-answers-that-wait-their
 - **A plan may limit how many answers one account has being written at once,** in all its conversations. One more is refused before anything is stored, like a question that comes too fast: a 429, with `at_once`. "One answer at a time per conversation" holds as before, and is checked first.
 - **A turn may also wait** before its model is asked, at a gate in front of a server that writes only so many answers at once. It is `running` meanwhile, and its stream has begun: `start` and `start-step`, then the line that keeps a silent connection open. The stream's format didn't change, and no recording did.
 - **The proxy refuses a body over 2 MB** on the API's routes: 413, as a problem document. A body that says its length is refused before any of it is passed on, and one sent in chunks once the limit is reached. The largest question the API takes fits, however its characters are written in JSON.
+
+### 2026-11-19: what a killed process had written is kept
+
+"An answer is stored when it ends. If the API's process dies half-way, what had been written is lost with it", under "Not done yet", and again in the revision of 2026-11-16, is answered by [ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "what a dead process had written is kept".
+
+- **A running turn saves what its answer holds every 15 seconds,** with the beat that says it is alive, on the turn's row.
+- **A turn whose process died is given up on with that as its answer,** `interrupted`, under the id its stream had named, and dated at its last beat.
+- **What it wrote after its last beat is still lost:** about 15 seconds, and more when its last beats didn't reach the database. The answer is otherwise still stored when it ends, as decided above.
