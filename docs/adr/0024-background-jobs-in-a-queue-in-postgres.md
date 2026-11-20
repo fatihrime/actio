@@ -413,3 +413,84 @@ The worker has a third job, `count-missed-usage` (`worker.COUNT_MISSED`). Every 
 - **What it takes:** a batch of 100 at most, oldest first, by a statement of its own that holds only its own rows, skipping those another transaction holds, as the other two do. It never waits for a row's lock.
 - **What it needs:** the database and the engine. It still reads neither the models file nor the plans file.
 - **What the log gets:** Procrastinate's three lines for each run, as for the other two: 432 more a day. And the job's own line, only when it counted something, and one warning when Valkey didn't answer.
+
+### 2026-11-20: the queue looks after what its workers leave behind
+
+Three items of "Not done yet" are done: "jobs left `doing` by a worker that died", "jobs cut off at a stop stay `aborted`", and "cleaning out failed and aborted jobs". So is a fourth thing that workers leave behind, measured before this step: a worker that died stays on Procrastinate's list of workers until some worker next starts more than 30 seconds after its last beat.
+
+Until now that did little harm: every job had a schedule, and its next run came ten minutes later. The next step brings the first job that is deferred for one thing only, a conversation's title. Such a job, once lost, is lost.
+
+**A job may run more than once:**
+
+- **After a stop that cut it off, or a worker that died with it in hand, it runs again from its start.** So every handler has to be safe to repeat. The three that were there are, since each takes a batch of what is left to do, and a batch that was done is not found again. The fourth, below, is too. `AGENTS.md` makes it a rule for whoever writes the next one.
+
+**A job cut off at a stop runs again** (`actio.core.jobs`):
+
+- **Through a retry strategy of ours, on every task the worker registers.** Procrastinate asks it of each job that didn't succeed. A job cut off at the end of the grace has had its task cancelled: for a cancellation the strategy answers "again, at once", and the job goes back to `todo`, for the next worker that takes it. For an error it answers nothing.
+- **A job that fails stays failed,** as before. Retries after an error are still not done.
+
+**A job left `doing` by a worker that died runs again,** by a scheduled job (below):
+
+- **Through Procrastinate's own `get_stalled_jobs` and `retry_job`,** not SQL of our own: Procrastinate's heartbeats and its rules for them are its to change, and an upgrade brings them along. It finds the jobs `doing` under a worker that hasn't beaten for 30 seconds, and those `doing` under no worker, whose worker was taken off the list.
+- **It leaves alone a job whose worker says that it is alive.** That is what the heartbeat is for. A test holds it, with two workers on one database. A worker that is alive and has said nothing for more than 30 seconds, as after the machine slept, is taken for dead like any other: see "With more than one worker", below.
+- **It never runs itself again.** The job that looks is `doing` while it looks. If its own worker's heartbeat is old at that moment, as after the machine slept, Procrastinate finds it among the jobs that dead workers left. So the worker that looks first says that it is alive, through Procrastinate's `update_heartbeat`, and the job that looks is also left out by its id: another worker may have taken its worker off the list already, and then it is `doing` under none.
+- **The same beat keeps it from taking its own worker off the list,** in the same moment. That was found in the build, not planned before it. A worker whose row is gone can't take a job any more: Procrastinate writes the worker's id into each job it takes, and that column points at the worker's row. Measured afterwards (below): the next job it goes to take fails on that foreign key, and the worker ends with an error, to be started again.
+- **A job that changed between the look and the retry is skipped,** not an error: its worker wasn't dead after all, and ended it. Procrastinate's function refuses then, with an error of its own, which is caught for that job alone. The look goes on with the next. One such ending isn't refused: Procrastinate's `retry_job` takes a `failed` job too, so a job that its late worker ended as `failed` in that moment is put back, and runs again once (from reading its SQL, not measured). Keeping it failed would take SQL of our own, for a moment of a few milliseconds.
+
+**How often, how long, and by which clock:**
+
+- **Not for ever: `jobs.RUNS_AGAIN = 3`.** A job that has already been run again three times is not run again: cut off once more, it stays `aborted`; left by a dead worker once more, it ends as `failed`, and the log names it, as a warning. So a job runs four times at most. Procrastinate counts the times in the job's `attempts`. The reason: a job that takes its worker down each time would otherwise go round for ever, since the worker's container starts again when it fails.
+- **Failed, aborted and cancelled jobs are deleted after seven days** (`worker.KEPT_FOR`), with their events, through Procrastinate's `delete_old_jobs`: long enough to be looked at after a long weekend. Procrastinate takes the time in whole hours. Jobs that succeeded are deleted at once, as before.
+- **A dead worker is taken off the list** by the same job, after the jobs were seen to, with the same 30 seconds (`jobs.WORKER_DEAD_AFTER_S`, Procrastinate's own default), through its `prune_stalled_workers`.
+- **One job, every ten minutes,** like the other three: `look-after-the-queue` (`worker.LOOK_AFTER_QUEUE`). A job that a dead worker left is run again within ten minutes and a half: thirty seconds for its worker to count as dead, and up to ten minutes for the next look. A worker that starts runs it too, for the ten-minute mark that has just passed.
+- **Time here is the database's.** The handler takes no clock: the one exception to "time comes in as `now`". The queue's books are Procrastinate's, and they go by the database's clock: its heartbeats, and the times at which its jobs ended, are written with `NOW()`. A clock of ours would be compared with theirs.
+- **A worker that is stopping stops saying that it is alive at once,** while the job in hand still has its grace: Procrastinate ends its heartbeat first. So one beat and the grace have to fit inside the 30 seconds, or another worker's look could take a stopping worker for dead, and put its job back while it is being finished. They do, 10 and 15 seconds, and a test holds it: `BEATS_EVERY_S + SHUTDOWN_GRACE_S < WORKER_DEAD_AFTER_S`. The worker is told the two numbers of the heartbeat by Actio now, where it took Procrastinate's defaults, which are the same.
+
+**With more than one worker,** which no installation runs today, a worker that is alive can be taken for dead: one that was silent for more than 30 seconds, as after its machine slept. The review of this step listed what then follows, from Procrastinate's SQL:
+
+- **Its job can run twice at once.** The look puts the job back, another worker takes it, and the late worker is still running it. Whichever ends it first decides how it ended, and the other's ending is refused, or lands on the second run. So "safe to repeat" also means safe beside itself. The three jobs that work on rows are: each takes its batch with `SKIP LOCKED`.
+- **Two looks at once can put the same job back twice,** the second time after a worker has taken it again.
+- **A worker whose row another took off the list** still has its job in hand, `doing` under no worker now, and every look puts that job back while it runs, up to the limit. Its own beat no longer protects it: it writes to a row that isn't there.
+- **With one worker none of this can happen.** The look is that worker's only job in hand, and it says first that it is alive.
+- **What would close it** is a look that puts a job back only if it still belongs to the worker it was found under, which takes SQL of our own, or a lock that keeps the same job from being taken twice. It goes with "more than one job at a time", below.
+
+**How the job reaches the queue:**
+
+- **Procrastinate's manager takes no connection of ours,** except to defer: the upkeep needs the running worker's own app, and its pool.
+- **A job listed with `with_queue=True` is given the queue** (`jobs.Queue`), before the arguments it was deferred with. Procrastinate passes such a task its context, which holds the worker's app and the job that runs; `jobs.Queue` holds the two, and nothing of Procrastinate leaves the module. Its one method, `look_after(kept_for=…)`, does the three steps in order, and returns what it did (`jobs.Upkeep`).
+- **The job is listed in `actio.worker.listed`** like the others, so that the list still shows every job a worker runs.
+- **Its handler says what was done,** through `actio.worker`'s logger: at the info level, how many jobs were run again and how many dead workers were taken off the list, only when there was either; and a warning that names each job given up on. Deleting old jobs says nothing: Procrastinate doesn't say how many it deleted.
+- **A look that the database fails raises an error of the module's own,** `jobs.UpkeepError`, as a deferral that fails raises `DeferError`: Procrastinate's errors stay inside too. The look then ends as a job that `failed`, and the next one comes ten minutes later. Each of its steps is written at once, so what was done stays done.
+- **A job left `doing` by a force quit is run again the same way.** The revision "`--role all`, and a worker in `make dev`" says such a job stays `doing`: it does, until the next look, and no longer for ever.
+
+**Measured by the supervisor before the step,** on Procrastinate 3.11.0 and the pinned Postgres, with a worker stopped as Actio stops it, by cancelling `run_worker_async` once:
+
+- **a job cut off at a stop:** after the grace, Procrastinate asked the task's retry strategy with the `CancelledError`, for a job with `attempts` 0. A strategy that answered `RetryDecision()` made the job `todo` again at once, with `attempts` 1 and no worker; the log said "Aborted, to retry", and the next worker ran it to its end. One that answers `None` leaves it `aborted`;
+- **a job that raised,** under the same strategy: it was asked with the `RuntimeError`, answered `None`, and the job stayed `failed`;
+- **a worker killed with a job in hand** (SIGKILL): the job stayed `doing` under that worker's id. A worker started two seconds later didn't take the dead one off the list: Procrastinate does that only when a worker starts, and only for heartbeats older than 30 seconds, and a worker beats every 10. `get_stalled_jobs()` returned the job 30 seconds after the kill. `retry_job` then made it `todo`, with `attempts` 1, and the live worker ran it at once;
+- **`prune_stalled_workers(30)`** took the dead worker off the list;
+- **`delete_old_jobs(…, include_failed=True, include_cancelled=True, include_aborted=True)`** deleted the jobs that had been in a final state for longer than the hours it was given, with their events: with 1 hour a fresh failed job stayed, with 0 it went. It returns nothing;
+- **all of these go by the database's clock,** `NOW()` in Procrastinate's SQL, as its heartbeats do. One thing doesn't, as the build found: the time a job that is put back is dated for (below);
+- from reading the SQL, not measured: `retry_job` raises when the job is no longer `doing` or `failed`, and `finish_job(…, failed)` ends a `todo` or `doing` job as failed. Procrastinate cleans the table of its scheduled runs itself.
+
+**Found in the build,** from reading Procrastinate's code: a job put back by `retry_job` is dated for now by the process's clock, not the database's (`scheduled_at`, from Python's `utcnow()`), and a worker takes it once the database's clock has reached that time. Where the two clocks differ, as between a machine and the virtual machine Docker runs on it, the job can wait for that difference. And a waiting worker isn't told of a job that was put back, as it is of a new one: it finds it at its next look, five seconds later at most. The tests that need a job run again wait for it with a worker that keeps looking, not one that returns once the queue looks empty.
+
+**Measured,** on a MacBook Pro (M1 Pro, 16 GB), 2026-11-20, after the build:
+
+- **With Actio's own worker, in real processes and real time,** on a Postgres from the pinned image. Nothing was set back by hand, and the look came every five seconds instead of every ten minutes:
+    - **a worker killed with a job in hand:** the job stayed `doing` under it. A second worker's look put it back 31 seconds after the kill, and took the dead worker off the list in the same look. The second worker ran the job from its start, to its end 39 seconds after the kill: the job takes 8. Told to stop, that worker ended with status 0, and left the list itself;
+    - **a job cut off at a stop:** SIGTERM, with a job of 40 seconds in hand. The process ended with status 0 after 15.1 seconds, and the job was `todo`, with `attempts` 1 and no worker;
+    - **a live worker whose row was deleted from the list:** the next job it went to take failed on the foreign key from a job to its worker, the process ended with status 1, and the job was still `todo`. So a worker that is taken off the list by mistake doesn't work on under a row that isn't there: it ends, and is started again as any worker that failed.
+- **In containers,** the stack of the end-to-end tests, after its 33 tests had passed. The worker's process was killed from inside its container, as a crash is. Docker started the container again within a second, and it was healthy six seconds later: two workers stood on the queue's list, the dead one with a beat 16 seconds old. At the next ten-minute mark, two minutes later, the new worker's log said `jobs left by workers that died, run again: 0, dead workers taken off the list: 1`, and one worker was left on the list. The look itself took 4 ms.
+- **Thirty-seven mistakes were planted,** one at a time, in a scratch copy of the tree: in the strategy (again for an error too, without a limit, the limit moved by one, never again, left off either kind of task); in the look (no beat first, its own job run again, the limit left out or moved, a job given up on deleted or ended as `aborted`, a job that ended meanwhile stopping the look, every error of the database taken for such a job, dead workers left on the list, each kind of old job left, days taken for hours, the 30 seconds made longer or shorter, an error of Procrastinate's let out, a beat or a grace that no longer fits); and in the worker (the job not listed, not given the queue, without a schedule, keeping nothing or too long, what it says). Each fails a test. Four failed nothing at first, and got one: the strategy left off the task that looks; any error of the database taken for a job that ended meanwhile; and a look that only ran a job again, or only took a worker off the list, saying nothing.
+
+**What it costs:**
+
+- **Three more lines of Procrastinate's in the log every ten minutes,** 432 a day, as each job has.
+- **A job may run more than once,** and every handler has to be written for that.
+
+**Still not done:**
+
+- **retries after an error.** A job that fails stays failed. Whoever adds them: they go into the same retry strategy, and `attempts` counts every time a job was run again, after a stop as after an error;
+- **a queueing lock,** which keeps a second job of a kind out while one waits;
+- **more than one job at a time.**
