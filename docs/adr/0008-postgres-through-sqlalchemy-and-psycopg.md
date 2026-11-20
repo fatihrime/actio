@@ -103,3 +103,45 @@ The engine is made with SQLAlchemy's `hide_parameters=True` (`actio.core.databas
     - **in a question's first line:** the request failed with an error of the driver's that quotes nothing, and was answered 500;
     - **both are older than this revision,** and hiding the values doesn't mend them. Keeping that character out of what is stored is a step of its own, not done yet.
 - **The cost:** an error no longer shows the values that made a statement fail. Whoever needs them reads the row, or asks the database's own log.
+
+### 2026-11-20: a character that can't be stored becomes U+FFFD
+
+The revision above left one thing not done: the character Postgres can't hold. Measured before this one, it was two kinds of character, and more places than the two named there.
+
+**The two kinds:**
+
+- **U+0000.** Postgres holds it neither in its text nor in its JSON.
+- **Half of a surrogate pair:** half of a character that takes two, as an emoji cut in two leaves it. JSON can spell it (`\ud83d`), and no UTF-8 can hold it: so it can't be stored, and Postgres's JSON refuses the spelling too.
+
+**Measured on the code before,** each sent as a browser sends it, spelled as an escape in a JSON body, or written by a model the tests script:
+
+- **U+0000 from a person:** in a question, in its first line or a later one, in a rename and in the address of a login, the request was answered 500. A password with one was taken, since a password is hashed and not stored as text. A model's name and a new account's address were refused, 422.
+- **Half a pair from a person:** in a question, 500. Everywhere else the request was refused, 422: Pydantic reads a string that has a rule, such as a longest length, as Unicode to check the rule, and half a pair isn't Unicode ("unable to parse raw data as a unicode string"). A question's text has no rule of its own, and a plain string is taken as it comes.
+- **Either from a model,** in an answer's text or its reasoning: the answer couldn't be stored. Its turn stayed `running` until it was given up on, a minute later, with the question unanswered, and the database's message, which quotes the answer up to that character, went into the log.
+
+**Options:**
+
+1. **Refuse a request that holds one,** 422.
+    - Con: a person can't see such a character in what they pasted, and can't find it.
+    - Con: nothing can be refused of a model: its answer is there, or lost.
+2. **Leave it out.**
+    - Con: a password would change in silence, and so would a question, with nothing to show where.
+3. **Put U+FFFD in its place,** the character that stands for one that can't be shown.
+    - Pro: it is what a browser makes of half a pair when it sends text as text, and what it shows for one. From a browser, only JSON's escapes carry half a pair past that.
+    - Pro: one rule for people and for models, and nothing fails later and somewhere else.
+
+**Decision: each such character becomes U+FFFD where the text comes in** (`actio.core.text.storable`).
+
+- **In a request's body, before anything reads it** (`actio.api.body`): every request's body is a `Body`, which looks through what was sent, every string and every member's name, sixteen levels deep, where no request goes deeper than four. What is deeper is not looked at, and no route reads it. A test fails for a route whose body isn't one: it asks each route for the class it takes, and the API's description whether that was every route with a body. The same goes for half a pair that comes as three bytes of the body and not as an escape, which no browser sends: the body is read leniently, and they become half a pair too.
+- **In a model's answer, where it is collected** (`Answer` in `actio.chat.answering`), before a reader is shown it: what is streamed is what is stored.
+- **A model's title had it already** ([ADR 0025](0025-titles-written-by-a-model.md)): there such a character becomes a space, as other control characters do.
+- **Other control characters are left:** Postgres holds them.
+
+**What follows:**
+
+- **A password is taken with the mark,** when it is set and when it is tried: the same password both times. One with U+0000 used to be taken as it was, so an account whose password holds one can no longer log in with it. No installation is known to have one.
+- **A request that was refused for half a pair is taken now,** with the mark: a rename, the address of a login, a model's name. A login's address is looked up with the mark, and nobody has it. A refusal that names what it refuses names it with the mark.
+- **Nobody signs up under an address with the mark in it:** 422, as before for an address with either character. Without that rule it would be taken: the rules for an address take U+FFFD for a letter of some script, and the account would stand under an address that is nobody's mailbox. Found by the review of this revision.
+- **A character that a model sends in two pieces,** one half in each, becomes two marks: each piece is looked at as it comes, since it is streamed as it comes.
+- **Not looked through:** what comes in a request's address. The one string there is the list's cursor. It is read as base64, which passes over a character that isn't base64's, so a cursor with U+0000 added to it is the cursor without: a test holds that. Only a time and an id come out of a cursor, never text.
+- **A refusal of a body says where it is wrong, and never repeats what was sent.** So a string below the sixteen levels, which was not looked at, isn't written into a response either.
