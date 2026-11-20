@@ -14,7 +14,7 @@ from contextlib import (
     contextmanager,
 )
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, LiteralString, Protocol
 
 import argon2.profiles
 import httpx
@@ -155,6 +155,110 @@ def work_through(migrated: str) -> WorkThrough:
             )
 
     return work
+
+
+class QueueBooks:
+    """The queue's books on this test's database, written as Procrastinate's workers
+    write them: for the tests of what looking after the queue does with them.
+
+    A worker that starts takes the workers that died more than 30 seconds ago off the
+    list by itself. So what a dead worker leaves is written while the test's worker
+    runs: by a job of the test's, before it looks after the queue."""
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+
+    async def _one(self, statement: LiteralString, *params: Any) -> Any:
+        async with await psycopg.AsyncConnection.connect(self.database_url) as connection:
+            cursor = await connection.execute(statement, params)
+            row = await cursor.fetchone()
+        assert row is not None
+        return row[0]
+
+    async def _do(self, *statements: tuple[LiteralString, tuple[Any, ...]]) -> None:
+        async with await psycopg.AsyncConnection.connect(self.database_url) as connection:
+            for statement, params in statements:
+                await connection.execute(statement, params)
+
+    async def deferred(self, db: AsyncSession, name: str, **args: jobs.Argument) -> int:
+        """Defer the job `name` in `db`, and commit it. Its id in the queue."""
+        await jobs.defer(db, name, **args)
+        await db.commit()
+        job_id: int = await self._one("SELECT max(id) FROM procrastinate_jobs")
+        return job_id
+
+    async def already_run_again(self, job_id: int, times: int) -> None:
+        """Make the job one that has already been run again `times` times."""
+        await self._do(
+            ("UPDATE procrastinate_jobs SET attempts = %s WHERE id = %s", (times, job_id))
+        )
+
+    async def a_dead_worker(self) -> int:
+        """A worker on the queue's list that last said it was alive a minute ago: twice
+        the 30 seconds after which it is taken for dead. Its id."""
+        worker_id: int = await self._one(
+            "INSERT INTO procrastinate_workers (last_heartbeat)"
+            " VALUES (now() - interval '1 minute') RETURNING id"
+        )
+        return worker_id
+
+    async def a_live_worker(self) -> int:
+        """A worker on the queue's list that has just said it is alive. Its id."""
+        worker_id: int = await self._one(
+            "INSERT INTO procrastinate_workers DEFAULT VALUES RETURNING id"
+        )
+        return worker_id
+
+    async def left_doing(self, job_id: int, *, worker_gone: bool = False) -> None:
+        """Leave the job `doing`, as a worker that was killed with it in hand does: under
+        a worker that has been silent for a minute, or, `worker_gone`, under one that has
+        been taken off the list since, which leaves the job with no worker."""
+        worker_id = await self.a_dead_worker()
+        statements: list[tuple[LiteralString, tuple[Any, ...]]] = [
+            (
+                "UPDATE procrastinate_jobs SET status = 'doing', worker_id = %s WHERE id = %s",
+                (worker_id, job_id),
+            )
+        ]
+        if worker_gone:
+            statements.append(("DELETE FROM procrastinate_workers WHERE id = %s", (worker_id,)))
+        await self._do(*statements)
+
+    async def ended(self, job_id: int, status: str, *, ago: timedelta) -> None:
+        """End the job as `status`, `failed`, `aborted` or `cancelled`, `ago`: the time
+        of its last event. One that is cancelled never began."""
+        statements: list[tuple[LiteralString, tuple[Any, ...]]] = []
+        if status != "cancelled":
+            statements.append(
+                ("UPDATE procrastinate_jobs SET status = 'doing' WHERE id = %s", (job_id,))
+            )
+        statements += [
+            (
+                "UPDATE procrastinate_jobs SET status = %s::procrastinate_job_status WHERE id = %s",
+                (status, job_id),
+            ),
+            ("UPDATE procrastinate_events SET at = now() - %s WHERE job_id = %s", (ago, job_id)),
+        ]
+        await self._do(*statements)
+
+    async def workers(self) -> list[int]:
+        """The ids of the workers on the queue's list."""
+        async with await psycopg.AsyncConnection.connect(self.database_url) as connection:
+            cursor = await connection.execute("SELECT id FROM procrastinate_workers ORDER BY id")
+            return [worker_id for (worker_id,) in await cursor.fetchall()]
+
+    async def events_of(self, *job_ids: int) -> int:
+        """How many events the queue holds for these jobs."""
+        count: int = await self._one(
+            "SELECT count(*) FROM procrastinate_events WHERE job_id = ANY(%s)", list(job_ids)
+        )
+        return count
+
+
+@pytest.fixture
+def queue_books(migrated: str) -> QueueBooks:
+    """The queue's books on this test's migrated database: see `QueueBooks`."""
+    return QueueBooks(migrated)
 
 
 # --- The app --------------------------------------------------------------------------

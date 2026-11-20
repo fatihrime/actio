@@ -4,6 +4,10 @@ A job is deferred in the transaction of the change it follows (`defer`), so it e
 if and only if that change was committed. A worker runs it later (`work`), one at a
 time, and runs the jobs that have a schedule by their schedule.
 
+A job may run more than once: from its start again, after a stop cut it off, or after
+the worker that had it died (`RUNS_AGAIN`, `Queue.look_after`). So every handler has to
+be safe to repeat.
+
 The queue is Procrastinate's (ADR 0024), and this is the only module that knows it: a
 job's handler is a plain async function, and nothing of Procrastinate leaves here. Its
 tables are built by Procrastinate's own SQL, applied by a migration of ours
@@ -17,11 +21,14 @@ import signal
 import threading
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import procrastinate
 import psycopg
 from procrastinate import exceptions as queue_errors
+from procrastinate import jobs as queued
+from procrastinate.manager import JobManager
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,11 +43,37 @@ arguments in its log, so they are ids and such, never what people wrote."""
 
 SHUTDOWN_GRACE_S = 15.0
 """How long a worker that is told to stop lets the job in hand finish. It takes no new
-job meanwhile. After this the job is cut off: it stays in the queue as `aborted`, and
-nothing runs it again.
+job meanwhile. After this the job is cut off, and goes back into the queue, to be run
+again from its start by the next worker, up to `RUNS_AGAIN` times.
 
 Whatever stops the process has to wait longer than this, or it cuts the job off
-itself, without a word in the queue."""
+itself, without a word in the queue: the job is then left `doing`, as by a worker that
+died, until a look after the queue finds it (`Queue.look_after`).
+
+And it has to stay, with one beat of the worker, under `WORKER_DEAD_AFTER_S`: see there."""
+
+RUNS_AGAIN = 3
+"""How many times a job is run again from its start, after a stop cut it off or a worker
+that died left it. Then it isn't, once more: cut off, it stays `aborted`; left by a
+worker that died, it ends as `failed`. A job that takes its worker down each time would
+otherwise go round for ever, since the worker's container starts again when it fails.
+
+A job that failed is never run again: this is for the jobs that didn't get to end."""
+
+BEATS_EVERY_S = 10.0
+"""How often a worker of the queue says that it is alive: a beat it writes into the
+database, by the database's clock. Procrastinate's own default, said here because
+`WORKER_DEAD_AFTER_S` and `SHUTDOWN_GRACE_S` are measured against it."""
+
+WORKER_DEAD_AFTER_S = 30.0
+"""How long a worker of the queue goes without saying that it is alive before it is taken
+for dead, and the job it had in hand for left behind: three of its beats, Procrastinate's
+own default.
+
+A worker that is told to stop says no more that it is alive from that moment, while the
+job in hand has its grace. So a beat and the grace together have to stay under this, or
+another worker could take one that is stopping for dead, and put its job back while it
+is still being finished. A test holds that."""
 
 STARTS_AGAIN_AFTER_S = 1.0
 """How long a worker that stopped without being told to waits before it starts again.
@@ -65,6 +98,110 @@ class Job:
     every: str | None = None
     """When it also runs by itself: a cron line in UTC, such as `*/10 * * * *`, of five
     fields, or six with the seconds last. `None`: only when it is deferred."""
+    with_queue: bool = False
+    """Whether `run` looks after the queue itself. It is then called with the `Queue`
+    first, as the job that runs sees it, and the arguments the job was deferred with
+    after it."""
+
+
+@dataclass(frozen=True, slots=True)
+class LeftBehind:
+    """A job that a worker which died had left `doing`: its name, and its id in the
+    queue."""
+
+    name: str
+    id: int
+
+
+@dataclass(frozen=True, slots=True)
+class Upkeep:
+    """What one look after the queue did (`Queue.look_after`)."""
+
+    run_again: int
+    """Jobs that workers which died had left `doing`, put back to be run again."""
+    given_up: tuple[LeftBehind, ...]
+    """Jobs they had left that had already been run again `RUNS_AGAIN` times: ended as
+    `failed`."""
+    dead_workers: int
+    """Workers taken off the queue's list of workers."""
+
+
+class Queue:
+    """The queue, as the job that looks after it sees it (`Job.with_queue`).
+
+    Procrastinate keeps the queue's books itself: which worker is alive, by a beat each
+    one writes into the database every `BEATS_EVERY_S`, and when each job ended. They go
+    by the database's clock, not the machine's, so nothing here is told the time. One
+    thing in them goes by the machine's: the time a job that is put back is dated for,
+    which a worker waits out when the database's clock is behind."""
+
+    def __init__(self, manager: JobManager, looking: queued.Job) -> None:
+        self._manager = manager
+        self._looking = looking
+        """The job that is looking: it is `doing` while it looks."""
+
+    async def look_after(self, *, kept_for: timedelta) -> Upkeep:
+        """See to what workers left behind: in this order,
+
+        - run again the jobs that workers which died had left `doing`, or end those
+          that have been run again `RUNS_AGAIN` times as `failed`. A job whose worker
+          is alive is left alone, and so is the job that is looking;
+        - take the workers that died off the queue's list;
+        - delete the jobs that failed, were cut off or were cancelled, once they ended
+          more than `kept_for` ago, in whole hours, with their events.
+
+        A worker is taken for dead once it hasn't said that it is alive for
+        `WORKER_DEAD_AFTER_S`. The worker that is looking says so first, so that it is
+        never taken for one, as it could be after the machine slept.
+
+        Each step is written at once: what was done stays done when a later one fails.
+        Raises `UpkeepError` when the database refuses a step, or is lost."""
+        try:
+            return await self._look_after(kept_for)
+        except queue_errors.ProcrastinateException as error:
+            # As in `defer`: nothing outside this module may know Procrastinate's errors.
+            said = error.__cause__ or error
+            raise UpkeepError(f"the queue couldn't be looked after: {said}") from said
+
+    async def _look_after(self, kept_for: timedelta) -> Upkeep:
+        looking_id = self._looking.id
+        if self._looking.worker_id is not None:
+            await self._manager.update_heartbeat(self._looking.worker_id)
+        run_again = 0
+        given_up: list[LeftBehind] = []
+        for job in await self._manager.get_stalled_jobs(
+            seconds_since_heartbeat=WORKER_DEAD_AFTER_S
+        ):
+            # Its own worker's row may be gone, taken off the list by another, and then
+            # the job that is looking is among those Procrastinate finds.
+            if job.id is None or job.id == looking_id:
+                continue
+            try:
+                if job.attempts < RUNS_AGAIN:
+                    await self._manager.retry_job(job)
+                    run_again += 1
+                else:
+                    await self._manager.finish_job(job, queued.Status.FAILED, delete_job=False)
+                    given_up.append(LeftBehind(job.task_name, job.id))
+            except queue_errors.ConnectorException as error:
+                if not isinstance(error.__cause__, psycopg.errors.RaiseException):
+                    raise
+                # Procrastinate's own refusal: the job is no longer `doing`. Its worker
+                # wasn't dead after all, and has ended it since it was looked at.
+                continue
+        dead = await self._manager.prune_stalled_workers(WORKER_DEAD_AFTER_S)
+        await self._manager.delete_old_jobs(
+            nb_hours=int(kept_for / timedelta(hours=1)),
+            include_failed=True,
+            include_cancelled=True,
+            include_aborted=True,
+        )
+        return Upkeep(run_again=run_again, given_up=tuple(given_up), dead_workers=len(dead))
+
+
+class UpkeepError(Exception):
+    """The queue couldn't be looked after: its database refused a step, or was lost
+    (`Queue.look_after`)."""
 
 
 class DatabaseUnreachableError(Exception):
@@ -120,9 +257,11 @@ async def work(
     stays, as `failed`, and its error is in the log; it isn't tried again.
 
     Told to stop, the worker takes no new job, gives the one in hand `grace` seconds to
-    finish, and cuts it off after that. It listens for the signals from before it
-    connects, so it is told whenever it is; the first signal is the one that counts,
-    and later ones change nothing.
+    finish, and cuts it off after that: the job goes back into the queue, to be run
+    again from its start, unless it has been run again `RUNS_AGAIN` times already, and
+    then it stays as `aborted`. It listens for the signals from before it connects, so
+    it is told whenever it is; the first signal is the one that counts, and later ones
+    change nothing.
 
     The worker connects through a pool of its own, of two connections at most, and one
     more that listens for new jobs. Raises `DatabaseUnreachableError` when the pool has
@@ -230,7 +369,12 @@ async def _work_once(
         connector=procrastinate.PsycopgConnector(conninfo=database_url, min_size=1, max_size=2)
     )
     for job in listed:
-        task = app.task(name=job.name)(_handler(job))
+        if job.with_queue:
+            task = app.task(name=job.name, retry=_AGAIN_AFTER_A_STOP, pass_context=True)(
+                _looking_after(job)
+            )
+        else:
+            task = app.task(name=job.name, retry=_AGAIN_AFTER_A_STOP)(_handler(job))
         if job.every is not None:
             app.periodic(cron=job.every)(task)
     try:
@@ -248,6 +392,10 @@ async def _work_once(
                 delete_jobs="successful",
                 shutdown_graceful_timeout=grace,
                 install_signal_handlers=False,  # `work` listens for them
+                # Procrastinate's defaults, said here: the look after the queue and the
+                # grace at a stop are measured against them.
+                update_heartbeat_interval=BEATS_EVERY_S,
+                stalled_worker_timeout=WORKER_DEAD_AFTER_S,
             )
         finally:
             if beats is not None:
@@ -289,6 +437,36 @@ def _handler(job: Job) -> Callable[..., Awaitable[None]]:
         await job.run(**args)
 
     return handle
+
+
+def _looking_after(job: Job) -> Callable[..., Awaitable[None]]:
+    """What runs a job that looks after the queue: Procrastinate passes it the context
+    of the run, which holds the worker's own app and the job itself."""
+
+    async def handle(context: procrastinate.JobContext, **args: Any) -> None:
+        if job.every is not None:
+            args.pop("timestamp", None)  # as in `_handler`
+        await job.run(Queue(context.app.job_manager, context.job), **args)
+
+    return handle
+
+
+class _AgainAfterAStop(procrastinate.BaseRetryStrategy):
+    """Procrastinate asks this of every job that didn't succeed: whether to run it again.
+
+    A job cut off at a stop, which Procrastinate does by cancelling its task, is run
+    again at once, by the next worker that takes it, until it has been run again
+    `RUNS_AGAIN` times. A job that raised is not: it stays `failed`."""
+
+    def get_retry_decision(
+        self, *, exception: BaseException, job: queued.Job
+    ) -> procrastinate.RetryDecision | None:
+        if isinstance(exception, asyncio.CancelledError) and job.attempts < RUNS_AGAIN:
+            return procrastinate.RetryDecision()
+        return None
+
+
+_AGAIN_AFTER_A_STOP = _AgainAfterAStop()
 
 
 def schema_files(up_to: str) -> list[str]:

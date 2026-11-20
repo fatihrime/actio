@@ -13,8 +13,9 @@ import signal
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,39 @@ def counting_missed_usage(listed: list[jobs.Job]) -> jobs.Job:
     return counting
 
 
+def looking_after_the_queue(listed: list[jobs.Job]) -> jobs.Job:
+    [looking] = [job for job in listed if job.name == worker.LOOK_AFTER_QUEUE]
+    return looking
+
+
+def first_then(
+    first: Callable[[], Awaitable[None]], looking: jobs.Job
+) -> Callable[[jobs.Queue], Awaitable[None]]:
+    """What runs `looking`, run only when it is deferred, after `first`.
+
+    A worker takes the workers that died off the queue's list when it starts, so what a
+    dead worker leaves is written while the worker that looks runs: by `first`."""
+
+    async def run(queue: jobs.Queue) -> None:
+        await first()
+        await looking.run(queue)
+
+    return run
+
+
+async def does_nothing(**_args: jobs.Argument) -> None:
+    """A job's handler, for a job that has to be listed."""
+
+
+async def queue_of(database_url: str) -> list[tuple[str, str]]:
+    """The jobs in the queue, oldest first: each one's name and status."""
+    async with await psycopg.AsyncConnection.connect(database_url) as connection:
+        cursor = await connection.execute(
+            "SELECT task_name, status::text FROM procrastinate_jobs ORDER BY id"
+        )
+        return [(name, status) for name, status in await cursor.fetchall()]
+
+
 async def a_turn(db: AsyncSession, *, heard_from: datetime) -> Turn:
     """A new guest's question, with its turn running, begun and last heard from at
     `heard_from`. Not committed."""
@@ -88,17 +122,177 @@ async def a_turn(db: AsyncSession, *, heard_from: datetime) -> Turn:
     return begun.turn
 
 
-async def test_the_worker_runs_each_of_its_three_jobs_every_ten_minutes(
+async def test_the_worker_runs_each_of_its_four_jobs_every_ten_minutes(
     settings: Settings, clock: Any
 ) -> None:
+    """The last looks after the queue itself, and is given it."""
     async with open_resources(settings) as resources:
         listed = worker.listed(resources, clock=lambda: clock.now)
 
-    assert [(job.name, job.every) for job in listed] == [
-        (worker.SWEEP, "*/10 * * * *"),
-        (worker.GIVE_UP, "*/10 * * * *"),
-        (worker.COUNT_MISSED, "*/10 * * * *"),
+    assert [(job.name, job.every, job.with_queue) for job in listed] == [
+        (worker.SWEEP, "*/10 * * * *", False),
+        (worker.GIVE_UP, "*/10 * * * *", False),
+        (worker.COUNT_MISSED, "*/10 * * * *", False),
+        (worker.LOOK_AFTER_QUEUE, "*/10 * * * *", True),
     ]
+
+
+async def test_the_worker_keeps_a_job_that_ended_without_succeeding_for_a_week(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    migrated: str,
+    queue_books: Any,
+    work_through: Any,
+) -> None:
+    """One failed an hour short of a week ago, and stays. The other an hour more than a
+    week ago, and goes."""
+    younger = await queue_books.deferred(db, "younger")
+    await queue_books.ended(younger, "failed", ago=timedelta(days=7) - timedelta(hours=1))
+    older = await queue_books.deferred(db, "older")
+    await queue_books.ended(older, "failed", ago=timedelta(days=7, hours=1))
+    await jobs.defer(db, worker.LOOK_AFTER_QUEUE)
+    await db.commit()
+
+    async with open_resources(settings) as resources:
+        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        # Run when it was deferred only, not by its schedule as well.
+        await work_through(dataclasses.replace(looking, every=None))
+
+    assert timedelta(days=7) == worker.KEPT_FOR
+    assert await queue_of(migrated) == [("younger", "failed")]
+
+
+async def test_the_worker_says_how_many_jobs_it_ran_again_and_how_many_dead_workers_went(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    queue_books: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A worker that was killed left a job `doing`. The job that looks comes first in
+    the queue."""
+    await queue_books.deferred(db, worker.LOOK_AFTER_QUEUE)
+    left = await queue_books.deferred(db, "note", n=1)
+    caplog.set_level(logging.INFO, logger="actio.worker")
+
+    async with open_resources(settings) as resources:
+        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        leave_it = partial(queue_books.left_doing, left)
+        await work_through(
+            dataclasses.replace(looking, run=first_then(leave_it, looking), every=None),
+            jobs.Job("note", does_nothing),
+        )
+
+    said = [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == "actio.worker"
+    ]
+    assert said == [
+        (
+            logging.INFO,
+            "jobs left by workers that died, run again: 1, dead workers taken off the list: 1",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("left_a_job", "said"),
+    [
+        (True, "jobs left by workers that died, run again: 1, dead workers taken off the list: 0"),
+        (False, "jobs left by workers that died, run again: 0, dead workers taken off the list: 1"),
+    ],
+    ids=["only a job to run again", "only a dead worker"],
+)
+async def test_the_worker_says_so_when_a_look_did_only_one_of_the_two(
+    left_a_job: bool,
+    said: str,
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    queue_books: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Either is worth its line: a job run again whose worker another had already taken
+    off the list, or a dead worker that had no job in hand."""
+    await queue_books.deferred(db, worker.LOOK_AFTER_QUEUE)
+    left = await queue_books.deferred(db, "note", n=1) if left_a_job else None
+    caplog.set_level(logging.INFO, logger="actio.worker")
+
+    async def leave_one_of_the_two() -> None:
+        if left is None:
+            await queue_books.a_dead_worker()
+        else:
+            await queue_books.left_doing(left, worker_gone=True)
+
+    async with open_resources(settings) as resources:
+        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        await work_through(
+            dataclasses.replace(looking, run=first_then(leave_one_of_the_two, looking), every=None),
+            jobs.Job("note", does_nothing),
+        )
+
+    lines = [record.getMessage() for record in caplog.records if record.name == "actio.worker"]
+    assert lines == [said]
+
+
+async def test_the_worker_names_each_job_it_gives_up_on(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    queue_books: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Left `doing` by a worker that died, after it had been run again as many times as
+    a job is. Its worker has been taken off the list since, by another, so that this is
+    all there is to say."""
+    await queue_books.deferred(db, worker.LOOK_AFTER_QUEUE)
+    left = await queue_books.deferred(db, "note", n=1)
+    await queue_books.already_run_again(left, jobs.RUNS_AGAIN)
+    caplog.set_level(logging.INFO, logger="actio.worker")
+
+    async with open_resources(settings) as resources:
+        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        leave_it = partial(queue_books.left_doing, left, worker_gone=True)
+        await work_through(
+            dataclasses.replace(looking, run=first_then(leave_it, looking), every=None),
+            jobs.Job("note", does_nothing),
+        )
+
+    said = [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == "actio.worker"
+    ]
+    assert said == [
+        (
+            logging.WARNING,
+            "a job left by a worker that died had been run again 3 times already, and ends"
+            f" as failed: note[{left}]",
+        )
+    ]
+
+
+async def test_a_look_after_the_queue_that_finds_nothing_says_nothing(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    await jobs.defer(db, worker.LOOK_AFTER_QUEUE)
+    await db.commit()
+    caplog.set_level(logging.INFO, logger="actio.worker")
+
+    async with open_resources(settings) as resources:
+        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        await work_through(dataclasses.replace(looking, every=None))
+
+    assert [record for record in caplog.records if record.name == "actio.worker"] == []
 
 
 async def test_the_sweep_deletes_what_expired_by_the_clock_it_was_given(

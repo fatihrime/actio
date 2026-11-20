@@ -1,8 +1,10 @@
 """Background jobs, against a real Postgres: deferred in the transaction of a change, and
-run by a worker in this process.
+run by a worker in this process. And what is left behind when a stop cuts a job off, or
+a worker dies with one in hand: looked after by a job that looks after the queue.
 
 A test stops a worker by cancelling it, which ends it the way the process's signal
-does. The real process, and its signal, are in `test_worker.py`.
+does. The real process, and its signal, are in `test_worker.py`. A worker that died is
+written into the queue's books as one that was killed leaves them (`queue_books`).
 """
 
 import asyncio
@@ -12,7 +14,9 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
+from functools import partial
 from types import FrameType
 from typing import Any
 
@@ -47,6 +51,51 @@ async def queue_of(database_url: str) -> list[tuple[str, str]]:
             "SELECT task_name, status::text FROM procrastinate_jobs ORDER BY id"
         )
         return [(name, status) for name, status in await cursor.fetchall()]
+
+
+async def attempts_in(database_url: str) -> list[tuple[str, str, int]]:
+    """The jobs in the queue, oldest first: each one's name, status, and how many times
+    it has been run again."""
+    async with await psycopg.AsyncConnection.connect(database_url) as connection:
+        cursor = await connection.execute(
+            "SELECT task_name, status::text, attempts FROM procrastinate_jobs ORDER BY id"
+        )
+        return [(name, status, attempts) for name, status, attempts in await cursor.fetchall()]
+
+
+async def someone_waits_for_a_lock(database_url: str) -> bool:
+    """Whether a connection to this database waits for a lock that another holds."""
+    async with await psycopg.AsyncConnection.connect(database_url) as connection:
+        cursor = await connection.execute(
+            "SELECT count(*) FROM pg_stat_activity"
+            " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+        )
+        row = await cursor.fetchone()
+    return row is not None and row[0] > 0
+
+
+class LooksAfter:
+    """A job that looks after the queue, as the worker's own does, and notes what each
+    look did.
+
+    `first` is awaited before it looks, while its worker runs: a worker takes the
+    workers that died off the list when it starts, so what a dead worker leaves is
+    written there."""
+
+    def __init__(
+        self,
+        *,
+        kept_for: timedelta = timedelta(days=7),
+        first: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self.kept_for = kept_for
+        self.first = first
+        self.looks: list[jobs.Upkeep] = []
+
+    async def __call__(self, queue: jobs.Queue) -> None:
+        if self.first is not None:
+            await self.first()
+        self.looks.append(await queue.look_after(kept_for=self.kept_for))
 
 
 async def until(done: Callable[[], bool], *, within: float = 30) -> None:
@@ -504,9 +553,65 @@ async def test_told_to_stop_a_worker_lets_the_job_in_hand_finish(
 
 
 @pytest.mark.anyio
-async def test_a_job_that_outlasts_the_grace_is_cut_off_and_kept_as_aborted(
+async def test_a_job_cut_off_at_a_stop_goes_back_into_the_queue_and_the_next_worker_runs_it(
     db: AsyncSession, migrated: str
 ) -> None:
+    """The first time it runs, the job outlasts the grace. The second time, it ends."""
+    started = asyncio.Event()
+    happened: list[str] = []
+
+    async def ends_the_second_time() -> None:
+        if happened:
+            happened.append("ran to its end")
+            return
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            happened.append("cut off")
+            raise
+
+    endless = jobs.Job("endless", ends_the_second_time)
+    await jobs.defer(db, "endless")
+    await db.commit()
+    first = asyncio.create_task(
+        jobs.work([endless], database_url=migrated, grace=0.5, on_signals=False)
+    )
+    try:
+        async with asyncio.timeout(10):
+            await started.wait()
+        told = time.monotonic()
+    finally:
+        first.cancel()  # which is the stop, and also leaves nothing running if it never started
+        await asyncio.wait([first], timeout=10)
+    took = time.monotonic() - told
+    after_the_stop = await attempts_in(migrated)
+    second = asyncio.create_task(jobs.work([endless], database_url=migrated, on_signals=False))
+    try:
+        await until(lambda: len(happened) == 2, within=15)
+    finally:
+        second.cancel()
+        await asyncio.wait([second], timeout=10)
+
+    assert first.cancelled()
+    assert 0.45 < took < 2.0
+    assert after_the_stop == [("endless", "todo", 1)]  # to be run again, by nobody yet
+    assert happened == ["cut off", "ran to its end"]
+    assert await queue_of(migrated) == []  # it succeeded, and was deleted
+
+
+@pytest.mark.parametrize(
+    ("run_again_before", "then"),
+    [(jobs.RUNS_AGAIN - 1, "todo"), (jobs.RUNS_AGAIN, "aborted")],
+    ids=["once more", "no more"],
+)
+@pytest.mark.anyio
+async def test_a_job_cut_off_at_a_stop_is_run_again_only_so_many_times(
+    run_again_before: int, then: str, db: AsyncSession, migrated: str, queue_books: Any
+) -> None:
+    """A job that takes its worker down each time would otherwise go round for ever.
+    Here it has already been run again: one time short of the limit, or as many times
+    as that. Cut off once more, it goes back into the queue, or stays as `aborted`."""
     started = asyncio.Event()
     cut_off: list[bool] = []
 
@@ -518,25 +623,55 @@ async def test_a_job_that_outlasts_the_grace_is_cut_off_and_kept_as_aborted(
             cut_off.append(True)
             raise
 
-    await jobs.defer(db, "endless")
-    await db.commit()
+    job_id = await queue_books.deferred(db, "endless")
+    await queue_books.already_run_again(job_id, run_again_before)
     worker = asyncio.create_task(
         jobs.work(
-            [jobs.Job("endless", never_ends)], database_url=migrated, grace=0.5, on_signals=False
+            [jobs.Job("endless", never_ends)], database_url=migrated, grace=0.2, on_signals=False
         )
     )
-    async with asyncio.timeout(10):
-        await started.wait()
-
-    told = time.monotonic()
-    worker.cancel()
-    await asyncio.wait([worker], timeout=10)
-    took = time.monotonic() - told
+    try:
+        async with asyncio.timeout(10):
+            await started.wait()
+    finally:
+        worker.cancel()  # which is the stop, and also leaves nothing running if it never started
+        await asyncio.wait([worker], timeout=10)
 
     assert worker.cancelled()
     assert cut_off == [True]
-    assert 0.45 < took < 2.0
-    assert await queue_of(migrated) == [("endless", "aborted")]
+    assert await queue_of(migrated) == [("endless", then)]
+
+
+@pytest.mark.anyio
+async def test_the_job_that_looks_after_the_queue_goes_back_into_it_too_when_a_stop_cuts_it_off(
+    db: AsyncSession, migrated: str
+) -> None:
+    """Every job a worker lists is asked the same, the one that is given the queue as
+    well: a look that a stop cut off is no job that failed."""
+    started = asyncio.Event()
+
+    async def never_ends(_queue: jobs.Queue) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    await jobs.defer(db, "look")
+    await db.commit()
+    worker = asyncio.create_task(
+        jobs.work(
+            [jobs.Job("look", never_ends, with_queue=True)],
+            database_url=migrated,
+            grace=0.2,
+            on_signals=False,
+        )
+    )
+    try:
+        async with asyncio.timeout(10):
+            await started.wait()
+    finally:
+        worker.cancel()
+        await asyncio.wait([worker], timeout=10)
+
+    assert await attempts_in(migrated) == [("look", "todo", 1)]
 
 
 @pytest.mark.anyio
@@ -708,3 +843,286 @@ async def test_a_worker_lives_through_its_database_going_away_for_a_moment(
     assert (1, 0) in beats
     assert (1, 1) not in beats
     assert (2, 1) in beats
+
+
+@pytest.mark.parametrize(
+    ("worker_gone", "run_again_before"),
+    [(False, 0), (True, 0), (False, jobs.RUNS_AGAIN - 1)],
+    ids=["its worker silent", "its worker off the list", "for the last time"],
+)
+@pytest.mark.anyio
+async def test_a_job_a_dead_worker_left_doing_is_run_again_once_the_queue_is_looked_after(
+    worker_gone: bool, run_again_before: int, db: AsyncSession, migrated: str, queue_books: Any
+) -> None:
+    """As a worker that was killed with the job in hand leaves it: `doing`, under a
+    worker that has been silent for a minute, or under none, once another worker has
+    taken that one off the list. The job that looks comes first in the queue, and the
+    worker that runs it then runs the job it put back."""
+    noted = Noted()
+    await queue_books.deferred(db, "look")
+    left = await queue_books.deferred(db, "note", n=1)
+    await queue_books.already_run_again(left, run_again_before)
+    looks = LooksAfter(first=partial(queue_books.left_doing, left, worker_gone=worker_gone))
+    worker = asyncio.create_task(
+        jobs.work(
+            [jobs.Job("note", noted), jobs.Job("look", looks, with_queue=True)],
+            database_url=migrated,
+            on_signals=False,
+        )
+    )
+    try:
+        await until(lambda: noted.runs == [{"n": 1}], within=15)
+    finally:
+        worker.cancel()
+        await asyncio.wait([worker], timeout=10)
+
+    assert looks.looks == [
+        jobs.Upkeep(run_again=1, given_up=(), dead_workers=0 if worker_gone else 1)
+    ]
+    assert await queue_of(migrated) == []  # both succeeded, and were deleted
+
+
+@pytest.mark.anyio
+async def test_a_job_a_dead_worker_left_after_it_was_run_again_for_the_last_time_ends_failed(
+    db: AsyncSession, migrated: str, queue_books: Any, work_through: Any
+) -> None:
+    noted = Noted()
+    await queue_books.deferred(db, "look")
+    left = await queue_books.deferred(db, "note", n=1)
+    await queue_books.already_run_again(left, jobs.RUNS_AGAIN)
+    looks = LooksAfter(first=partial(queue_books.left_doing, left))
+
+    await work_through(jobs.Job("note", noted), jobs.Job("look", looks, with_queue=True))
+
+    assert looks.looks == [
+        jobs.Upkeep(run_again=0, given_up=(jobs.LeftBehind("note", left),), dead_workers=1)
+    ]
+    assert noted.runs == []
+    assert await queue_of(migrated) == [("note", "failed")]
+
+
+@pytest.mark.anyio
+async def test_a_job_whose_worker_is_alive_is_left_alone_when_the_queue_is_looked_after(
+    db: AsyncSession, migrated: str, work_through: Any
+) -> None:
+    """Two workers on one database: one holds a job, and the other looks after the
+    queue meanwhile. The job runs once, to its end."""
+    started, let_go = asyncio.Event(), asyncio.Event()
+    runs: list[bool] = []
+
+    async def holds_on() -> None:
+        runs.append(True)
+        started.set()
+        await let_go.wait()
+
+    looks = LooksAfter()
+    await jobs.defer(db, "hold")
+    await db.commit()
+    holding = asyncio.create_task(
+        jobs.work([jobs.Job("hold", holds_on)], database_url=migrated, on_signals=False)
+    )
+    try:
+        async with asyncio.timeout(10):
+            await started.wait()
+        await jobs.defer(db, "look")
+        await db.commit()
+        await work_through(jobs.Job("look", looks, with_queue=True))
+        while_held = await queue_of(migrated)
+        let_go.set()
+        async with asyncio.timeout(10):
+            while await queue_of(migrated):  # noqa: ASYNC110 - the queue is in the database
+                await asyncio.sleep(0.05)
+    finally:
+        let_go.set()  # if the test has failed before: the job in hand ends, and so can its worker
+        holding.cancel()
+        await asyncio.wait([holding], timeout=10)
+
+    assert looks.looks == [jobs.Upkeep(run_again=0, given_up=(), dead_workers=0)]
+    assert while_held == [("hold", "doing")]
+    assert runs == [True]
+
+
+@pytest.mark.parametrize("its_worker", ["silent for a minute", "off the list"])
+@pytest.mark.anyio
+async def test_a_look_after_the_queue_neither_runs_itself_again_nor_takes_its_worker_for_dead(
+    its_worker: str, db: AsyncSession, migrated: str, work_through: Any
+) -> None:
+    """As after the machine slept: the worker that looks hasn't said for a minute that
+    it is alive, or another worker has taken it off the list meanwhile. Either way the
+    job that looks is `doing` under a worker Procrastinate takes for dead, or under
+    none, and Procrastinate finds it among the jobs that dead workers left."""
+
+    async def lose_its_worker() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated) as connection:
+            if its_worker == "silent for a minute":
+                await connection.execute(
+                    "UPDATE procrastinate_workers SET last_heartbeat = now() - interval '1 minute'"
+                )
+            else:
+                await connection.execute("DELETE FROM procrastinate_workers")
+
+    looks = LooksAfter(first=lose_its_worker)
+    await jobs.defer(db, "look")
+    await db.commit()
+
+    await work_through(jobs.Job("look", looks, with_queue=True))
+
+    assert looks.looks == [jobs.Upkeep(run_again=0, given_up=(), dead_workers=0)]
+    assert await queue_of(migrated) == []  # it ran once, succeeded, and was deleted
+
+
+@pytest.mark.parametrize(
+    "run_again_before", [0, jobs.RUNS_AGAIN], ids=["to be run again", "to be given up on"]
+)
+@pytest.mark.anyio
+async def test_a_job_that_ends_while_the_queue_is_looked_after_is_skipped_and_the_look_goes_on(
+    run_again_before: int, db: AsyncSession, migrated: str, queue_books: Any
+) -> None:
+    """Its worker was only late, and ends the job between the moment the look finds it
+    and the moment the look puts it back, or ends it. Here the test holds the job's
+    row, so that the look waits for it, then deletes the job, as its worker does with a
+    job that succeeded, and lets go. The other job, which a worker that did die left,
+    is run again all the same."""
+    noted = Noted()
+    await queue_books.deferred(db, "look")
+    ends = await queue_books.deferred(db, "note", n=1)
+    await queue_books.already_run_again(ends, run_again_before)
+    left = await queue_books.deferred(db, "note", n=2)
+
+    async with await psycopg.AsyncConnection.connect(migrated) as holder:
+
+        async def leave_both_and_hold_one() -> None:
+            await queue_books.left_doing(ends)
+            await queue_books.left_doing(left)
+            await holder.execute(
+                "SELECT id FROM procrastinate_jobs WHERE id = %s FOR UPDATE", [ends]
+            )
+
+        looks = LooksAfter(first=leave_both_and_hold_one)
+        worker = asyncio.create_task(
+            jobs.work(
+                [jobs.Job("note", noted), jobs.Job("look", looks, with_queue=True)],
+                database_url=migrated,
+                grace=1,
+                on_signals=False,
+            )
+        )
+        try:
+            async with asyncio.timeout(10):
+                # The look waits inside the database: nothing in the test can tell.
+                while not await someone_waits_for_a_lock(migrated):  # noqa: ASYNC110
+                    await asyncio.sleep(0.05)
+            await holder.execute("DELETE FROM procrastinate_jobs WHERE id = %s", [ends])
+            await holder.commit()
+            await until(lambda: noted.runs == [{"n": 2}], within=15)
+        finally:
+            worker.cancel()
+            await asyncio.wait([worker], timeout=10)
+
+    assert looks.looks == [jobs.Upkeep(run_again=1, given_up=(), dead_workers=2)]
+    assert await queue_of(migrated) == []
+
+
+@pytest.mark.anyio
+async def test_a_look_that_the_database_fails_is_a_job_that_failed_with_an_error_of_this_module(
+    db: AsyncSession, migrated: str, queue_books: Any
+) -> None:
+    """Not every refusal means that a job ended meanwhile. Here the job a dead worker
+    left is held by another transaction, and the worker's own connections give up on a
+    lock after a fifth of a second: putting the job back fails with the database's
+    error, not with Procrastinate's refusal. That fails the look, as a job, with an
+    error that names nothing of Procrastinate, and the job stays as it was left."""
+    await queue_books.deferred(db, "look")
+    left = await queue_books.deferred(db, "note", n=1)
+    raised: list[BaseException] = []
+    noted = Noted()
+
+    async with await psycopg.AsyncConnection.connect(migrated) as holder:
+
+        async def looks(queue: jobs.Queue) -> None:
+            # Under no worker: taking a dead worker off the list would wait for the same
+            # row, and fail the look by itself, whatever became of the job's own error.
+            await queue_books.left_doing(left, worker_gone=True)
+            await holder.execute(
+                "SELECT id FROM procrastinate_jobs WHERE id = %s FOR UPDATE", [left]
+            )
+            try:
+                await queue.look_after(kept_for=timedelta(days=7))
+            except Exception as error:
+                raised.append(error)
+                raise
+
+        impatient = psycopg.conninfo.make_conninfo(migrated, options="-c lock_timeout=200ms")
+        async with asyncio.timeout(20):
+            await jobs.work(
+                [jobs.Job("note", noted), jobs.Job("look", looks, with_queue=True)],
+                database_url=impatient,
+                until_idle=True,
+                on_signals=False,
+            )
+        await holder.rollback()
+
+    assert [type(error) for error in raised] == [jobs.UpkeepError]
+    assert "procrastinate" not in type(raised[0]).__module__
+    assert noted.runs == []
+    assert await queue_of(migrated) == [("look", "failed"), ("note", "doing")]
+
+
+def test_a_worker_that_is_stopping_is_not_taken_for_dead_before_its_grace_is_over() -> None:
+    """A worker that is told to stop says no more that it is alive, from that moment,
+    while the job in hand has its grace. Its last beat may be one beat old by then. If
+    the two together reached the time after which a worker counts as dead, another
+    worker's look could put that job back while it is still being finished."""
+    assert jobs.BEATS_EVERY_S + jobs.SHUTDOWN_GRACE_S < jobs.WORKER_DEAD_AFTER_S
+
+
+@pytest.mark.anyio
+async def test_a_look_after_the_queue_deletes_what_ended_without_succeeding_once_it_is_old(
+    db: AsyncSession, migrated: str, queue_books: Any, work_through: Any
+) -> None:
+    """Kept for a week here: what ended eight days ago goes, with its events, and what
+    ended six days ago stays, whether it failed, was cut off for the last time, or was
+    cancelled."""
+    old: list[int] = []
+    young: list[int] = []
+    for status in ("failed", "aborted", "cancelled"):
+        for ago, kind in ((timedelta(days=8), old), (timedelta(days=6), young)):
+            job_id = await queue_books.deferred(db, f"{status}, {ago.days} days ago")
+            await queue_books.ended(job_id, status, ago=ago)
+            kind.append(job_id)
+    looks = LooksAfter(kept_for=timedelta(days=7))
+    await jobs.defer(db, "look")
+    await db.commit()
+
+    await work_through(jobs.Job("look", looks, with_queue=True))
+
+    assert await queue_of(migrated) == [
+        ("failed, 6 days ago", "failed"),
+        ("aborted, 6 days ago", "aborted"),
+        ("cancelled, 6 days ago", "cancelled"),
+    ]
+    assert await queue_books.events_of(*old) == 0
+    assert all([await queue_books.events_of(job_id) > 0 for job_id in young])
+
+
+@pytest.mark.anyio
+async def test_a_look_after_the_queue_takes_the_dead_workers_off_the_list_and_no_live_one(
+    db: AsyncSession, queue_books: Any, work_through: Any
+) -> None:
+    """Two workers that have been silent for a minute, one that has just said that it
+    is alive, and the one that looks, which goes off the list itself when it stops."""
+    live: list[int] = []
+
+    async def two_dead_and_one_alive() -> None:
+        await queue_books.a_dead_worker()
+        await queue_books.a_dead_worker()
+        live.append(await queue_books.a_live_worker())
+
+    looks = LooksAfter(first=two_dead_and_one_alive)
+    await jobs.defer(db, "look")
+    await db.commit()
+
+    await work_through(jobs.Job("look", looks, with_queue=True))
+
+    assert looks.looks == [jobs.Upkeep(run_again=0, given_up=(), dead_workers=2)]
+    assert await queue_books.workers() == live

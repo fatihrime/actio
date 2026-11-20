@@ -6,13 +6,14 @@ A job is deferred by its name, in the transaction of the change it follows
 what its handler needs bound in. A job deferred under a name that isn't listed fails.
 
 This is a top layer, like `actio.api`: it reads the clock, and passes the time to the
-functions it calls as `now`.
+functions it calls as `now`. Except to the queue's own upkeep (`look_after_the_queue`),
+which goes by the database's clock, as the queue's books do.
 """
 
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 
@@ -45,6 +46,18 @@ minutes: rows of the ledger whose settle Valkey didn't answer, or whose process 
 before it settled. The process that writes a row tells the counters itself; this is for
 what it couldn't."""
 
+LOOK_AFTER_QUEUE = "look-after-the-queue"
+"""Looks after what the queue's workers leave behind, every ten minutes: runs again the
+jobs a worker that died left `doing`, takes such workers off the queue's list, and
+deletes the jobs that failed, were cut off or were cancelled once they are `KEPT_FOR`
+old. A job a stop cut off goes back into the queue by itself: this is for the worker
+that died before it could say anything."""
+
+KEPT_FOR = timedelta(days=7)
+"""How long a job that failed, was cut off for the last time or was cancelled stays in
+the queue, to be looked at: long enough for a long weekend. One that succeeded is
+deleted at once."""
+
 TRIES_AGAIN_AFTER_S = 10.0
 """How long the worker inside the API's process (`run_inside`) waits to try again, after
 it couldn't work or ended with an error.
@@ -64,6 +77,12 @@ def listed(resources: Resources, *, clock: Clock) -> list[jobs.Job]:
         jobs.Job(SWEEP, partial(sweep_expired, resources, clock), every="*/10 * * * *"),
         jobs.Job(GIVE_UP, partial(give_up_on_stale_turns, resources, clock), every="*/10 * * * *"),
         jobs.Job(COUNT_MISSED, partial(count_missed_usage, resources, clock), every="*/10 * * * *"),
+        jobs.Job(
+            LOOK_AFTER_QUEUE,
+            partial(look_after_the_queue, kept_for=KEPT_FOR),
+            every="*/10 * * * *",
+            with_queue=True,
+        ),
     ]
 
 
@@ -211,6 +230,29 @@ async def count_missed_usage(resources: Resources, clock: Clock) -> None:
         logger.warning(
             "usage the counters had missed: Valkey didn't answer, and what is left waits "
             "for the next run"
+        )
+
+
+async def look_after_the_queue(queue: jobs.Queue, *, kept_for: timedelta) -> None:
+    """See to what the queue's workers left behind, and delete the jobs that ended more
+    than `kept_for` ago without succeeding.
+
+    The queue keeps its books by the database's clock, so this takes none: it is the
+    one job that isn't given the time."""
+    upkeep = await queue.look_after(kept_for=kept_for)
+    if upkeep.run_again or upkeep.dead_workers:
+        logger.info(
+            "jobs left by workers that died, run again: %d, dead workers taken off the list: %d",
+            upkeep.run_again,
+            upkeep.dead_workers,
+        )
+    for job in upkeep.given_up:
+        logger.warning(
+            "a job left by a worker that died had been run again %d times already, and "
+            "ends as failed: %s[%d]",
+            jobs.RUNS_AGAIN,
+            job.name,
+            job.id,
         )
 
 
