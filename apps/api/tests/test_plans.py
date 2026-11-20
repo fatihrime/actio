@@ -91,6 +91,21 @@ def test_the_end_to_end_stack_has_a_limit_within_reach_and_a_model_that_costs_no
     assert loaded.plan_for(is_guest=True).answers_at_once == 2
 
 
+def test_the_end_to_end_stack_names_conversations_with_a_model_that_isnt_free() -> None:
+    """Its tests see a title arrive (apps/web/e2e/sidebar.spec.ts), from the fake's model
+    that says only what a question tells it to (test_catalog.py). A model that cost
+    nothing would be offered at a usage limit, beside the one usage.spec.ts expects."""
+    folder = ROOT / "deploy/e2e/config"
+    models = catalog.read_file(folder / "models.toml")
+
+    loaded = plans.load(folder / "plans.toml", models=models.models)
+
+    assert models.titles == "namer"
+    assert loaded.price_of("namer") == loaded.price_of("standard")
+    assert loaded.price_of("namer").input > 0
+    assert loaded.price_of("namer").output > 0
+
+
 @pytest.mark.parametrize("folder", ["config", "deploy/e2e/config"], ids=["make up", "make e2e"])
 def test_a_guest_has_two_answers_written_at_once_and_an_account_three(folder: str) -> None:
     offered = catalog.read_file(ROOT / folder / "models.toml").models

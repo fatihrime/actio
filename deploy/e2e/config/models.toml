@@ -1,4 +1,4 @@
-# The models the end-to-end test stack offers (`make e2e`): the fake, under two names.
+# The models the end-to-end test stack offers (`make e2e`): the fake, under three names.
 #
 # compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API and
 # the worker read this file in place of config/models.toml. "standard" is the same name
@@ -8,8 +8,12 @@
 
 default = "standard"
 
-# No `titles`: the end-to-end tests find a conversation in the list by its first
-# question's words, so no model names conversations here yet.
+# The fake's quiet model names conversations: it says nothing unless the question tells
+# it what to say, `[[say: Flat tyres]]`. So a conversation keeps its first question's
+# first line, by which the end-to-end tests find it in the list, unless a test asks for
+# a title. An echo would name every conversation alike: the request for a title quotes
+# the question after the same instructions each time.
+titles = "namer"
 
 [providers.fake]
 kind = "openai-compatible"
@@ -31,6 +35,16 @@ thinking = true
 title = "Local"
 provider = "fake"
 model = "fake-chat"
+context_window = 8192
+max_output_tokens = 2048
+thinking = false
+
+# The model that names conversations, above. It is on offer like the others, and priced
+# like "standard" (plans.toml): one that cost nothing would be offered at a limit.
+[models.namer]
+title = "Namer"
+provider = "fake"
+model = "fake-quiet"
 context_window = 8192
 max_output_tokens = 2048
 thinking = false

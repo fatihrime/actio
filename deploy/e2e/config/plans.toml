@@ -26,6 +26,13 @@ output = 1_000_000
 input = 0
 output = 0
 
+# The model that names conversations (models.toml). A title costs the account nothing
+# whatever its price, but a model that costs nothing is offered at a limit: so it is
+# priced like "standard", and only "local" is offered.
+[prices.namer]
+input = 1_000_000
+output = 1_000_000
+
 # Two answers at once, as people get: apps/web/e2e/turns.spec.ts asks for a third.
 [plans.guest]
 title = "Guest"

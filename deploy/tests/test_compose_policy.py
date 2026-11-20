@@ -495,15 +495,24 @@ def test_the_e2e_stack_is_the_real_one_with_a_fake_model_added(
 ) -> None:
     """Tests that pass on another stack than the one people run would prove little. The
     worker is the real one too, but for the folder its models file is read from, as the
-    API's is: see `test_the_e2e_stack_reads_its_own_files_where_the_api_and_worker_expect_them`."""
+    API's is (see `test_the_e2e_stack_reads_its_own_files_where_the_api_and_worker_expect_them`),
+    and that it waits for the fake (see
+    `test_the_fake_model_is_reached_by_the_api_and_the_worker_alone_and_has_no_way_out`)."""
     assert set(e2e["services"]) == set(stack["services"]) | {"fakellm"}
     for name in ("caddy", "web", "migrate", "postgres", "valkey"):
         assert e2e["services"][name] == stack["services"][name]
-    without_its_folder = [
+    without_its_folder_or_the_fake = [
         {key: value for key, value in svc["worker"].items() if key != "volumes"}
+        | {
+            "depends_on": {
+                name: waits
+                for name, waits in svc["worker"]["depends_on"].items()
+                if name != "fakellm"
+            }
+        }
         for svc in (e2e["services"], stack["services"])
     ]
-    assert without_its_folder[0] == without_its_folder[1]
+    assert without_its_folder_or_the_fake[0] == without_its_folder_or_the_fake[1]
 
 
 def test_the_e2e_stack_follows_the_same_rules(e2e: dict[str, Any]) -> None:
@@ -536,7 +545,8 @@ def test_the_fake_model_is_reached_by_the_api_and_the_worker_alone_and_has_no_wa
     e2e: dict[str, Any],
 ) -> None:
     """Here the models' network is internal, like `backend`: the worker, which reaches
-    out through it alone, reaches the fake and nothing else."""
+    out through it alone, reaches the fake and nothing else. Both wait for it: the API
+    answers with it, and the worker asks it for titles."""
     internal = {name for name, network in e2e["networks"].items() if network.get("internal")}
     its_networks = set(e2e["services"]["fakellm"]["networks"])
     sharing_one = {
@@ -547,6 +557,7 @@ def test_the_fake_model_is_reached_by_the_api_and_the_worker_alone_and_has_no_wa
     assert sharing_one == {"api", "worker", "fakellm"}
     assert set(e2e["services"]["worker"]["networks"]) <= internal
     assert e2e["services"]["api"]["depends_on"]["fakellm"]["condition"] == "service_healthy"
+    assert e2e["services"]["worker"]["depends_on"]["fakellm"]["condition"] == "service_healthy"
 
 
 def test_the_e2e_stack_reads_its_own_files_where_the_api_and_worker_expect_them(

@@ -25,6 +25,7 @@ from actio.catalog import (
     read_file,
 )
 from actio_fakellm.app import DEFAULT_MODELS as FAKE_MODELS
+from actio_fakellm.app import QUIET
 from actio_fakellm.app import create_app as create_fake_llm
 from actio_llm import Ollama, OpenAICompatible
 
@@ -133,8 +134,11 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
     assert standard.thinking is True  # so a test can ask for reasoning
     # Every answer is asked at once: the tests run side by side, on one fake.
     assert provider.at_once is None
-    # The tests find a conversation in the list by its first question's words.
-    assert file.titles is None
+    # The tests find a conversation in the list by its first question's words. The
+    # model that names conversations there is the fake's quiet one, which says nothing
+    # unless the question tells it what to: then they keep them.
+    assert file.titles is not None
+    assert file.models[file.titles].model == QUIET
 
 
 def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:

@@ -60,6 +60,87 @@ test("a conversation is listed once it was asked, and the one continued last is 
   await expect(chat.listed.first()).toHaveAttribute("aria-current", "page");
 });
 
+test("a conversation's title, written by a model after its first answer, shows by itself", async ({
+  chat,
+  page,
+}) => {
+  // The model that names conversations here is the fake's quiet one: it says what the
+  // question tells it to, and the answer's model leaves that out of its echo. The
+  // answer takes its time, so that the first line is seen while no title is asked for.
+  const question = "[[pace: 0.2]] [[say: Flat tyres]] How do I fix a puncture?";
+  await chat.open();
+  await chat.ask(question);
+
+  await expect(chat.stop).toBeVisible();
+  await expect(chat.listed).toHaveText([question]);
+  await expect(chat.answers).toHaveText("Echo: How do I fix a puncture?");
+  await chat.answered();
+
+  // Nothing is touched: the page looks again by itself while the server says that a
+  // title is on its way, for 15 seconds. A title takes about one here, but the worker
+  // writes one at a time, and the other tests' titles may be ahead of this one: so the
+  // test waits as long as the page looks.
+  await expect(chat.listed).toHaveText(["Flat tyres"], { timeout: 15_000 });
+  await expect(chat.listed.first()).toHaveAttribute("aria-current", "page");
+
+  await page.reload();
+  await expect(chat.listed).toHaveText(["Flat tyres"]);
+});
+
+test("a title that arrives while its conversation is being renamed leaves the box as it is, and Enter keeps what the box shows", async ({
+  chat,
+  page,
+}) => {
+  // In a real browser, because the page's own tests can't vouch for one: a box that
+  // nobody has typed in could follow the text it was given to start with, and a title
+  // that arrived would then stand in it, under the person's hands. It doesn't: the box
+  // is given its text once. The title takes three seconds here, since a question's
+  // directives reach the request for its title too: time enough to open the box first.
+  const question = "[[delay: 3]] [[say: Flat tyres]] How do I fix a puncture?";
+  await chat.open();
+  await chat.ask(question);
+  await expect(chat.answers).toHaveText("Echo: How do I fix a puncture?", {
+    timeout: 15_000,
+  });
+  await chat.answered();
+  // One of the page's own looks at the list will bring the model's title.
+  const arrival = page.waitForResponse(
+    async (response) =>
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === "/api/conversations" &&
+      (
+        (await response.json()) as { items: { title: string | null }[] }
+      ).items.some((item) => item.title === "Flat tyres"),
+    { timeout: 15_000 },
+  );
+
+  await chat.listed.first().hover();
+  await page.getByRole("button", { name: `Rename “${question}”` }).click();
+  const title = page.getByRole("textbox", { name: "Title" });
+  await expect(title).toHaveValue(question);
+  await arrival;
+  // The page has the answer by now, and has drawn what it made of it: twice over.
+  await page.evaluate(
+    () =>
+      new Promise<void>((drawn) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            drawn();
+          });
+        });
+      }),
+  );
+
+  await expect(title).toHaveValue(question);
+  await expect(title).toBeFocused();
+  await title.press("Enter");
+
+  // What the box showed is the person's title now: the model's doesn't come back.
+  await expect(chat.listed).toHaveText([question]);
+  await page.reload();
+  await expect(chat.listed).toHaveText([question]);
+});
+
 test("a conversation can be renamed, and keeps its place and its new name", async ({
   chat,
   page,
