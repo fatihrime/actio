@@ -110,3 +110,12 @@ A provider has one setting more, `answers_at_once`: how many answers its server 
 - **Left out, it is 1 for `ollama`, and there is no limit for `openai-compatible`,** which may batch many. A server started to write several at once is given its number.
 - **Like every setting, it is checked when the API starts:** 0, or a number below it, stops the start with one line.
 - `OfferedModel` carries its provider's gate, or none. The rest of Actio still sees only `Catalog` and `OfferedModel`.
+
+### 2026-11-20: the file names the model that writes titles
+
+The file has one more top-level key beside `default`: `titles`, the model that names a conversation after its first answer ([ADR 0025](0025-titles-written-by-a-model.md)).
+
+- **Checked like `default`:** a name that isn't one of the models stops the start, with one line.
+- **Left out, no model writes titles,** and a conversation keeps its first question's first line. The repository's file names `standard`; the end-to-end stack's leaves it out.
+- **The worker reads the file now too,** for that one job, and its container mounts the folder the API's does. A mistake in the file stops it as it stops the API; the migration job still never reads it.
+- `Catalog.titles` carries the name. The rest of Actio still sees only `Catalog` and `OfferedModel`.

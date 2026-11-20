@@ -93,3 +93,10 @@ Caddy's config now holds a limit that protects the API: the size of a request ([
 - **The first restart policy other than `no`.** The worker ends when it can't go on, and `restart: on-failure` starts it again then, and not when it ended well. So it stays down with the rest of the stack after Docker itself was restarted, since Docker stops it first and it ends well; one that Docker couldn't stop comes back alone ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md) has what was measured). It is the only one: a test fails if another container gets a policy.
 
 It is also given 25 seconds to stop, longer than its grace for the job in hand, and an init process in front of it, as the web app has.
+
+### 2026-11-20: a third network, the way out to the models' servers
+
+The worker asks a model for a conversation's title ([ADR 0025](0025-titles-written-by-a-model.md)), and the model's server is outside the stack: Ollama runs on the machine itself. From `backend` alone, which is internal, the worker couldn't reach it.
+
+- **`models`,** a network that isn't internal, joins the API and the worker. The worker stays off `edge` and publishes no port: nothing reaches it still, and `models` is its one way out. The data services stay on `backend` alone, and can't reach the internet.
+- **The rules above hold,** and the tests in `deploy/tests/` check them as for every container. The ones about the worker's networks changed on purpose; what changed, and why, is in [ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day.

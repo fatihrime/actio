@@ -494,3 +494,25 @@ Until now that did little harm: every job had a schedule, and its next run came 
 - **retries after an error.** A job that fails stays failed. Whoever adds them: they go into the same retry strategy, and `attempts` counts every time a job was run again, after a stop as after an error;
 - **a queueing lock,** which keeps a second job of a kind out while one waits;
 - **more than one job at a time.**
+
+### 2026-11-20: a fifth job, the first that a change defers, writes a conversation's title
+
+The worker has a fifth job, `write-title` (`titles.WRITE_TITLE`), and the first without a schedule: the first turn of a conversation that completes defers it, in the transaction that records the turn, once for that conversation, when the models file names a model for titles. "Context" named it among the work waiting for the worker. Why and how is in [ADR 0025](0025-titles-written-by-a-model.md).
+
+- **The first job deferred for one thing only,** as the revision above foresaw: once lost, it is lost. It is safe to repeat and to run beside itself, as that revision requires: a run that finds the conversation named already asks the model nothing, and the write asks again under the conversation's row lock.
+- **The first job that asks a model.** The worker has the models on offer now: `actio.worker.listed` takes the catalog, beside the resources.
+    - **`--role worker`** reads the models file before it starts, as the API does, so that a mistake in it is one line and status 2, and builds a catalog of its own beside its resources. A key's variable that isn't set, which shows only when the catalog is built, ends it the same way. It still doesn't read the plans file. The decision's "It doesn't read the models file or the plans file: no job needs them yet" no longer holds for the models file.
+    - **`--role all`** gives its worker the app's own catalog, so that a title waits at the same gate as the answers of that process. In the worker role the gate is the worker's own, and the API's doesn't know of a title being written ([ADR 0025](0025-titles-written-by-a-model.md) says what that costs).
+- **Its container reaches the models' servers.** Measured by the supervisor before the step, from the containers of the stack people run: from the worker's, on `backend` alone, which is internal, `host.docker.internal` didn't even resolve; from the API's, which is on `edge` too, Ollama answered. So, in `compose.yaml`:
+    - **a third network, `models`,** not internal, the way out to the models' servers, with the API and the worker on it. The worker stays off `edge` and publishes no port: nothing reaches it still, and `models` is its one way out;
+    - **the worker gets what the API has for the models,** through anchors the two share, so that they can't drift apart: the folder `./config`, mounted read-only where the image expects the models file; `ACTIO_OLLAMA_URL`, with the same default; and the line that teaches Linux the name `host.docker.internal`;
+    - **in the end-to-end stack `models` stays internal,** as it was: the fake needs no way out, so there the worker reaches the fake and nothing else. That worker reads the same folder as that API, `deploy/e2e/config`, whose models file names no model for titles.
+- **The containers' rules that changed, on purpose** (`deploy/tests/test_compose_policy.py`), as [ADR 0005](0005-container-images.md) asks of a rule that changes. The reason for each is the one above: a conversation's title is written by a model, and the model's server is outside the stack.
+    - "The worker cannot be reached or reach out" became: it can't be reached, with no port and off `edge`, and its one way out is `models`, which only the API and the worker are on, with `backend` internal as before;
+    - new: the worker reads the models file from the same read-only mount as the API, and finds Ollama where the API does, in both stacks;
+    - "the fake model is reached by the API alone" became "by the API and the worker alone";
+    - "the end-to-end stack's worker is the one of `compose.yaml`" became "the one of `compose.yaml` but for its config folder", as for the API.
+- **A mistake in the models file stops the worker too.** In the stack its container then ends with status 2, and Docker starts it again, and again, until the file is fixed (`restart: on-failure`). The API doesn't start at all meanwhile, so `make up` fails either way.
+- **What the log gets:** Procrastinate's lines for each title, as for every job, with the conversation's id as its argument, and a warning of the job's own when no title came. Never the question or the title.
+
+"Still not done" is as in the revision above: retries after an error, a queueing lock, more than one job at a time.

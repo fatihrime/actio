@@ -90,3 +90,16 @@ The job queue arrived, with Procrastinate ([ADR 0024](0024-background-jobs-in-a-
 - **A job is deferred through the connection of the session's own transaction.** SQLAlchemy hands Procrastinate the psycopg connection under it, and the job's row is written there. So the job commits with the change it follows, or not at all, and the API opens no second pool for the queue.
 - **The queue's tables are built by migration 0009,** from Procrastinate's own SQL, and no table model describes them. Alembic leaves them out when it compares the models with the database.
 - **The worker has a pool of its own,** from psycopg-pool, under LGPL-3.0-only like psycopg. It is used unmodified, and listed in the notices file beside psycopg.
+
+### 2026-11-20: a statement that fails is said without its values
+
+The engine is made with SQLAlchemy's `hide_parameters=True` (`actio.core.database`).
+
+- **Why:** SQLAlchemy ends a failed statement's error with the values it was sent. Here those are what people wrote: a question, an answer's parts, a title. An error's text reaches the log: a job that fails is logged by the queue with its trace, and so is a turn whose outcome couldn't be recorded.
+- **Why only now:** the review of the titles a model writes ([ADR 0025](0025-titles-written-by-a-model.md)) found it for a title whose write fails, and the same held already for an answer. Nothing had failed that way yet.
+- **What an error still says:** the statement, with its placeholders, and the database's own message. So does the log.
+- **What it doesn't cover:** the database's own message, which can quote a value. Measured the same day, with the one character that neither Postgres's text nor its JSON can hold, U+0000:
+    - **in a model's answer:** the answer couldn't be stored, so its turn stayed `running` until it was given up on, and the database's message quoted the answer up to that character (`CONTEXT:  JSON data, line 1: …`), which reached the log with the error's trace;
+    - **in a question's first line:** the request failed with an error of the driver's that quotes nothing, and was answered 500;
+    - **both are older than this revision,** and hiding the values doesn't mend them. Keeping that character out of what is stored is a step of its own, not done yet.
+- **The cost:** an error no longer shows the values that made a statement fail. Whoever needs them reads the row, or asks the database's own log.
