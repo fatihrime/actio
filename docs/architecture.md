@@ -25,6 +25,7 @@ flowchart LR
     api --> postgres
     api --> valkey
     worker --> postgres
+    worker --> valkey
     api -->|"host.docker.internal"| ollama
 ```
 
@@ -44,7 +45,7 @@ flowchart LR
     - a plan also says how many answers one account may have being written at once, and one more is answered 429, before anything is kept. An account reads along with an answer in six places at once at most: one more join is answered 429 too ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)).
 - **The worker** is the same application, run with `--role worker`, in a container of its own from the API's image. `make dev` runs it inside the API's process instead, with `--role all`, and it reloads with the API ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md)).
     - It runs background jobs from a queue in Postgres, Procrastinate's, one at a time. A job is deferred in the transaction of the change it follows, so the two are committed together, or not at all.
-    - A job can also have a schedule. Today there are two jobs, each every ten minutes. The worker deletes expired guests and sessions, which the API otherwise deletes only after a new guest arrives. And it gives up on answers that have been silent for a minute, because the process writing them died, keeping what each had saved, which the API otherwise does only when someone looks at their conversation. It never waits for a lock: an answer whose conversation someone is reading, or asking in, it leaves for its next run ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md)).
+    - A job can also have a schedule. Today there are three jobs, each every ten minutes. The worker deletes expired guests and sessions, which the API otherwise deletes only after a new guest arrives. It gives up on answers that have been silent for a minute, because the process writing them died, keeping what each had saved, which the API otherwise does only when someone looks at their conversation. It never waits for a lock: an answer whose conversation someone is reading, or asking in, it leaves for its next run ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md)). And it counts in Valkey what the API wrote to the usage ledger and couldn't count there, because Valkey didn't answer or the process died in between ([ADR 0020](adr/0020-usage-limits-on-turns.md)).
     - It starts after the migration, and checks for itself that the database is at the migration its code expects. When it isn't, the worker takes no job, and ends with one line that says so.
     - Told to stop, by SIGTERM or Ctrl-C, it lets the job in hand finish for up to 15 seconds, and ends well, whenever it is told. A second signal changes nothing. Docker gives it 25 seconds.
     - It lives through a restart of the database: it stops, starts again a second later, and waits for the database as when it first started. When it can't go on, as 30 seconds after it lost its database, it ends, and Docker starts it again.
@@ -63,8 +64,8 @@ flowchart LR
     - **The usage limits are the server's to count.** A meter under the list shows what the API said was used, read again after every turn. That a limit is reached, the page learns from a question being refused; it then says how long to wait, sends nothing meanwhile, and offers a model that costs nothing where there is one ([ADR 0021](adr/0021-usage-limits-in-the-page.md)).
     - **An answer is shown as the markdown it is written in:** headings, tables, coloured code, formulas and diagrams. It is a model's text, so it can do nothing else: HTML in it is shown as text, no picture is fetched, and a link opens only after you have seen its address ([ADR 0016](adr/0016-answers-shown-as-markdown.md)).
     - **Its types for the API are generated** from the API's recorded description, `apps/api/openapi.json`, so a change to the API that the page doesn't follow fails to compile.
-- **Postgres and Valkey** sit on an internal network. Only the API, the migration job and the worker can reach them, and they can't reach the internet. The API connects to both, the worker to Postgres.
-    - Postgres holds six tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, the turns in which a model answered, and the usage ledger: what each turn used, in rows that are only ever added. Beside them is the queue of background jobs, in Procrastinate's own tables.
+- **Postgres and Valkey** sit on an internal network. Only the API, the migration job and the worker can reach them, and they can't reach the internet. The API and the worker connect to both.
+    - Postgres holds seven tables: accounts, their sessions, conversations, the messages of each conversation, which form a tree, the turns in which a model answered, the usage ledger: what each turn used, in rows that are only ever added, and beside it a note for each of those rows that the usage counters haven't been told of yet. Beside them is the queue of background jobs, in Procrastinate's own tables.
     - Valkey holds what is counted fast: the rate limits' counters, one number per client address or email address that has made an attempt lately, under a hashed name; and each account's usage counters, with the credits held for answers being written.
     - Valkey also holds what each running turn streams, in a stream of its own, so that an answer can be read by more than one reader and from its beginning. A stream is deleted a minute after its turn has ended.
     - Valkey keeps nothing on disk. After a restart the rate limits start full, and an account's usage counters are rebuilt from the ledger the next time they are needed. An answer that was being written is finished unread, and stored as ever.
@@ -78,8 +79,8 @@ Inside the API, the code is split into layers that only import downward, and a t
 | `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Running turns apart from their requests, the stream of what each writes, and how many answers and readers one account has at once. Tables and rules, with no HTTP |
 | `actio.catalog` | The models on offer: reading `config/models.toml`, asking a model's server about it, and the gate where answers wait while that server is busy |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
-| `actio.usage` | Usage limits: reading `config/plans.toml`, holding credits before a request and counting them after it through the [engine](reference/quota.md), and the ledger |
-| `actio.core` | Settings, ids, the database connection and its migrations, the queue of background jobs, the file the worker touches while it works and the health check that reads it, the rate limiter, reading a file in `config/`, hearing the signal that stops the process |
+| `actio.usage` | Usage limits: reading `config/plans.toml`, holding credits before a request and counting them after it through the [engine](reference/quota.md), the ledger, and counting again what the counters missed |
+| `actio.core` | Settings, ids, the database connection and its migrations, the queue of background jobs, the file the worker touches while it works and the health check that reads it, the rate limiter, what a process holds open while it runs (its database pool, its Valkey client and the usage limits' engine on it, built once for the API and the worker), reading a file in `config/`, hearing the signal that stops the process |
 
 | Path | Goes to |
 |---|---|
