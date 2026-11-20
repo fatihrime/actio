@@ -448,3 +448,7 @@ A test starts `actio --role all --reload` for real, and sends its server a SIGTE
 
 - **what a process wrote after its last beat is lost,** and a turn that dies before its first beat keeps nothing;
 - **a hold that ran out still shows as held** in `GET /api/usage` until the account's next question, as the revision above says.
+
+### 2026-11-20: a hold that ran out is no longer shown as held
+
+"A hold that ran out still shows as held in `GET /api/usage` until the account's next question", still not done in the two revisions above, is done where the usage is read: reading it first gives back the holds that have run out ([ADR 0020](0020-usage-limits-on-turns.md), revision "the counters catch up"). Nothing changed for it in how a turn runs, is given up on, or keeps its draft.

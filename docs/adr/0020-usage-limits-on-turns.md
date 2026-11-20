@@ -255,3 +255,83 @@ Not changed: the order of ledger and counters, what a refusal says, and a hold t
     | The turn | Costs |
     |---|---|
     | Given up on, because its process died | Nothing. What it had written by its last beat is kept |
+
+### 2026-11-20: the counters catch up
+
+Two things were still wrong between the ledger and the counters, and both were named as open here:
+
+- **"Nothing repeats a count that Valkey missed",** under "Not done yet", which gave it to the job that goes through stale turns. That job came without it, as the first revision of 2026-11-19 says.
+- **"A hold that ran out still shows as `reserved` in `GET /api/usage` until the account's next question",** found on the way in the revision of 2026-11-16, and said again at the end of the first revision of 2026-11-19.
+
+Both are done, and nothing in the engine changed for them ([ADR 0006](0006-usage-limits-engine.md)).
+
+**A hold that ran out is no longer shown as held** (`UsageLimits.status`):
+
+- **Reading the usage gives back the account's holds that have run out,** before the windows are read, as a question does first: the engine's `collect_expired`, which nothing called until now. Up to 32 a read; the next read takes the next ones.
+- **A Valkey that doesn't answer** is still a 503.
+- **A hold that is renewed** is shown as held until its answer ends, as before.
+
+**What a settle couldn't tell the counters is told again.** Until now, when the counters couldn't be told, the turn was recorded and its answer delivered, the log said so, and the usage reached the counters only at their next rebuild: for counters that survive, maybe never. The same when the process died between the ledger's commit and the settle.
+
+Options considered:
+
+1. **Go back over the ledger's last hour at every run,** and settle each row again. Simple. Every row is repeated many times, and when Valkey is away for longer than the look-back, the rows from the start of that time are never repeated.
+2. **Keep a mark of how far the ledger has been repeated,** in Valkey or in Postgres. Every row is repeated once, by a job that then has to keep up with every turn. And it rests on rows appearing in the order of their times: a row whose transaction commits late lands behind the mark, and is never looked at.
+3. **Note only the settles that failed.** Nothing extra for a turn that goes well. But the note has to be written at the very moment something is failing, and nothing notes a process that died between the ledger's commit and the settle.
+4. **A row beside each ledger row, written with it, removed once the counters were told.** What has to happen after a failure is arranged before it. It is exact: no window of time to choose, no order of rows to rely on. The job finds only what was really left over. The price is one insert and one delete for every turn, and one more table.
+
+The fourth is chosen, a transactional outbox: whatever happens after the ledger's commit, the note of what is left to do was committed with it.
+
+**The note** (`usage_uncounted`, `Uncounted` in `actio.usage.models`, migration 0011):
+
+- **A row for each row of the ledger that hasn't reached the counters,** as far as the database knows. It holds only the ledger row's id, as its key and as a foreign key: who used what stays in the ledger alone, so the two can't disagree.
+- **Written with the ledger's row** (`ledger.add`), in the transaction that records how the turn ended. Every row of the ledger has one, a free model's too.
+- **Taken away once the counters have answered.** `UsageLimits.settle` now says whether they were told: `None` when Valkey didn't answer, otherwise the warnings, possibly none. Any answer counts as told, one that changed nothing too: after `unknown`, `settled` or `released` there is nothing a repeat could add. After such a settle the turn takes its note away (`UsageLimits.counted`), in a short transaction of its own.
+- **That transaction can't fail the turn.** When it can't be written, the log says so, as a warning with the turn's id, and the turn ends as ever: recorded, counted, and with the warnings for the shares of a window it passed. The job then settles it again, is answered `settled`, and takes the note away.
+- **After a settle that didn't reach the counters,** the API does nothing more: the note stays, and the settle's own warning in the log is as it was.
+- **Unlike the ledger's, these rows are deleted,** and no trigger guards them. A plain `TRUNCATE usage_ledger` is now refused for the foreign key, before the trigger is asked; with `CASCADE`, the trigger refuses it as before.
+- **The rows the ledger held before the migration got none.** Whatever they missed, their next rebuild counts, as before.
+
+**The job** (`count-missed-usage`, `worker.COUNT_MISSED`, running `actio.usage.missed.count_missed`):
+
+- **Every ten minutes,** like the worker's other two. It takes the notes whose ledger rows were written a minute ago or longer (`COUNTED_WITHIN`), oldest first, 100 at most (`BATCH`), by a statement of its own that holds only the notes, and skips those another transaction holds. It settles each row again, in that order, at the job's time, then takes away the notes of the rows the counters answered, in the next statement ([ADR 0011](0011-rate-limits-as-token-buckets-in-valkey.md), revision of 2026-11-19). One batch a run.
+- **The minute is left to the process that wrote the row.** Its settle has been answered, or has failed, a few seconds after the ledger's commit: the Valkey client makes no retries, and gives up after two seconds. A job that settled first would do no harm to the count, but the turn's own settle would then be answered "not applied", and the warning it says in its stream would be lost.
+- **What it does with each answer:**
+
+    | The engine answers | Because | The job |
+    |---|---|---|
+    | Applied | The counters still held the request, or its hold had run out | It is counted now, and nothing is held for it. The note goes |
+    | `settled`, not applied | It was counted already: only the note was left | Nothing is counted twice. The note goes |
+    | `unknown` or `released`, not applied | The counters were lost and rebuilt since, or forgot the request, or it had been released | Nothing a repeat could add. The next rebuild counts it while its window is open. The note goes |
+    | Nothing: Valkey didn't answer | | It stops at that row: each further try would wait out its timeout. That row and the rest of the batch keep their notes, for the next run |
+    | Nothing: the engine refuses the row before it asks Valkey | More credits than the engine counts exactly, which takes a model's server that reports billions of tokens for one answer | Nothing a repeat could add: the engine would refuse at every run. The note goes, and the log names the row, as a warning |
+
+- **One row never stops the rows behind it.** The oldest comes first in every batch, so a run that failed at a row the engine refuses would fail there every ten minutes, and count nothing that came after. Nobody who uses the API can bring such a row about: the ids and the credits the engine is given are the server's own.
+
+- **It says in the log what it did,** at the info level, and nothing when it did nothing: `usage the counters had missed, counted now: 2, counted before: 1, left to their next rebuild: 0`. When Valkey didn't answer, one warning, that what is left waits for the next run. A database error fails the job, as for the other two, and the next run tries again.
+- **"The worker has no usage-limits engine",** in the first revision of 2026-11-19, no longer holds. The API and the worker take the engine from the process's resources (`Resources.quota`), built once beside the rate limiter, under the same prefix: the worker settles under the keys the API counts under. A test has the app miss a settle, the worker's job count it again on resources of its own, and the app read the usage.
+
+**What it costs:**
+
+- **one more insert and one more delete for every turn that is counted,** the delete with a transaction of its own;
+- **a count that was missed reaches the counters up to ten minutes and `COUNTED_WITHIN` later.** Until then, once its hold has run out, the account has more room than it should;
+- **a share of a window (50, 75, 90 percent) that a repeated count passes is marked as said, and nobody was told:** the turn's stream is over. The page's meter shows the usage all the same;
+- **`GET /api/usage` now writes to Valkey:** giving back the holds that ran out also pushes back when the account's keys expire, which reading alone didn't.
+
+**Still open:**
+
+- **a request that was running while the counters were lost and rebuilt stays uncounted until their next rebuild,** in the account's favour and in the ledger ([ADR 0006](0006-usage-limits-engine.md)): a repeat is answered `unknown`. So does a row whose request the counters forgot, 48 hours after its hold was given back, and one that was released although its ledger row had been committed;
+- **the nightly comparison of the two stores,** which will say how far apart they are.
+
+**Measured,** on a MacBook Pro (M1 Pro, 16 GB), 2026-11-20:
+
+- **What the note costs a turn that goes well,** against a Postgres and a Valkey from the pinned images, the median of 300: the transaction that writes the ledger's row took 1.98 ms alone, and 2.39 ms with its note. Taking the note away, in a transaction of its own, took 2.00 ms. So about 2.4 ms more at the end of a turn that is counted, beside a settle of 0.46 ms, and an answer that takes seconds to write.
+- **`GET /api/usage`** through the proxy, the median of 20: 5.0 ms, and 4.9 ms before the change, read the same day.
+- **The job's batch,** beside a ledger of 500,000 rows, with three notes: 0.04 ms. Postgres reads the notes and looks each one's ledger row up by its key, whether the notes' table was ever analysed or not. With no note it reads nothing of the ledger.
+- **In containers,** the stack of the end-to-end tests, whose model writes a word a second when asked. A guest asked a question with an answer of 21 words, and four seconds in, Valkey's container was paused: it kept what it held, and answered nothing.
+    - **The answer was written to its end and recorded,** for 68 credits, unread. The log said that what it streams couldn't be kept, that its hold couldn't be renewed, and that its row is in the ledger and couldn't be settled. The row's note stayed.
+    - **Valkey was resumed** 33 seconds after it was paused. `GET /api/usage` said 0 used and 2,200 held, the most the answer could have cost. A minute after the question, with nothing asked in between, it said 0 used and 0 held: the hold had run out, and reading gave it back.
+    - **At the worker's next ten-minute mark,** five and a half minutes after the answer ended, its log said `usage the counters had missed, counted now: 1, counted before: 0, left to their next rebuild: 0`. `GET /api/usage` then said 68 used and nothing held, and no note was left.
+- **After the 33 end-to-end tests** that stack's ledger had 69 rows, and not one note was left.
+- **Forty-four mistakes were planted,** one at a time, in a scratch copy of the tree: in the read that gives back the holds; in the note (left out, taken away although the counters weren't told, never taken away, its failure not caught or not said, a settle that Valkey didn't answer taken for one without warnings); in the job (the minute and its boundary, the order, the batch, the locks, going on after Valkey didn't answer, which notes it takes away, what it reports, a row the engine refuses); in the worker (the job not listed, without a schedule, never committed, under other keys than the API's, what it says); and in the migration. Each fails a test. Two failed nothing at first, and got one: the order of the job's rows, which the test's own rows happened to share, and a job that holds the ledger's rows as well as the notes.
+- **Without the tie between the two tables in the model,** the relationship that `Uncounted` has to its ledger row, SQLAlchemy writes the note before the row it points at, and the database refuses it: tried once, in the scratch copy. A foreign key alone doesn't order the two.

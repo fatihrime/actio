@@ -86,3 +86,12 @@ Still to come, as above: the nightly comparison of the two stores, and a job tha
 "A job that settles what a process that died left held", still to come in the revision above, turned out not to be needed. The hold on a turn's credits lasts a minute, and is renewed while the turn is written ([ADR 0020](0020-usage-limits-on-turns.md), revision of 2026-11-16). So it runs out by itself a minute after its process died. The worker gives up on the turn itself, and gives nothing back ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "the worker gives up on turns nobody looks at").
 
 Still to come: the nightly comparison of the two stores, and repeating a count that Valkey missed.
+
+### 2026-11-20: a count that Valkey missed is repeated
+
+"Repeating a count that Valkey missed", still to come in the revision above, is done ([ADR 0020](0020-usage-limits-on-turns.md), revision "the counters catch up"). Each row of the ledger is written with a note that the counters haven't been told of it yet, which goes once they have. What is left, the worker settles again every ten minutes.
+
+- **Nothing in the engine changed for it.** A settle that is repeated is answered `settled`, not applied, so it never counts twice. One whose hold ran out is still charged, as the revision of 2026-11-10 decided: that is what lets a repeat count what was missed.
+- **`collect_expired` is in use:** reading an account's usage first gives back the holds that ran out, so that they aren't shown as held.
+
+Still to come: the nightly comparison of the two stores.

@@ -403,3 +403,13 @@ The job that gives up on stale turns now keeps each turn's draft as its answer (
 - **It writes turn by turn,** where it wrote a batch in one statement: each kept answer is a message, written as any answer is. A run over 500 turns took 1.7 seconds, where it took 16 ms.
 
 It still needs the database alone.
+
+### 2026-11-20: a third job, which counts what the usage counters missed
+
+The worker has a third job, `count-missed-usage` (`worker.COUNT_MISSED`). Every ten minutes it settles again, in Valkey, the usage that the API wrote to the ledger and couldn't tell the counters of, because Valkey didn't answer or the process died in between. Why and how is in [ADR 0020](0020-usage-limits-on-turns.md), revision "the counters catch up".
+
+- **The first job that uses Valkey.** Until now the worker's container was told where Valkey is only because the settings require it (revision "the worker's container"), and no job of its used Valkey (revision of the second job). This one does. It reaches Valkey through the process's resources, which build the usage limits' engine once for every role (`Resources.quota`), so that the worker counts under the API's keys.
+- **The containers didn't change.** The worker is still not ordered after Valkey in `compose.yaml`: a run that finds Valkey away stops at its first row, and leaves the rest for the next run, without failing. A run that finds nothing to count doesn't ask Valkey at all.
+- **What it takes:** a batch of 100 at most, oldest first, by a statement of its own that holds only its own rows, skipping those another transaction holds, as the other two do. It never waits for a row's lock.
+- **What it needs:** the database and the engine. It still reads neither the models file nor the plans file.
+- **What the log gets:** Procrastinate's three lines for each run, as for the other two: 432 more a day. And the job's own line, only when it counted something, and one warning when Valkey didn't answer.
