@@ -1,14 +1,22 @@
 // The list of conversations, driven as a person would: through the whole page,
 // against the fake API (tests/fake-api.ts).
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { TITLE_LOOK_MS } from "@/lib/chat/list";
 import {
   answer,
   conversation,
   fakeApi,
   heldAfter,
   json,
+  later,
   listed,
   problem,
   question,
@@ -60,6 +68,16 @@ function titles(): (string | null)[] {
   return within(theList())
     .queryAllByRole("link")
     .map((link) => link.textContent);
+}
+
+/** Let `ms` milliseconds pass, with the page left to do what it does meanwhile. */
+async function idle(ms: number): Promise<void> {
+  await act(
+    () =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+      }),
+  );
 }
 
 /** A window too narrow for the list to stand beside the chat. */
@@ -342,6 +360,271 @@ describe("a long list", () => {
       "Flat tyres",
       "Why is the sky blue?",
       "Bread without yeast",
+    ]);
+  });
+});
+
+// These tests wait in real time, and don't set the clock (`clockAt`): the page's looks
+// run on SWR's own timers, which setting the clock doesn't move, and what is measured
+// here is how far apart the looks are, by `performance.now()`, which it doesn't set
+// either.
+describe("a title that is on its way", () => {
+  const FIRST_LINE = "How do I fix a flat tyre?";
+  /** How long a model takes to write a title here, from when the server first said
+   * that one is on its way: about what a model takes. */
+  const WRITTEN_MS = 500;
+  const SOON = { timeout: 3 * TITLE_LOOK_MS };
+
+  /** Two conversations, each named after its first line, with a title on its way. */
+  const beforeTitles = () =>
+    json(
+      200,
+      listed([
+        summary(TYRES, FIRST_LINE, { title_pending: true }),
+        summary(BREAD, "Can I bake bread without yeast?", {
+          title_pending: true,
+        }),
+      ]),
+    );
+  /** The same two, named by a model. */
+  const withTitles = () =>
+    json(200, listed([summary(TYRES, "Flat tyres"), bread]));
+
+  it("shows by itself, the page looking about every second while it is on its way", async () => {
+    const api = fakeApi();
+    // When each request for the list came, and whether the title is written by then.
+    const came: number[] = [];
+    let written = false;
+    api
+      .on(TURNS, () => streamed("answer.sse"))
+      .on(LIST, () => {
+        came.push(performance.now());
+        const [asked] = api.to(TURNS).map((call) => conversationOf(call));
+        if (asked === undefined) {
+          return json(200, listed([]));
+        }
+        return written
+          ? json(200, listed([summary(asked, "Blue light, scattered")]))
+          : json(200, listed([summary(asked, "Sky", { title_pending: true })]));
+      });
+    const user = open();
+    await screen.findByText(/No conversations yet/);
+
+    await ask(user, "Why is the sky blue?");
+    await screen.findByRole("link", { name: "Sky" });
+    // The answer has ended, and the turn has read the list for the last time: from
+    // here on nothing is done, and every request for the list is a look of the page's.
+    await screen.findByRole("button", { name: "Send" });
+    const turns = came.length;
+    await waitFor(
+      () => {
+        expect(came.length).toBeGreaterThanOrEqual(turns + 3);
+      },
+      { timeout: 6 * TITLE_LOOK_MS },
+    );
+    written = true;
+    await screen.findByRole("link", { name: "Blue light, scattered" }, SOON);
+
+    // About a second from one look to the next, and not two: SWR by itself would
+    // leave out every other look. Between two looks, not from the turn's own
+    // readings: when those come is the answer's business.
+    const apart = [1, 2].map(
+      (look) => (came[turns + look] ?? 0) - (came[turns + look - 1] ?? 0),
+    );
+    expect(TITLE_LOOK_MS).toBe(1000);
+    for (const gap of apart) {
+      expect(gap).toBeGreaterThanOrEqual(0.9 * TITLE_LOOK_MS);
+      expect(gap).toBeLessThan(1.8 * TITLE_LOOK_MS);
+    }
+  }, 15_000);
+
+  it("is no longer looked for once the server stops saying that it is on its way", async () => {
+    // A title the model didn't give: the server stops saying it is on its way, and
+    // the conversation keeps its first line.
+    const api = fakeApi();
+    let first: number | null = null;
+    let over = false;
+    api
+      .on(TURNS, () => streamed("answer.sse"))
+      .on(LIST, () => {
+        const [asked] = api.to(TURNS).map((call) => conversationOf(call));
+        if (asked === undefined) {
+          return json(200, listed([]));
+        }
+        const now = performance.now();
+        first ??= now;
+        over = now - first >= WRITTEN_MS;
+        const pending = { title_pending: !over };
+        return json(200, listed([summary(asked, "Sky", pending)]));
+      });
+    const user = open();
+    await screen.findByText(/No conversations yet/);
+    await ask(user, "Why is the sky blue?");
+    await waitFor(() => {
+      expect(over).toBe(true);
+    }, SOON);
+
+    // From here on, a request for the list has no answer, and fails the test.
+    api.on(LIST);
+    await idle(1.5 * TITLE_LOOK_MS);
+
+    expect(api.unexpected).toEqual([]);
+    expect(screen.getByRole("link", { name: "Sky" })).toBeInTheDocument();
+  });
+
+  it("isn't looked for when none is", async () => {
+    const api = fakeApi().on(LIST, () => json(200, listed(THREE)));
+    open();
+    await screen.findByRole("link", { name: "Flat tyres" });
+
+    // From here on, a request for the list has no answer, and fails the test.
+    api.on(LIST);
+    await idle(1.5 * TITLE_LOOK_MS);
+
+    expect(api.unexpected).toEqual([]);
+  });
+
+  it("isn't looked for further down the list than a look reads", async () => {
+    // A look reads the first page alone. A title on its way in a later page would
+    // never be read again by one, so looking for it would never end.
+    const api = fakeApi().on(LIST, (call) =>
+      call.query.cursor === undefined
+        ? json(200, listed([tyres, sky], "after-sky"))
+        : json(
+            200,
+            listed([
+              summary(BREAD, "Can I bake bread without yeast?", {
+                title_pending: true,
+              }),
+            ]),
+          ),
+    );
+    const user = open();
+    await user.click(
+      await screen.findByRole("button", { name: "Show older conversations" }),
+    );
+    await screen.findByRole("link", {
+      name: "Can I bake bread without yeast?",
+    });
+
+    // From here on, a request for the list has no answer, and fails the test.
+    api.on(LIST);
+    await idle(1.5 * TITLE_LOOK_MS);
+
+    expect(api.unexpected).toEqual([]);
+  });
+
+  it("is looked for in the first page alone, however many were read", async () => {
+    let written = false;
+    const api = fakeApi().on(LIST, (call) => {
+      if (call.query.cursor !== undefined) {
+        return json(200, listed([bread]));
+      }
+      const tyresNow = written
+        ? summary(TYRES, "Flat tyres")
+        : summary(TYRES, FIRST_LINE, { title_pending: true });
+      return json(200, listed([tyresNow, sky], "after-sky"));
+    });
+    const user = open();
+    await user.click(
+      await screen.findByRole("button", { name: "Show older conversations" }),
+    );
+    await screen.findByRole("link", { name: "Bread without yeast" });
+    const before = api.to(LIST).length;
+    written = true;
+
+    await screen.findByRole("link", { name: "Flat tyres" }, SOON);
+
+    expect(
+      api
+        .to(LIST)
+        .slice(before)
+        .map((call) => call.query),
+    ).toEqual([{}]);
+    expect(titles()).toEqual([
+      "Flat tyres",
+      "Why is the sky blue?",
+      "Bread without yeast",
+    ]);
+  });
+
+  it("leaves what was typed in a rename's box, and the keyboard there", async () => {
+    const arrival = later(withTitles);
+    fakeApi().on(LIST, beforeTitles, arrival.answer);
+    const user = open();
+    await user.click(
+      await screen.findByRole("button", { name: `Rename “${FIRST_LINE}”` }),
+    );
+    const box = screen.getByRole("textbox", { name: "Title" });
+    await user.keyboard("Punctures"); // over the title, which is selected
+
+    arrival.release();
+    // The other conversation shows that the titles have arrived.
+    await screen.findByRole("link", { name: "Bread without yeast" }, SOON);
+
+    expect(box).toHaveValue("Punctures");
+    expect(box).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(
+      screen.getByRole("button", { name: "Rename “Flat tyres”" }),
+    ).toHaveFocus();
+  });
+
+  it("leaves a rename's box as it was opened, for what is typed next", async () => {
+    // The box is given its text once, when it opens, and that text is then its own:
+    // a title that arrives doesn't change it, though nobody has typed in it yet. The
+    // row needs no code for that, and the end-to-end tests hold the same in a real
+    // browser (`e2e/sidebar.spec.ts`).
+    const arrival = later(withTitles);
+    const api = fakeApi()
+      .on(LIST, beforeTitles, arrival.answer)
+      .on(RENAME, (call) =>
+        json(200, summary(conversationOf(call), "Punctures")),
+      );
+    const user = open();
+    await user.click(
+      await screen.findByRole("button", { name: `Rename “${FIRST_LINE}”` }),
+    );
+    const box = screen.getByRole("textbox", { name: "Title" });
+
+    arrival.release();
+    await screen.findByRole("link", { name: "Bread without yeast" }, SOON);
+
+    expect(box).toHaveValue(FIRST_LINE);
+    expect(box).toHaveFocus();
+    await user.keyboard("Punctures{Enter}"); // over the title, still selected
+    expect(
+      await screen.findByRole("link", { name: "Punctures" }),
+    ).toBeInTheDocument();
+    expect(api.to(RENAME)[0]?.body).toEqual({ title: "Punctures" });
+  });
+
+  it("takes Enter on a rename's box as it was opened for a rename, once another title arrived", async () => {
+    // The box still shows the first line, and the conversation is named by a model by
+    // now. What the person confirms is what the box shows: their title, not a title
+    // they never saw there.
+    const arrival = later(withTitles);
+    const api = fakeApi()
+      .on(LIST, beforeTitles, arrival.answer)
+      .on(RENAME, (call) =>
+        json(200, summary(conversationOf(call), FIRST_LINE)),
+      );
+    const user = open();
+    await user.click(
+      await screen.findByRole("button", { name: `Rename “${FIRST_LINE}”` }),
+    );
+    const box = screen.getByRole("textbox", { name: "Title" });
+
+    arrival.release();
+    await screen.findByRole("link", { name: "Bread without yeast" }, SOON);
+    expect(box).toHaveValue(FIRST_LINE);
+    await user.keyboard("{Enter}");
+
+    expect(
+      await screen.findByRole("link", { name: FIRST_LINE }),
+    ).toBeInTheDocument();
+    expect(api.to(RENAME).map((call) => call.body)).toEqual([
+      { title: FIRST_LINE },
     ]);
   });
 });

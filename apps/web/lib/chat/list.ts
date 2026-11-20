@@ -3,7 +3,9 @@
 //
 // The server is the truth about the list, as about a conversation. After a turn the
 // list is read again, instead of being rearranged here: the server decides the order.
-// A rename or a delete changes what is held only once the server has done it.
+// A rename or a delete changes what is held only once the server has done it. While the
+// server says that a conversation's title is on its way, the list is read again every
+// second, until it no longer says so.
 import { useCallback, useMemo } from "react";
 import useSWRInfinite from "swr/infinite";
 
@@ -24,6 +26,10 @@ type Page = readonly [
   holder: string,
   after: string | null,
 ];
+
+/** How often the list is read again while the server says that a conversation's title
+ * is on its way (`title_pending`). A model writes one in about half a second. */
+export const TITLE_LOOK_MS = 1000;
 
 export interface Conversations {
   /** The conversations read so far. Nothing until the first page has arrived. */
@@ -65,9 +71,25 @@ export function useConversations(holder: string | null): Conversations {
       return after === null ? null : ["conversations", holder, after];
     },
     ([, , after]: Page) => listConversations(after),
-    // A failure is shown, with a button. The list is also read again whenever the
-    // window is returned to, which is retry enough.
-    { shouldRetryOnError: false },
+    {
+      // A failure is shown, with a button. The list is also read again whenever the
+      // window is returned to, which is retry enough.
+      shouldRetryOnError: false,
+      // While a title is on its way, by what the server said last of the first page:
+      // a conversation that was just answered is there, and a look that nobody asked
+      // for reads the first page alone. A title on its way further down would never be
+      // read again by a look, and the looks would never end. Written here, so that it
+      // is a new function at every render: SWR starts its looks again only when this
+      // option changes, and one made once would never start them after the first
+      // reading.
+      refreshInterval: (pages: ConversationList[] | undefined) =>
+        pages?.[0]?.items.some((item) => item.title_pending)
+          ? TITLE_LOOK_MS
+          : 0,
+      // SWR leaves out a look that comes within this long of the last answer: two
+      // seconds by its own measure, which would make every other look none.
+      dedupingInterval: TITLE_LOOK_MS / 2,
+    },
   );
 
   const items = useMemo(() => {
