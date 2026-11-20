@@ -1,10 +1,13 @@
 """Background jobs, against a real Postgres: deferred in the transaction of a change, and
-run by a worker in this process. And what is left behind when a stop cuts a job off, or
-a worker dies with one in hand: looked after by a job that looks after the queue.
+run by a worker in this process. A job run again after an error its listing names. And
+what is left behind when a stop cuts a job off, or a worker dies with one in hand:
+looked after by a job that looks after the queue.
 
 A test stops a worker by cancelling it, which ends it the way the process's signal
 does. The real process, and its signal, are in `test_worker.py`. A worker that died is
-written into the queue's books as one that was killed leaves them (`queue_books`).
+written into the queue's books as one that was killed leaves them (`queue_books`). A job
+put back after an error waits minutes, and a test ends its wait through the database
+(`queue_books.wait_is_over`): none waits for one.
 """
 
 import asyncio
@@ -107,6 +110,50 @@ async def until(done: Callable[[], bool], *, within: float = 30) -> None:
     async with asyncio.timeout(within):
         while not done():  # noqa: ASYNC110 - see above
             await asyncio.sleep(0.05)
+
+
+class SnagError(Exception):
+    """An error that a test's job lists as worth another try."""
+
+
+class SmallSnagError(SnagError):
+    """An error of a kind derived from `SnagError`."""
+
+
+class BreakageError(Exception):
+    """An error that no test's job lists."""
+
+
+WAITS = (timedelta(minutes=1), timedelta(minutes=5))
+"""The waits of a test's job: fewer than the times a job is run again, so that the last
+one serves twice. Minutes, so that no job is due by itself while a test runs."""
+
+SNAGS = jobs.Again(errors=(SnagError,), waits=WAITS)
+"""A test's listing: `SnagError` is worth another try, after `WAITS`."""
+
+
+class Snags:
+    """A job's handler that raises each of `errors` in turn, one a run, and succeeds once
+    none is left. Counts its runs."""
+
+    def __init__(self, *errors: BaseException) -> None:
+        self.errors = list(errors)
+        self.runs = 0
+
+    async def __call__(self, **_args: Any) -> None:
+        self.runs += 1
+        if self.errors:
+            raise self.errors.pop(0)
+
+
+def ended(caplog: pytest.LogCaptureFixture, *actions: str) -> list[logging.LogRecord]:
+    """Procrastinate's lines that say how a job ended, those of these `actions`, its own
+    names for them: `job_error_retry`, "Error, to retry", and `job_error`, "Error", say."""
+    return [
+        record
+        for record in caplog.records
+        if record.name == "procrastinate.worker" and getattr(record, "action", None) in actions
+    ]
 
 
 @pytest.mark.anyio
@@ -445,7 +492,7 @@ async def test_a_job_that_fails_is_kept_as_failed_and_logged_and_the_next_one_ru
     await work_through(jobs.Job("breaks", breaks), jobs.Job("note", noted))
 
     assert await queue_of(migrated) == [("breaks", "failed")]
-    assert tries == [True]  # once: a job that failed isn't tried again
+    assert tries == [True]  # once: a job whose listing names no error isn't tried again
     assert noted.runs == [{"n": 1}]
     [said] = [
         record
@@ -488,6 +535,276 @@ async def test_a_job_that_succeeded_leaves_nothing_behind(
             " (SELECT count(*) FROM procrastinate_events)"
         )
         assert await cursor.fetchone() == (0, 0)
+
+
+@pytest.mark.anyio
+async def test_a_job_whose_listing_names_its_error_is_put_back_for_its_first_wait_and_the_next_one_runs(
+    db: AsyncSession, queue_books: Any, work_through: Any
+) -> None:
+    """Due in a minute, by the database's clock, and counted as run again once. It keeps
+    the arguments it was deferred with, and is any worker's to take: nothing else of it
+    changed."""
+    snags = Snags(SnagError("the chain came off"))
+    noted = Noted()
+    await jobs.defer(db, "snags", frame=52)
+    await jobs.defer(db, "note", n=1)
+    await db.commit()
+
+    await work_through(jobs.Job("snags", snags, again=SNAGS), jobs.Job("note", noted))
+
+    assert snags.runs == 1
+    assert noted.runs == [{"n": 1}]
+    assert await queue_books.due() == [("snags", "todo", 1, 60)]
+    async with await psycopg.AsyncConnection.connect(queue_books.database_url) as connection:
+        cursor = await connection.execute(
+            "SELECT args, worker_id, queue_name, lock, priority FROM procrastinate_jobs"
+        )
+        assert await cursor.fetchall() == [({"frame": 52}, None, "default", None, 0)]
+
+
+@pytest.mark.anyio
+async def test_a_job_put_back_after_an_error_waits_each_time_its_own_wait_and_goes_once_it_succeeds(
+    db: AsyncSession, queue_books: Any, work_through: Any
+) -> None:
+    """Three times put back, each time run again once its wait is over: a minute, then
+    five, then five again, since the listing gives two waits and the last serves any time
+    after it. The fourth run succeeds, and the job is deleted, as any that succeeded."""
+    snags = Snags(SnagError("one"), SmallSnagError("two"), SnagError("three"))
+    listed = jobs.Job("snags", snags, again=SNAGS)
+    await jobs.defer(db, "snags")
+    await db.commit()
+    put_back: list[tuple[str, str, int, float | None]] = []
+
+    for _ in range(3):
+        await work_through(listed)
+        put_back += await queue_books.due()
+        await queue_books.wait_is_over()
+    await work_through(listed)
+
+    assert put_back == [
+        ("snags", "todo", 1, 60),
+        ("snags", "todo", 2, 300),
+        ("snags", "todo", 3, 300),
+    ]
+    assert snags.runs == 4
+    assert await queue_books.due() == []
+
+
+@pytest.mark.anyio
+async def test_a_job_whose_error_comes_back_each_time_fails_at_its_fourth_run(
+    db: AsyncSession, queue_books: Any, work_through: Any
+) -> None:
+    """It has been run again three times by then, as often as any job is. A worker that
+    comes by afterwards finds nothing to run."""
+    snags = Snags(*(SnagError(f"try {n}") for n in range(1, 7)))
+    listed = jobs.Job("snags", snags, again=SNAGS)
+    await jobs.defer(db, "snags")
+    await db.commit()
+
+    for _ in range(4):
+        await work_through(listed)
+        await queue_books.wait_is_over()
+    after_four = [(name, status) for name, status, *_ in await queue_books.due()]
+    await work_through(listed)
+
+    assert snags.runs == 4
+    assert after_four == [("snags", "failed")]
+    assert [(name, status) for name, status, *_ in await queue_books.due()] == after_four
+
+
+@pytest.mark.parametrize(
+    ("raised", "then", "with_its_trace"),
+    [(SmallSnagError("a kink"), "todo", False), (BreakageError("a crack"), "failed", True)],
+    ids=["of a kind derived from one it names", "of a kind it doesn't name"],
+)
+@pytest.mark.anyio
+async def test_only_an_error_of_a_kind_its_listing_names_puts_a_job_back(
+    raised: Exception,
+    then: str,
+    with_its_trace: bool,
+    db: AsyncSession,
+    queue_books: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Any other fails the job at once, as for a job whose listing names none, and the
+    queue says so as an error, with its trace."""
+    caplog.set_level(logging.INFO, logger="procrastinate")
+    snags = Snags(raised)
+    await jobs.defer(db, "snags")
+    await db.commit()
+
+    await work_through(jobs.Job("snags", snags, again=SNAGS))
+
+    assert snags.runs == 1
+    assert [(name, status) for name, status, *_ in await queue_books.due()] == [("snags", then)]
+    [said] = ended(caplog, "job_error_retry", "job_error")
+    assert (said.exc_info is not None and said.exc_info[1] is raised) is with_its_trace
+
+
+@pytest.mark.parametrize(
+    ("run_again_before", "then"),
+    [
+        (jobs.RUNS_AGAIN - 1, ("snags", "todo", jobs.RUNS_AGAIN, 300)),
+        (jobs.RUNS_AGAIN, ("snags", "failed", jobs.RUNS_AGAIN + 1, None)),
+    ],
+    ids=["once more", "no more"],
+)
+@pytest.mark.anyio
+async def test_a_job_run_again_for_another_reason_has_that_many_fewer_tries_after_an_error(
+    run_again_before: int,
+    then: tuple[Any, ...],
+    db: AsyncSession,
+    queue_books: Any,
+    work_through: Any,
+) -> None:
+    """As after a stop cut it off, or a look after the queue put it back: those are
+    counted where the times after an error are, in the job's `attempts`. One time short
+    of the limit, the error puts it back once more, after the wait for that time: the
+    listing's last. At the limit, the error fails it. Procrastinate counts the run that
+    failed it too."""
+    snags = Snags(SnagError("a kink"))
+    job_id = await queue_books.deferred(db, "snags")
+    await queue_books.already_run_again(job_id, run_again_before)
+
+    await work_through(jobs.Job("snags", snags, again=SNAGS))
+
+    assert snags.runs == 1
+    assert await queue_books.due() == [then]
+
+
+@pytest.mark.anyio
+async def test_a_job_put_back_after_an_error_and_then_cut_off_at_a_stop_goes_back_at_once(
+    db: AsyncSession,
+    migrated: str,
+    queue_books: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Its first run raises an error its listing names, and its second is cut off at a
+    stop: that puts it back due at once, not after a wait, and as a job run again twice,
+    one count for both. The queue's line for the stop keeps its trace, which says where
+    the job was cut off."""
+    caplog.set_level(logging.INFO, logger="procrastinate")
+    started = asyncio.Event()
+    runs: list[bool] = []
+
+    async def snags_then_never_ends() -> None:
+        runs.append(True)
+        if len(runs) == 1:
+            raise SnagError("a kink")
+        started.set()
+        await asyncio.Event().wait()
+
+    listed = jobs.Job("snags", snags_then_never_ends, again=SNAGS)
+    await jobs.defer(db, "snags")
+    await db.commit()
+    await work_through(listed)
+    await queue_books.wait_is_over()
+    worker = asyncio.create_task(
+        jobs.work([listed], database_url=migrated, grace=0.2, on_signals=False)
+    )
+    try:
+        async with asyncio.timeout(10):
+            await started.wait()
+    finally:
+        worker.cancel()  # which is the stop, and also leaves nothing running if it never started
+        await asyncio.wait([worker], timeout=10)
+
+    assert len(runs) == 2
+    assert await queue_books.due() == [("snags", "todo", 2, 0)]
+    [cut_off] = ended(caplog, "job_aborted_retry")
+    assert cut_off.exc_info is not None
+    assert isinstance(cut_off.exc_info[1], asyncio.CancelledError)
+
+
+@pytest.mark.anyio
+async def test_a_job_run_again_after_an_error_says_so_in_one_line_and_its_last_try_with_the_trace(
+    db: AsyncSession, queue_books: Any, work_through: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Captured from the lowest level. Each time the job is put back, the queue's line is
+    Procrastinate's own, at the info level, without the trace: no word of the error is in
+    the log. The fourth run fails the job, and its line is an error with the trace."""
+    caplog.set_level(logging.DEBUG, logger="procrastinate")
+    tries = [SnagError(f"snag number {n}") for n in range(1, 5)]
+    snags = Snags(*tries)
+    job_id = await queue_books.deferred(db, "snags", frame=52)
+
+    for _ in range(4):
+        await work_through(jobs.Job("snags", snags, again=SNAGS))
+        await queue_books.wait_is_over()
+
+    retried = ended(caplog, "job_error_retry")
+    [failed] = ended(caplog, "job_error")
+    everything_said = caplog.text  # every record, with the trace of its error
+    assert [(record.levelno, record.exc_info, record.exc_text) for record in retried] == [
+        (logging.INFO, None, None)
+    ] * 3
+    assert all(
+        record.getMessage().startswith(
+            f"Job snags[{job_id}](frame=52) ended with status: Error, to retry, lasted "
+        )
+        for record in retried
+    )
+    assert failed.levelno == logging.ERROR
+    assert failed.exc_info is not None
+    assert failed.exc_info[1] is tries[-1]
+    assert [str(snag) in everything_said for snag in tries] == [False, False, False, True]
+
+
+@pytest.mark.anyio
+async def test_the_trace_of_an_error_tried_again_is_left_out_by_one_filter_however_often_a_worker_starts(
+    work_through: Any,
+) -> None:
+    """Two workers here, one after the other, after those of the tests before."""
+    queue_log = logging.getLogger("procrastinate.worker")
+
+    await work_through()
+    await work_through()
+
+    assert [type(each).__module__ for each in queue_log.filters].count(jobs.__name__) == 1
+
+
+@pytest.mark.parametrize(
+    ("errors", "waits", "refused", "says"),
+    [
+        ((), WAITS, ValueError, "at least one error"),
+        ((SnagError,), (), ValueError, "at least one wait"),
+        (
+            (SnagError,),
+            (timedelta(minutes=1), timedelta(seconds=-1)),
+            ValueError,
+            "can't be below zero",
+        ),
+        ((asyncio.CancelledError,), WAITS, TypeError, "is no kind of Exception"),
+        (("SnagError",), WAITS, TypeError, "is no kind of Exception"),
+        ([SnagError], WAITS, TypeError, "as tuples"),
+        ((SnagError,), [timedelta(minutes=1)], TypeError, "as tuples"),
+        ((SnagError,), (60,), TypeError, "is a timedelta"),
+    ],
+    ids=[
+        "no error",
+        "no wait",
+        "a wait below zero",
+        "a cancellation",
+        "an error's name",
+        "a list of errors",
+        "a list of waits",
+        "a wait in seconds",
+    ],
+)
+def test_a_listing_that_cant_be_right_is_refused_when_it_is_made(
+    errors: Any, waits: Any, refused: type[Exception], says: str
+) -> None:
+    """With words that say what is wrong with it. A cancellation is how a stop cuts a job
+    off, and has its own rule."""
+    with pytest.raises(refused, match=says):
+        jobs.Again(errors=errors, waits=waits)
+
+
+def test_a_listing_may_run_a_job_again_at_once() -> None:
+    """A wait of nothing, as after a stop."""
+    assert jobs.Again(errors=(SnagError,), waits=(timedelta(0),)).wait(0) == timedelta(0)
 
 
 @pytest.mark.anyio

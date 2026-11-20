@@ -159,7 +159,8 @@ def work_through(migrated: str) -> WorkThrough:
 
 class QueueBooks:
     """The queue's books on this test's database, written as Procrastinate's workers
-    write them: for the tests of what looking after the queue does with them.
+    write them: for the tests of what looking after the queue does with them, and of the
+    jobs put back after an error, to be run again once their wait is over.
 
     A worker that starts takes the workers that died more than 30 seconds ago off the
     list by itself. So what a dead worker leaves is written while the test's worker
@@ -191,6 +192,49 @@ class QueueBooks:
         """Make the job one that has already been run again `times` times."""
         await self._do(
             ("UPDATE procrastinate_jobs SET attempts = %s WHERE id = %s", (times, job_id))
+        )
+
+    async def due(self) -> list[tuple[str, str, int, float | None]]:
+        """The jobs in the queue, oldest first: each one's name, its status, how many
+        times it has been run again, and in how many seconds it is due, to the nearest
+        ten. `None` for a job deferred to run at once, and never put back.
+
+        By this process's clock, which dated the job: a job that is put back is dated by
+        its worker's clock, and a test's worker runs in the test's process. The
+        database's clock runs elsewhere, and what it would say of the wait is off by the
+        difference between the two. To the nearest ten seconds, for the moment between
+        the job being put back and this look: a job put back to be run at once is due
+        in 0 seconds, and one put back for a minute in 60."""
+        async with await psycopg.AsyncConnection.connect(self.database_url) as connection:
+            cursor = await connection.execute(
+                "SELECT task_name, status::text, attempts, scheduled_at"
+                " FROM procrastinate_jobs ORDER BY id"
+            )
+            now = datetime.now(UTC)
+            return [
+                (
+                    name,
+                    status,
+                    attempts,
+                    None if at is None else round((at - now).total_seconds(), -1),
+                )
+                for name, status, attempts, at in await cursor.fetchall()
+            ]
+
+    async def wait_is_over(self) -> None:
+        """End the wait of every job that waits to be run again: due now, by the
+        database's clock, so that the next worker that works through the queue takes it.
+
+        A job that is put back is dated by its worker's clock, and taken by the
+        database's, a few milliseconds apart or more, also when it is put back to be run
+        at once; and a worker that waits looks for it only every five seconds. A test
+        waits for neither."""
+        await self._do(
+            (
+                "UPDATE procrastinate_jobs SET scheduled_at = now()"
+                " WHERE status = 'todo' AND scheduled_at > now()",
+                (),
+            )
         )
 
     async def a_dead_worker(self) -> int:

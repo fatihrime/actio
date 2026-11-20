@@ -4,9 +4,9 @@ A job is deferred in the transaction of the change it follows (`defer`), so it e
 if and only if that change was committed. A worker runs it later (`work`), one at a
 time, and runs the jobs that have a schedule by their schedule.
 
-A job may run more than once: from its start again, after a stop cut it off, or after
-the worker that had it died (`RUNS_AGAIN`, `Queue.look_after`). So every handler has to
-be safe to repeat.
+A job may run more than once: from its start again, after a stop cut it off, after the
+worker that had it died, or after an error that its listing names as worth another try
+(`RUNS_AGAIN`, `Queue.look_after`, `Again`). So every handler has to be safe to repeat.
 
 The queue is Procrastinate's (ADR 0024), and this is the only module that knows it: a
 job's handler is a plain async function, and nothing of Procrastinate leaves here. Its
@@ -53,12 +53,16 @@ died, until a look after the queue finds it (`Queue.look_after`).
 And it has to stay, with one beat of the worker, under `WORKER_DEAD_AFTER_S`: see there."""
 
 RUNS_AGAIN = 3
-"""How many times a job is run again from its start, after a stop cut it off or a worker
-that died left it. Then it isn't, once more: cut off, it stays `aborted`; left by a
-worker that died, it ends as `failed`. A job that takes its worker down each time would
-otherwise go round for ever, since the worker's container starts again when it fails.
+"""How many times a job is run again from its start, in all, whatever the reason: after a
+stop cut it off, after a worker that died left it, or after an error that its listing
+names as worth another try (`Job.again`). One count for the three, which Procrastinate
+keeps in the job's `attempts`. Then it isn't, once more: cut off, it stays `aborted`;
+left by a worker that died, or failed with such an error, it ends as `failed`. A job
+that takes its worker down each time would otherwise go round for ever, since the
+worker's container starts again when it fails, and so would one whose error comes back
+each time.
 
-A job that failed is never run again: this is for the jobs that didn't get to end."""
+A job that fails with any other error is never run again."""
 
 BEATS_EVERY_S = 10.0
 """How often a worker of the queue says that it is alive: a beat it writes into the
@@ -86,6 +90,64 @@ _DEFERRING = procrastinate.App(connector=procrastinate.PsycopgConnector())
 """Writes a job into the transaction it is given. It is never opened, so a process that
 only defers, as the API does, holds no pool and no connection for the queue."""
 
+_QUEUE_LOG = logging.getLogger("procrastinate.worker")
+"""The logger through which Procrastinate's worker says how each job ended."""
+
+
+@dataclass(frozen=True, slots=True)
+class Again:
+    """Which errors of a job's handler are worth another try, and how long the job waits
+    before each time it is run again after one (`Job.again`).
+
+    Such an error puts the job back into the queue, to be run again from its start once
+    its wait is over, and it counts as any other time the job is run again: `RUNS_AGAIN`
+    in all, whatever the reason. The next one fails the job, as any other error does at
+    once. The handler says in the log what went wrong, in its own words, before it raises:
+    the queue's line for a job that is run again carries no trace.
+
+    An error worth another try is raised without its cause (`from None`), and its text
+    holds kinds and ids alone. Its trace is in the log when the last try fails it, and a
+    cause's text, such as a model's error that quotes a question, would be printed there.
+
+    Refused when it is made, with `ValueError` or `TypeError`, unless it names one error
+    or more, each a kind of `Exception`, and one wait or more, each a `timedelta` and none
+    below zero, both as tuples."""
+
+    errors: tuple[type[Exception], ...]
+    """The errors worth another try: these, and those of a kind derived from one of them."""
+    waits: tuple[timedelta, ...]
+    """How long the job waits before it is run again after such an error: the first before
+    the first time it is run again, the second before the second, and so on. The last one
+    also serves any time after it. A job that is put back is dated by its worker's clock,
+    and taken by the database's, so a difference between the two makes the wait that
+    much longer, or shorter."""
+
+    def __post_init__(self) -> None:
+        # Taken as anything: what is checked here is what the types say, at run time.
+        errors: object = self.errors
+        waits: object = self.waits
+        if not (isinstance(errors, tuple) and isinstance(waits, tuple)):
+            # What a worker asks of an error, `isinstance`, takes a tuple of kinds alone.
+            raise TypeError("a job's listing gives its errors and its waits as tuples")
+        if not errors:
+            raise ValueError("a job's listing names at least one error worth another try")
+        for error in errors:
+            if not (isinstance(error, type) and issubclass(error, Exception)):
+                # A cancellation, which is how a stop cuts a job off, among them: it has
+                # its own rule.
+                raise TypeError(f"{error!r} is no kind of Exception, and can't be tried again")
+        if not waits:
+            raise ValueError("a job's listing gives at least one wait before it is run again")
+        if not all(isinstance(wait, timedelta) for wait in waits):
+            raise TypeError("a wait before a job is run again is a timedelta")
+        if any(wait < timedelta(0) for wait in waits):
+            raise ValueError("a wait before a job is run again can't be below zero")
+
+    def wait(self, run_again: int) -> timedelta:
+        """The wait before the job is run again, when it has been run again `run_again`
+        times already, for any reason."""
+        return self.waits[min(run_again, len(self.waits) - 1)]
+
 
 @dataclass(frozen=True, slots=True)
 class Job:
@@ -102,6 +164,9 @@ class Job:
     """Whether `run` looks after the queue itself. It is then called with the `Queue`
     first, as the job that runs sees it, and the arguments the job was deferred with
     after it."""
+    again: Again | None = None
+    """Which errors of `run` are worth another try, and how long the job waits before
+    each. `None`: none is, and a job that raises fails at once."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +319,12 @@ async def work(
 
     One job at a time. A worker hears of a new job when it is committed, and looks for
     one every five seconds besides. A job that succeeded is deleted. One that failed
-    stays, as `failed`, and its error is in the log; it isn't tried again.
+    stays, as `failed`, and its error is in the log, with its trace; it isn't tried
+    again. Unless its listing names the error as worth another try (`Job.again`), and it
+    hasn't been run again `RUNS_AGAIN` times already: then it goes back into the queue,
+    to be run again after its wait, and the log says so in one line, without the trace.
+    A worker hears nothing of a job that is put back: it finds it at a look once it is
+    due.
 
     Told to stop, the worker takes no new job, gives the one in hand `grace` seconds to
     finish, and cuts it off after that: the job goes back into the queue, to be run
@@ -282,6 +352,7 @@ async def work(
     `until_idle` returns once nothing is left to run. `on_signals=False` leaves the
     process's signals alone: a test runs a worker so, and stops it by cancelling it.
     """
+    _leave_out_the_trace_of_an_error_tried_again()
     signals = _StopSignals() if on_signals else None
     try:
         while True:
@@ -369,12 +440,11 @@ async def _work_once(
         connector=procrastinate.PsycopgConnector(conninfo=database_url, min_size=1, max_size=2)
     )
     for job in listed:
+        run_again = _RunAgain(job.again)
         if job.with_queue:
-            task = app.task(name=job.name, retry=_AGAIN_AFTER_A_STOP, pass_context=True)(
-                _looking_after(job)
-            )
+            task = app.task(name=job.name, retry=run_again, pass_context=True)(_looking_after(job))
         else:
-            task = app.task(name=job.name, retry=_AGAIN_AFTER_A_STOP)(_handler(job))
+            task = app.task(name=job.name, retry=run_again)(_handler(job))
         if job.every is not None:
             app.periodic(cron=job.every)(task)
     try:
@@ -451,22 +521,58 @@ def _looking_after(job: Job) -> Callable[..., Awaitable[None]]:
     return handle
 
 
-class _AgainAfterAStop(procrastinate.BaseRetryStrategy):
-    """Procrastinate asks this of every job that didn't succeed: whether to run it again.
+class _RunAgain(procrastinate.BaseRetryStrategy):
+    """Procrastinate asks this of every job that didn't succeed: whether to run it again,
+    and when. One for each job a worker lists, with that job's `Again`, if it has one.
 
-    A job cut off at a stop, which Procrastinate does by cancelling its task, is run
-    again at once, by the next worker that takes it, until it has been run again
-    `RUNS_AGAIN` times. A job that raised is not: it stays `failed`."""
+    - A job that has been run again `RUNS_AGAIN` times already, for any reason, is not.
+    - A job cut off at a stop, which Procrastinate does by cancelling its task, is run
+      again at once, by the next worker that takes it.
+    - A job that raised an error its `Again` names is run again once the wait for that
+      time is over. Procrastinate reads the clock for it, as for a job put back at once.
+    - A job that raised any other error is not: it stays `failed`."""
+
+    def __init__(self, again: Again | None) -> None:
+        self._again = again
 
     def get_retry_decision(
         self, *, exception: BaseException, job: queued.Job
     ) -> procrastinate.RetryDecision | None:
-        if isinstance(exception, asyncio.CancelledError) and job.attempts < RUNS_AGAIN:
+        if job.attempts >= RUNS_AGAIN:
+            return None
+        if isinstance(exception, asyncio.CancelledError):
             return procrastinate.RetryDecision()
+        if self._again is not None and isinstance(exception, self._again.errors):
+            wait = self._again.wait(job.attempts)
+            return procrastinate.RetryDecision(
+                # The wait exactly, as the one whole number Procrastinate takes for it.
+                retry_in={"microseconds": wait // timedelta(microseconds=1)}
+            )
         return None
 
 
-_AGAIN_AFTER_A_STOP = _AgainAfterAStop()
+class _NoTraceForAnErrorTriedAgain(logging.Filter):
+    """Takes the trace off Procrastinate's line for a job that raised an error its listing
+    names as worth another try, and goes back into the queue: "… ended with status: Error,
+    to retry". Such an error is no error yet, and its handler has said in its own words
+    what went wrong. Its trace would say nothing more, in some 25 lines, at each try.
+
+    Every other line keeps its trace: the last try's, which fails the job, as an error;
+    that of a job failed by any other error; and that of a job cut off at a stop
+    ("Aborted, to retry"), which says where the job was when it was cut off."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, "action", None) == "job_error_retry":  # Procrastinate's name
+            record.exc_info = None
+        return True
+
+
+def _leave_out_the_trace_of_an_error_tried_again() -> None:
+    """Put `_NoTraceForAnErrorTriedAgain` on Procrastinate's worker's log, unless it is
+    there: one for the process, however many times a worker starts in it, and whoever
+    set the log up."""
+    if not any(isinstance(each, _NoTraceForAnErrorTriedAgain) for each in _QUEUE_LOG.filters):
+        _QUEUE_LOG.addFilter(_NoTraceForAnErrorTriedAgain())
 
 
 def schema_files(up_to: str) -> list[str]:

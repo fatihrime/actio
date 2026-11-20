@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from pydantic import ValidationError
 
 from actio import cli, worker
 from actio.core import jobs, schema
+from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
 
 DATABASE = "postgresql://actio:pw@127.0.0.1:1/actio"
@@ -260,6 +262,81 @@ def test_the_worker_role_leaves_out_what_others_write_below_a_warning(
         "httpx2": (False, True),
         "alembic.runtime.migration": (False, True),
     }
+
+
+class SnagError(Exception):
+    """An error that a test's job lists as worth another try."""
+
+
+async def a_job_that_snags_once(database_url: str) -> None:
+    """Defer a job, and run it with a worker that returns once nothing is left: the job
+    raises an error that its listing names, and goes back into the queue for a minute."""
+
+    async def snags() -> None:
+        raise SnagError("the chain came off")
+
+    engine = create_engine(database_url)
+    try:
+        async with create_session_factory(engine)() as db:
+            await jobs.defer(db, "snags")
+            await db.commit()
+    finally:
+        await engine.dispose()
+    again = jobs.Again(errors=(SnagError,), waits=(timedelta(minutes=1),))
+    async with asyncio.timeout(10):  # a job that went round and round would hang the run
+        await jobs.work(
+            [jobs.Job("snags", snags, again=again)],
+            database_url=database_url,
+            until_idle=True,
+            on_signals=False,
+        )
+
+
+def put_back_without_a_trace(said: str) -> bool:
+    """Whether the log says that a job is run again after an error, without its trace,
+    nor a word of the error."""
+    return (
+        "ended with status: Error, to retry" in said
+        and "Traceback" not in said
+        and "the chain came off" not in said
+    )
+
+
+def test_the_worker_roles_log_says_a_job_is_run_again_after_an_error_without_the_trace(
+    migrated: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The log is set up by the role, and the worker runs a job whose listing names its
+    error. The line is Procrastinate's, and what takes the trace off it is on
+    Procrastinate's logger, whatever handlers the log has."""
+
+    async def run(settings: Settings) -> None:  # noqa: ARG001
+        await a_job_that_snags_once(migrated)
+
+    monkeypatch.setattr(worker, "run", run)
+
+    with logging_put_back():
+        logging.root.handlers = []  # as in a process of its own: see the test above
+        cli.main(["--role", "worker"])
+
+    assert put_back_without_a_trace(capsys.readouterr().err)
+
+
+def test_the_all_roles_log_says_a_job_is_run_again_after_an_error_without_the_trace(
+    migrated: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The log is set up as uvicorn sets it up, from what the role gives it, and the
+    worker runs a job whose listing names its error, as the worker inside the API does."""
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    cli.main(["--role", "all"])
+
+    [(args, kwargs)] = calls
+    with logging_put_back():
+        uvicorn.Config(*args, **kwargs)  # sets the log up, as `uvicorn.run` does
+        asyncio.run(a_job_that_snags_once(migrated))
+
+    assert put_back_without_a_trace(capsys.readouterr().err)
 
 
 def test_the_worker_does_not_start_without_its_models_file(
