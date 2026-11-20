@@ -246,3 +246,79 @@ By the supervisor, on a MacBook Pro (M1 Pro, 16 GB), 2026-11-20.
     - the fifteen seconds and the one second were used by their tests as names, so another number failed nothing: each is held as a number now;
     - a title on its way in a later page, which kept the page looking without end, had no test;
     - the row's change, above, was no mistake to take out: nothing failed, anywhere.
+
+### 2026-11-20: a title its model couldn't give for now is asked for again
+
+The decision said: "**When the model doesn't give one,** because it fails, writes nothing to make a title of, or takes longer than the limit: the job ends well, the first line stays". So a model's server that was restarting for a moment, or busy with a long answer for more than 30 seconds, cost a conversation its title for good. "Not done yet" listed "trying again after an error", for the queue as a whole. The queue can now run a job again after an error that the job's listing names, after a wait, and counts those times with the others ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day).
+
+**Worth another try:** what the model couldn't give for now. `titles.write` then raises an error of its own, `titles.NotWrittenError`, after the one warning a try has always said, and the queue runs the job again later:
+
+- **the model's status is `unreachable`:** its server doesn't answer, as while it restarts. The catalog also says `unreachable` when the server answers the question about the model with an error, whatever the error, a refused key among them: the status doesn't say which, so that is asked again too, four times in all, though the same refusal of the title's own request would not be;
+- **`ProviderUnavailableError`,** with its kind `RateLimitedError`: the server is away, overloaded, or refusing for now. "Nothing was generated", as the class says, so the same request can be sent again;
+- **`StreamInterruptedError`:** the answer broke off, as when the connection dropped;
+- **`ProviderError`:** the provider failed, or answered with something that isn't its protocol. That is not the request's fault;
+- **the time limit, `WRITTEN_WITHIN_S`, 30 seconds:** as when a title waits behind a long answer at a server that writes one at a time.
+
+**Not worth one,** and the job ends well, with its warning, as before: what the model won't give, since it would be the same at the next try.
+
+- **status `missing`:** the server answers, without the model. It is missing at the next try too, until someone pulls it, and the conversations after that get their titles;
+- **`RequestRejectedError`,** and its kinds, such as `ModelNotFoundError` and `ContextOverflowError`: "Sending it again unchanged won't help", as the class says;
+- **`UnsupportedServerError`:** a server older than its client;
+- **any other `LLMError`:** a kind nobody has said is worth it;
+- **a model that answered with nothing to make a title of:** it has had its say. This is also what the end-to-end stack's quiet model does for every conversation that doesn't tell it what to say, so that stack didn't change;
+- **no model named for titles,** and **a conversation that is gone, or no longer `question`.**
+
+**As before:** a database that refuses the write fails the job at once, and it isn't run again; a cancellation is passed on as it came, and a stop puts the job back at once.
+
+**The waits: 30 seconds, then 2 minutes, then 10 minutes** (`titles.ASKED_AGAIN_AFTER`), the title's own, bound into the job's listing in `actio.worker.listed` together with the error:
+
+- **30 seconds** for a server that restarted or hiccuped. A try itself takes up to 30 seconds, so behind a busy server the second try starts about a minute after the first;
+- **2 minutes** for a long answer at a server that writes one at a time, or a model being loaded;
+- **10 minutes** for a server that was away for a while, or a provider's limit.
+
+**How it ends:** the fourth try that fails ends the job as `failed`. The conversation keeps its first line for good; the job's row stays seven days (`worker.KEPT_FOR`), as any failed job's does; and the queue's line says so at the error level, with the trace of `NotWrittenError`, whose text names the conversation and the kind of trouble.
+
+**A later try is the same job, run again from its start,** so what makes the job safe to repeat serves it: a conversation renamed or deleted between two tries is found so, and the model isn't asked.
+
+**The log:**
+
+- **each try that fails says its one warning,** as before, such as `conversation …: no title, its model failed (ProviderError)`. The queue's line for a job that goes back carries no trace ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)): that warning says what the trace would;
+- **`NotWrittenError` is raised without its cause,** and its text holds the conversation's id and the kind of trouble, never a word of the question, the title or the model's error. The last try's trace is in the log, and a cause raised `from error` would have its text printed there (measured, below): a model's error may quote the question. A test fails if any line, with every trace, holds a word of the question, the title or a model's error that quotes it, at any try, the last one included.
+
+**What the page does, and doesn't:** `title_asked_at`, `on_its_way` and the page didn't change. A title is said to be on its way for 15 seconds after the first try, as before. One that comes at a later try shows when the page next reads the list: after a turn, or when its window is returned to.
+
+**Harder,** beside the decision's:
+
+- **a title that times out behind a busy server holds the one worker for its 30 seconds,** up to four times, and the jobs behind it wait for it each time;
+- **a title job that fails is an error in the log now,** with its trace, and a row kept seven days. Before, it ended well, with a warning;
+- **a provider that fails is asked up to four times** for each conversation's title.
+
+**What no longer holds:** in the decision, "When the model doesn't give one … the job ends well, the first line stays" holds now only for a title the model won't give. Under "Harder", "after 30 seconds its conversation keeps its first line" holds only until the next try, 30 seconds later, then 2 minutes and 10. Under "Not done yet", "trying again after an error" is done.
+
+**Still not done:**
+
+- **the page isn't told when a later try will come.** It reads the list at its usual moments;
+- **a provider's own "retry after"** (`RateLimitedError.retry_after_s`) isn't followed: the waits are the listing's;
+- **no end-to-end test:** the fake keeps no state, so "fails, then answers" can't be said by a directive. The API's tests cover it, on the real queue;
+- **a model for titles that isn't on offer to people:** it waits for the router.
+
+#### Measured
+
+By the supervisor, before the step, on Procrastinate 3.11.0 and the pinned Postgres ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day, has the rest):
+
+- **a trace holds the words of whatever its exception was raised from:** an error raised `from error` printed the cause's text in the log, and the same error raised `from None` didn't;
+- **a waiting worker isn't told of a job that was put back,** and takes it at its next look, every five seconds: a title asked for again 30 seconds after its try is asked 30 to 35 seconds after it, with nothing else in the worker's hands.
+
+After the build, on a MacBook Pro (M1 Pro, 16 GB), 2026-11-20, Ollama 0.40.16, `qwen3.5:4b-q4_K_M`:
+
+- **A server that is away, then back.** Actio's own processes, `actio --role api` and `actio --role worker`, on a Postgres and a Valkey of their own. The worker was told that Ollama is at an address where nothing listened, until a forwarder was started there ten seconds after the first answer had ended; the API reached Ollama all along:
+    - **the first try found the model `unreachable`** at once, and the job went back, due in 30 seconds;
+    - **the second try began 30.1 seconds after the first, and wrote the title:** "Patching a punctured inner tube" was in the list 30.6 seconds after the answer had ended;
+    - **the list said that a title was on its way for the first 15 seconds,** and not after, the title's arrival included: a page would have shown it at its next reading of the list.
+- **A server that never comes back,** the same without the forwarder: tries 0.0, 30.3, 153.2 and 758.3 seconds after the answer had ended, then the job was `failed`, and the conversation kept its first line. The worker's log said `no title, its model is unreachable` four times, and held no word of the question.
+- **Behind a long answer, inside the API's process** (`actio --role all`, the same scratch data): a short first question, and right behind it, in another conversation, an answer that took 54.9 seconds.
+    - **The short one's title waited at the API's gate** behind that answer for its 30 seconds, and its job went back: `no title, its model took longer than 30 s`;
+    - **its second try began 34.5 seconds later,** 10 seconds after the long answer had ended, and the title was in the list 65.2 seconds after its own answer had ended. The long answer's own title was written in between, in 0.6 seconds.
+- **The same in the stack of `make up`,** the worker in its container, where the title waits inside the model's server and not at a gate: behind an answer of 49.5 seconds, the title's first try ended at its 30 seconds, the second began 34.4 seconds later, and "Patch Punctured Inner Tube" was in the list 65.2 seconds after its answer had ended. Before this step that conversation kept its first line.
+- **No trace in any of these logs but the last try's,** in the run where the server never came back.
+- **The mistakes planted for this step** are in ADR 0024's revision: among the fifty, each kind of trouble taken out of what is worth another try or put into it, the error raised from the model's, the model's words in the error's text, each wait changed, and a status of the model kept for longer than the first wait. Each fails a test.

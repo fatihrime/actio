@@ -516,3 +516,80 @@ The worker has a fifth job, `write-title` (`titles.WRITE_TITLE`), and the first 
 - **What the log gets:** Procrastinate's lines for each title, as for every job, with the conversation's id as its argument, and a warning of the job's own when no title came. Never the question or the title.
 
 "Still not done" is as in the revision above: retries after an error, a queueing lock, more than one job at a time.
+
+### 2026-11-20: a job is run again after an error its listing names
+
+"Retries after an error", in "Still not done", is done, for each job that asks for them. The first to ask is the fifth job: a title that a model's server couldn't give for now, because it was restarting, or busy with a long answer, was lost for good ([ADR 0025](0025-titles-written-by-a-model.md), revision of the same day). Two sentences no longer hold as they were written: the decision's "A job that failed stays, as `failed`, and is not tried again", and, in the revision "the queue looks after what its workers leave behind", "A job that fails stays failed, as before". Both still hold for an error that the job's listing doesn't name.
+
+**A job's listing can say which errors of its handler are worth another try** (`actio.core.jobs`):
+
+- **Per job,** in the line that lists it: `jobs.Job(name, run, again=jobs.Again(errors=(…,), waits=(…,)))`. Only the handler knows which of its errors may be gone at a later try. Another, such as a database that refused a statement, or a mistake in the code, would come back each time.
+- **`errors`:** the kinds of error worth another try. An error of a kind derived from one of them counts too.
+- **`waits`:** how long the job waits before each time it is run again after such an error: the first before the first time, the second before the second, and so on. The last also serves any time after it.
+- **Refused when it is made,** with a `ValueError` or a `TypeError`, so when the worker's list is built: no error, no wait, a wait below zero or one that is no `timedelta`, or an error that is no kind of `Exception`, a cancellation among them, since a cancellation is how a stop cuts a job off, and has its own rule. Tuples only: the strategy's question of an error, `isinstance`, takes a tuple of kinds alone, and a list would fail only when an error came, inside Procrastinate's handling of it.
+- **Without a listing, a job is as it was:** an error fails it at once. So is the look after the queue, and every scheduled job.
+
+**One count, one limit, whatever the reason.** A job is run again `jobs.RUNS_AGAIN` (3) times at most in all: after a stop cut it off, after a worker that died left it, or after an error its listing names. So it still runs four times at most.
+
+- **Procrastinate keeps that count,** in the job's `attempts`, which goes up by one each time a job is put back, for any reason. The waits are read by it: a job already run again once after a stop waits the second wait after its first error.
+- **One count, not two,** because a job whose error comes back and whose worker dies on it would otherwise run as often as both limits allow together, and a second count would need a column of our own beside Procrastinate's.
+
+**The rule is the one retry strategy's,** which Procrastinate asks of every job that didn't succeed (`_RunAgain`, one for each job a worker lists, with that job's listing), in this order:
+
+1. **run again `RUNS_AGAIN` times already:** no more. Cut off, the job stays `aborted`; failed, it stays `failed`;
+2. **cut off at a stop:** again at once, as before;
+3. **an error the listing names:** again once the wait for that time is over;
+4. **any other error:** no, and the job stays `failed`.
+
+**The time is Procrastinate's to read.** The strategy hands Procrastinate the wait, exactly (`retry_in`), and Procrastinate dates the job by the worker process's clock, as it does a job put back at once after a stop. Nothing in `actio.core` reads the clock, and `Queue.look_after` didn't change. Two things change a wait:
+
+- **the database's clock decides when the job is due,** and a difference between it and the worker's clock makes the wait that much longer, or shorter;
+- **a worker that waits for jobs isn't told of a job put back,** as it is of a new one: it finds it at its next look, every five seconds. For a worker with nothing else in hand, a wait of 30 seconds is 30 to 35.
+
+**A job that is run again after an error is no error yet: its line in the log carries no trace.**
+
+- **What Procrastinate writes** for such a job, at the info level: `Job write-title[12](conversation_id='…') ended with status: Error, to retry, lasted 0.004 s`, with the exception's trace, 25 lines at each try. The trace of an error that the listing names says nothing that the handler's own line didn't: the handler says what went wrong before it raises, as the title's job does (`no title, its model failed (ProviderError)`), since Procrastinate's line doesn't name the error.
+- **So `actio.core.jobs` takes the trace off that record, and off no other:** by Procrastinate's own name for it, `action` `job_error_retry`, with a filter on the logger Procrastinate writes it through, `procrastinate.worker`. Only this module knows Procrastinate, its records included. The text of the line stays Procrastinate's.
+- **On the logger, not on a handler,** so that it holds however the process set its log up: the worker role with its one handler, and `--role all` with uvicorn's and one more. It is put there when a worker starts, once for the process, however many times a worker starts in it.
+- **Every other line keeps its trace:** the last try's, which fails the job, an error as for any job that failed; that of a job failed by an error its listing doesn't name; and that of a job cut off at a stop ("Aborted, to retry"), which says where the job was when it was cut off.
+
+**An error worth another try is raised without its cause** (`from None`), and its text holds kinds and ids alone, never what people wrote. The last try's trace is in the log, and a cause's text would be printed there (measured, below): the title's job raises its error from a model's error, which may quote the question.
+
+**For whoever lists the next job:** list an error of the handler's own as worth another try only when it may be gone at a later try; say in one line of the log what happened before raising it; raise it without its cause, its text without people's words; and remember that the job may already have been run again after a stop, and so have fewer tries left. `AGENTS.md` says the same.
+
+**How the tests hold it** (`test_jobs.py`, on the real queue, with jobs and errors of their own): a job put back is dated a minute or more ahead, never due by itself while a test runs. A test reads in how long it is due (`queue_books.due()`), by the clock that dated it, which is the test's own process's, where its worker runs: so the assertion doesn't depend on how far the database's clock is from it. Then it ends the wait through the database (`queue_books.wait_is_over()`), and runs a worker again: none sleeps through a wait, nor waits for a worker's look. The title's tests do the same with the title's own waits, the shortest of them half a minute.
+
+**Measured by the supervisor before the step,** on Procrastinate 3.11.0 and the pinned Postgres, with a retry strategy of a spike's own:
+
+- **a job that raised, under a strategy that answered `RetryDecision(retry_in={"seconds": 3})`:** its row went back to `todo` with `attempts` 1, dated three seconds ahead, by the worker process's clock (`scheduled_at`, from Procrastinate's `utils.utcnow()`). The strategy was asked with the exception, and with `job.attempts` 0, then 1, then 2;
+- **a waiting worker isn't told of a job that was put back:** it took it at its next look, which comes every five seconds. Dated three seconds ahead, the job ran again 5.0 seconds after its first try; dated six seconds ahead, 10 seconds after its second;
+- **when the strategy answered `None`,** the job ended `failed`, and its `attempts` read one more: Procrastinate counts the last try as it ends the job;
+- **the log:** for a job to be run again, `procrastinate.worker` wrote at the info level "… ended with status: Error, to retry, lasted … s", with `action` `job_error_retry` and the exception as `exc_info`: a trace of 25 lines. For the last try, at the error level, "… ended with status: Error", with `action` `job_error` and the trace. `_log_job_outcome`, in Procrastinate's `worker.py`, writes through the module's own logger, `procrastinate.worker`;
+- **a trace holds the words of whatever its exception was raised from:** an error raised `from error` printed the cause's text in the log ("RuntimeError: the model said: WORDS-OF-A-PERSON", 32 lines). The same error raised `from None` didn't;
+- **a worker that returns once the queue is idle** (`until_idle`, as the tests run one) doesn't wait for a job dated for later: it returned after 0.2 seconds, and left the job `todo`, with `attempts` 1;
+- **one count:** a job run again after an error, with `attempts` 1, and then cut off at a stop, went back with `attempts` 2;
+- **`RetryDecision(retry_in=…)` takes Procrastinate's `TimeDeltaParams`,** whose members are typed as whole numbers. `retry_at` would need the clock, which nothing in `actio.core` reads. So the strategy passes the wait as one whole number, of microseconds, which is the `timedelta` exactly.
+
+**Measured after the build,** on a MacBook Pro (M1 Pro, 16 GB), 2026-11-20, with the one job that is listed so, the title's, whose waits are 30 seconds, 2 minutes and 10 minutes ([ADR 0025](0025-titles-written-by-a-model.md) has what this meant for the titles):
+
+- **With Actio's own processes,** `actio --role api` and `actio --role worker`, on a Postgres and a Valkey of their own. The worker was told that the model's server is at an address where nothing listens, so each of its tries failed at once, while the API reached the server:
+    - **the four tries began 0.0, 30.1, 153.1 and 758.1 seconds after the first,** by the times in the worker's log: 30.1, 123.0 and 605.0 seconds after the try before. Each is the listing's wait, and up to five seconds for the worker's next look;
+    - **after the fourth the job was `failed`,** with `attempts` 4, and nothing ran it again;
+    - **the log of the four:** four warnings of the title's own, three lines "… ended with status: Error, to retry, lasted 0.025 s" at the info level, each one line, and one "… ended with status: Error" at the error level, with the one trace of the run: 93 lines in all, where a trace at each try would have added 75.
+- **In `actio --role all`,** where uvicorn sets the log up: the line of a job put back was one line too, without a trace. The same with `--reload`, as `make dev` runs it, where the server is a process of the reloader's and sets its log up by itself.
+- **In the worker's container,** in the stack of `make up`: the same line, and the job taken again 34.4 seconds after it was put back for 30.
+- **Fifty mistakes were planted,** one at a time, in a scratch copy of the tree: in the strategy (a fifth run, a limit that holds for one reason only, every error tried again or none, the wrong wait, a wait in the wrong unit, a stop that waits, a strategy left off a task), in the listing's refusals, in the filter (never put on, on every record, on the last try's or the stop's line too, the line left out, one more at each start), in what the title's job takes for worth another try, in its waits and in its listing. Each fails a test. Two failed nothing at first:
+    - **a wait that lost its days, or what is under a second:** the strategy handed Procrastinate the wait as three numbers, and no test had a wait that needed the first or the last. It hands over one number now, and the tests' waits of minutes hold it;
+    - **a wait that is no `timedelta`:** with that refusal taken out, the next one raised an error of the same kind, for another reason. The test now holds each refusal's own words.
+
+**What it costs:**
+
+- **a job whose error comes back each time runs four times,** spread over its waits, and holds the worker for each try: the worker runs one job at a time;
+- **a job that fails at its last try is an error in the log,** with its trace, and a row kept for seven days (`worker.KEPT_FOR`), as any job that failed;
+- **the lines of the tries before it name no error:** whoever reads the log finds the kind in the handler's own line beside it.
+
+**Still not done:**
+
+- **a queueing lock,** which keeps a second job of a kind out while one waits;
+- **more than one job at a time;**
+- **a provider's own "retry after"** (`RateLimitedError.retry_after_s`): a job's waits are the ones its listing gives.
