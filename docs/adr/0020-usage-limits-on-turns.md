@@ -335,3 +335,41 @@ The fourth is chosen, a transactional outbox: whatever happens after the ledger'
 - **After the 33 end-to-end tests** that stack's ledger had 69 rows, and not one note was left.
 - **Forty-four mistakes were planted,** one at a time, in a scratch copy of the tree: in the read that gives back the holds; in the note (left out, taken away although the counters weren't told, never taken away, its failure not caught or not said, a settle that Valkey didn't answer taken for one without warnings); in the job (the minute and its boundary, the order, the batch, the locks, going on after Valkey didn't answer, which notes it takes away, what it reports, a row the engine refuses); in the worker (the job not listed, without a schedule, never committed, under other keys than the API's, what it says); and in the migration. Each fails a test. Two failed nothing at first, and got one: the order of the job's rows, which the test's own rows happened to share, and a job that holds the ledger's rows as well as the notes.
 - **Without the tie between the two tables in the model,** the relationship that `Uncounted` has to its ledger row, SQLAlchemy writes the note before the row it points at, and the database refuses it: tried once, in the scratch copy. A foreign key alone doesn't order the two.
+
+### 2026-11-20: a count that can't be right is no count
+
+The table of what is counted says "Completed, and the provider counted: what the provider counted". Nothing looked at that count before it was written down. A model's server is someone else's program, and its counts are its own numbers. Three kinds of count that can't be right were found while the job above was built, each with a failing test:
+
+- **A negative count, or one beyond what a row holds,** broke the end of the turn. The answer had been written whole and shown to its reader. Then its outcome couldn't be recorded: the token columns of a turn and of the ledger are 32-bit integers, and the engine takes no negative count. The turn stayed `running`, and was given up on a minute later, as interrupted.
+- **A count whose cost is more than the engine counts exactly** was recorded, and its settle was refused at the end of the turn. The job would be refused it again, and since the revision above takes such a row's note away and says so in the log.
+- **A count of nothing written, beside an answer that has words,** made that answer cost only its prompt, or nothing at all. The Ollama adapter reads a counter that the server left out as 0.
+
+The review of this change found a fourth of the same kind: **a time longer than a row holds.** A model's server also says where the time went, in milliseconds, and a turn's record keeps that in 32-bit columns too. A time of 25 days or more broke the end of the turn as the first kind of count did.
+
+Options considered:
+
+1. **Believe a count up to the model's context window.** It would catch more: a count that is a thousand times too large fits in a row. But a true count can be larger than the window the models file states. Ollama's MLX engine reads a prompt three times the window in full ([ADR 0007](0007-local-models-through-ollamas-native-api.md), revision of 2026-11-10), and an OpenAI-compatible server has a window of its own. A true count would then be replaced by a guess.
+2. **Believe a count up to a multiple of what was held.** No multiple is the right one: the guess at a prompt came out at 0.66 to 1.47 of the real count on two models, as measured above, and a third model can be further off.
+3. **Believe a count unless it can't be right,** whatever the server and the model.
+
+The third is chosen.
+
+- **A count is dropped where the model's last event is taken in** (`_believed` in `actio.chat.answering`), when:
+    - one of its three numbers is negative;
+    - one of them is more than a row holds: 2,147,483,647 tokens;
+    - their cost is more than the engine counts exactly;
+    - it says that nothing was written, and the answer has words: by the same guess that would count the turn instead. An answer of nothing but line breaks has no tokens by that guess, so its count is believed, and it costs what was read.
+- **The first three are one question, which the usage limits answer:** `can_be_recorded` in `actio.usage.limits`. Whatever else costs credits one day asks it before `record`.
+- **A turn whose count was dropped is a turn without a count.** It is counted by guess, as a stopped one is, and the ledger marks it as estimated. Its own record keeps no count, so the page shows none. The log says what the server reported, as a warning.
+- **A count that passes is taken as it is,** as before. This asks whether a count can be written down, not whether it is likely.
+- **Times that a turn's record can't hold are left out the same way** (`_kept`, beside it): a negative one, or one longer than 2,147,483,647 ms. The turn then keeps no times, and nothing else about it changes: they are shown, never counted.
+- **One more row** for the table of what is counted:
+
+    | The turn | Costs |
+    |---|---|
+    | Completed, with a count that can't be right | The guess at the prompt, without the margin, and a guess at what was written. The ledger marks it as estimated |
+
+- **Why it surfaced only now:** every test's model reported counts that could be true, and so did the two real ones. The job that settles the ledger's rows again was the first code to meet a row that the engine refuses, and looking for where such a row could come from led here.
+- **Eighteen mistakes were planted,** one at a time, in a scratch copy of the tree: a count or a time taken as it comes, each bound left out or moved by one, the rule about nothing written dropped or applied to every answer, an answer taken to have words whenever it has parts, a dropped count kept all the same, the log's lines left out. Each fails a test.
+
+**Still open:** a count that is wrong and can be recorded is believed. A server that reported a hundred million tokens for an answer would have its account charged for them, and nothing takes a row of the ledger back: changing what an account has used comes with the admin pages, as "Not done yet" says of granting credits.
