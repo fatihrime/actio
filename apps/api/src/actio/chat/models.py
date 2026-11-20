@@ -24,6 +24,7 @@ from actio.identity.models import User
 
 Role = Literal["user", "assistant"]
 TurnStatus = Literal["running", "completed", "stopped", "failed", "interrupted"]
+TitleBy = Literal["question", "model", "person"]
 
 
 class Conversation(Base):
@@ -44,6 +45,7 @@ class Conversation(Base):
         ),
         # For the list of an account's conversations, most recently active first.
         Index(None, "user_id", "last_active_at", "id"),
+        CheckConstraint("title_by IN ('question', 'model', 'person')", name="title_by_is_known"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
@@ -53,6 +55,12 @@ class Conversation(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey(User.id, ondelete="CASCADE"))
     title: Mapped[str | None]
     """Empty until someone, or something, names the conversation."""
+    title_by: Mapped[TitleBy] = mapped_column(String)
+    """Who named the conversation: `question`, its title is still its first question's
+    first line, or empty, and a model may replace it; `model`, a model wrote it
+    (`actio.chat.titles`); `person`, someone renamed it, and nothing writes over it."""
+    title_asked_at: Mapped[datetime | None]
+    """When a model was asked for the title. Empty: never."""
     current_leaf_id: Mapped[uuid.UUID | None]
     """The last message of the branch that is shown. Empty while there are no messages."""
     created_at: Mapped[datetime]

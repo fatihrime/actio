@@ -247,6 +247,7 @@ async def answer(
     emit: Callable[[Step], Awaitable[None]],
     halt: Halt,
     on_beat: Callable[[], Awaitable[None]] | None = None,
+    ask_for_title: bool = False,
 ) -> Ended:
     """Ask the model, hand its answer to `emit` step by step, and record the turn at
     the end.
@@ -254,7 +255,8 @@ async def answer(
     The turn was started before (`turns.ask`), and `reserved` holds the credits it may
     cost. This writes its outcome, and what it used, in a transaction of its own, from
     `open_session`. It returns once that is done: whoever is told that the turn has
-    ended can rely on the answer being stored, and counted.
+    ended can rely on the answer being stored, and counted. `ask_for_title`, that a
+    model is named for titles, goes to `turns.finish` with it.
 
     When the model's server is busy with other answers, the turn first waits at its
     gate, saying all the while that it is alive.
@@ -327,6 +329,7 @@ async def answer(
                     finished,
                     usage,
                     reserved,
+                    ask_for_title=ask_for_title,
                 )
     return Ended(ending, finished, credits, warnings)
 
@@ -523,8 +526,11 @@ async def _record(
     now: datetime,
     usage: UsageLimits,
     reserved: Reserved,
+    *,
+    ask_for_title: bool = False,
 ) -> tuple[int | None, tuple[UsageWarning, ...]]:
-    """Write how the turn ended, and what it used, in one transaction. Then tell the
+    """Write how the turn ended, and what it used, in one transaction, with the job that
+    asks for the conversation's title when it is due (`turns.finish`). Then tell the
     counters, and once they were told, note that they were, in a transaction of its
     own. Returns what it cost, and the warnings the counters gave.
 
@@ -547,7 +553,14 @@ async def _record(
                     now=now,
                 )
             recorded = await turns.finish(
-                db, conversation_id, turn_id, ending, answer_id=answer_id, now=now, credits=credits
+                db,
+                conversation_id,
+                turn_id,
+                ending,
+                answer_id=answer_id,
+                now=now,
+                credits=credits,
+                ask_for_title=ask_for_title,
             )
             if recorded == "left":
                 # The turn was given up on while it was still being written, and its

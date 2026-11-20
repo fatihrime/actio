@@ -59,8 +59,9 @@ def create_app(
     models file and the plans file are read when the app starts, and a mistake in
     either stops the app from starting.
 
-    `with_worker` runs the worker inside the app, on the app's resources, for as long
-    as the app runs (`actio.worker.run_inside`), and `/api/readyz` says whether it works.
+    `with_worker` runs the worker inside the app, on the app's resources and its
+    catalog, for as long as the app runs (`actio.worker.run_inside`), and `/api/readyz`
+    says whether it works.
     """
     settings = settings or Settings()
 
@@ -85,7 +86,8 @@ def create_app(
             )
             app.state.turn_runner = runner = TurnRunner()
             app.state.turn_readers = TurnReaders()
-            inside = _WorkerInside(settings, resources) if with_worker else None
+            # On the app's own catalog: a title waits at the same gate as the answers.
+            inside = _WorkerInside(settings, resources, offered) if with_worker else None
             # What the readiness probe asks whether the worker works: nothing, in an
             # app that runs none.
             app.state.worker_works = inside.works if inside is not None else None
@@ -169,12 +171,16 @@ class _WorkerInside:
     or can't work, the beat is forgotten.
     """
 
-    def __init__(self, settings: Settings, resources: Resources) -> None:
+    def __init__(self, settings: Settings, resources: Resources, catalog: Catalog) -> None:
         self._clock = asyncio.get_running_loop().time
         self._last_beat = alive.LastBeat()
         self._task = asyncio.create_task(
             worker.run_inside(
-                settings, resources, on_beat=self._beat, on_stopped=self._last_beat.forget
+                settings,
+                resources,
+                catalog,
+                on_beat=self._beat,
+                on_stopped=self._last_beat.forget,
             ),
             name="worker",
         )

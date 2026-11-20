@@ -75,8 +75,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         # Reading which migration the database is at makes Alembic say, at the info
         # level, how it would run migrations. The worker runs none.
         logging.getLogger("alembic").setLevel(logging.WARNING)
+        # And the HTTP client writes a line for each request to a model's server: two
+        # for every title. The `all` role leaves them out too.
+        logging.getLogger("httpx2").setLevel(logging.WARNING)
         try:
+            # The models file, as for the API: a mistake in it is one line, before the
+            # worker starts. One that only shows when the models are built, such as a
+            # key's variable that isn't set, comes out of the run. No plans file: no job
+            # costs anything.
+            read_file(settings.models_file)
             asyncio.run(worker.run(settings))
+        except CatalogError as error:
+            parser.exit(2, f"actio: {error}\n")
         except (jobs.DatabaseUnreachableError, worker.NotMigratedError) as error:
             parser.exit(1, f"actio: {error}\n")
         return

@@ -8,7 +8,9 @@ exist before a model is asked anything, in one transaction:
 - the turn itself, marked `running`.
 
 So a question never exists without the turn that is answering it. Finishing a turn
-writes the answer, if the model produced anything, and how the turn ended.
+writes the answer, if the model produced anything, and how the turn ended. The first
+turn of a conversation that completes also asks a model for the conversation's title,
+when a model is named for that (`actio.chat.titles`).
 
 One turn runs at a time in a conversation. While it runs, the process that writes its
 answer says every few seconds that it is still at it, and saves what the answer holds so
@@ -36,9 +38,10 @@ from sqlalchemy import BigInteger, ColumnElement, and_, func, literal, not_, sel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from actio.chat import conversations, tree
+from actio.chat import conversations, titles, tree
 from actio.chat.models import Conversation, Message, Turn
-from actio.chat.parts import Part, TextPart
+from actio.chat.parts import Part
+from actio.core import jobs
 from actio_llm import Timings, Usage
 
 logger = logging.getLogger(__name__)
@@ -54,10 +57,6 @@ renewed, and how long what it streams is kept."""
 
 STALE_BATCH = 500
 """How many stale turns one run of `give_up_on_stale_everywhere` gives up on at most."""
-
-TITLE_LENGTH = 60
-"""A new conversation is named after its first question, cut to about this many
-characters."""
 
 _UNIQUE_VIOLATION = "23505"  # Postgres's code for "this value is already taken"
 
@@ -245,11 +244,16 @@ async def finish(
     answer_id: uuid.UUID,
     now: datetime,
     credits: int | None = None,
+    ask_for_title: bool = False,
 ) -> Recorded:
     """Record how a turn ended, and write its answer if the model produced anything.
 
     `credits` is what the turn cost its account, when it cost something: the same
     number the usage ledger gets, in the same transaction.
+
+    `ask_for_title` says that a model is named for titles. Then a turn that completed
+    asks it for the conversation's title, if it is the conversation's first to have
+    done so and nobody has named the conversation: see `_ask_for_title`.
 
     Says what became of it:
 
@@ -275,7 +279,34 @@ async def finish(
     if turn.status != "running":
         return "left"
     await _end(db, conversation, turn, ending, answer_id=answer_id, now=now, credits=credits)
+    if ask_for_title and ending.status == "completed":
+        await _ask_for_title(db, conversation, now=now)
     return "recorded"
+
+
+async def _ask_for_title(db: AsyncSession, conversation: Conversation, *, now: datetime) -> None:
+    """Defer the job that asks a model for the conversation's title, in this
+    transaction, and note when: once for a conversation, and only while it is named
+    after its first question. A conversation someone renamed is never asked for one.
+
+    A title must never keep a turn from being recorded. The job is deferred in a
+    savepoint of its own, so that one the queue refuses takes only itself back. The log
+    says so, and the conversation keeps its first line, with nothing noted: its next
+    turn that completes asks again."""
+    if conversation.title_by != "question" or conversation.title_asked_at is not None:
+        return
+    try:
+        async with db.begin_nested():
+            await jobs.defer(db, titles.WRITE_TITLE, conversation_id=str(conversation.id))
+    except jobs.DeferError as error:
+        logger.warning(
+            "conversation %s: its title couldn't be asked for, and it keeps its first line (%s)",
+            conversation.id,
+            error,
+        )
+        return
+    conversation.title_asked_at = now
+    await db.flush()
 
 
 async def still_alive(
@@ -430,19 +461,6 @@ async def latest_for(
     return found
 
 
-def title_from(parts: list[Part]) -> str | None:
-    """A title for a conversation, from its first question: its first line, cut at a
-    word when it is long. `None` if the question has no text to take one from."""
-    text = "".join(part.text for part in parts if isinstance(part, TextPart)).strip()
-    first_line = " ".join(text.split("\n", 1)[0].split())
-    if not first_line:
-        return None
-    if len(first_line) <= TITLE_LENGTH:
-        return first_line
-    cut = first_line[:TITLE_LENGTH].rsplit(" ", 1)[0] or first_line[:TITLE_LENGTH]
-    return cut.rstrip(" ,;:.") + "…"
-
-
 async def _create(
     db: AsyncSession,
     conversation_id: uuid.UUID,
@@ -458,7 +476,7 @@ async def _create(
         if getattr(error.orig, "sqlstate", None) == _UNIQUE_VIOLATION:
             raise IdTakenError from error
         raise
-    conversation.title = title_from(parts)
+    conversation.title = titles.title_from(parts)  # until a model writes a better one
     return conversation
 
 

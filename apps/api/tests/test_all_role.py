@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import actio.app
 from actio import worker
+from actio.catalog import Catalog
 from actio.chat.running import TurnRunner
 from actio.core import alive, jobs, schema
 from actio.core.database import create_engine, create_session_factory
@@ -73,19 +74,19 @@ class Slow:
 
 
 class Lists(Protocol):
-    def __call__(self, *listed: jobs.Job) -> list[Resources]: ...
+    def __call__(self, *listed: jobs.Job) -> list[tuple[Resources, Catalog]]: ...
 
 
 @pytest.fixture
 def lists(monkeypatch: pytest.MonkeyPatch) -> Lists:
     """Call with the jobs that every worker of the test runs, in place of the real ones.
-    Returns the resources each worker is given, as it is given them."""
+    Returns the resources and the models each worker is given, as it is given them."""
 
-    def replace(*listed: jobs.Job) -> list[Resources]:
-        given: list[Resources] = []
+    def replace(*listed: jobs.Job) -> list[tuple[Resources, Catalog]]:
+        given: list[tuple[Resources, Catalog]] = []
 
-        def listing(resources: Resources, *, clock: Any) -> list[jobs.Job]:  # noqa: ARG001
-            given.append(resources)
+        def listing(resources: Resources, catalog: Catalog, *, clock: Any) -> list[jobs.Job]:  # noqa: ARG001
+            given.append((resources, catalog))
             return list(listed)
 
         monkeypatch.setattr(worker, "listed", listing)
@@ -152,9 +153,11 @@ async def test_an_app_with_the_worker_runs_a_deferred_job_on_the_apps_own_resour
     open_app: Any,
     lists: Lists,
     opened: list[Resources],
+    catalog: Catalog,
 ) -> None:
-    """The job is in the queue before the app starts: one committed in the instant a
-    worker starts can wait for its next look, five seconds later."""
+    """And with the app's own models, at the same gates as its answers. The job is in
+    the queue before the app starts: one committed in the instant a worker starts can
+    wait for its next look, five seconds later."""
     noted = Noted()
     given = lists(jobs.Job("note", noted))
     await jobs.defer(db, "note", n=1)
@@ -162,12 +165,13 @@ async def test_an_app_with_the_worker_runs_a_deferred_job_on_the_apps_own_resour
 
     # The limit is on the app's start and shutdown too: an app that waited for ever for
     # its worker would hang here, and the run with it.
-    async with asyncio.timeout(20), open_app(settings, with_worker=True):
+    async with asyncio.timeout(20), open_app(settings, catalog=catalog, with_worker=True):
         await until(lambda: noted.runs == [{"n": 1}], within=10)
 
     [the_apps] = opened
-    [the_workers] = given
+    [(the_workers, its_models)] = given
     assert the_workers is the_apps  # the worker opened none of its own
+    assert its_models is catalog  # nor read the models file again
     assert await queue_of(migrated) == []  # it succeeded, and was deleted
 
 

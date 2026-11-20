@@ -41,6 +41,16 @@ async def test_the_engine_is_async_and_does_not_connect_until_used() -> None:
     await engine.dispose()
 
 
+@pytest.mark.anyio
+async def test_a_statement_that_fails_is_said_without_its_values() -> None:
+    """They are what people wrote, and an error's text ends up in the log. What that
+    keeps out of a real error is tested where a statement fails: `test_titles.py`."""
+    engine = create_engine("postgresql://actio:pw@127.0.0.1:1/actio")
+
+    assert engine.sync_engine.hide_parameters is True
+    await engine.dispose()
+
+
 def test_constraints_get_predictable_names() -> None:
     """So a migration can drop one by a name that is the same on every database."""
     assert Base.metadata.naming_convention["pk"] == "pk_%(table_name)s"

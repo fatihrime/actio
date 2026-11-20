@@ -107,7 +107,8 @@ def unreachable() -> httpx2.MockTransport:
 
 
 def test_the_file_in_the_repository_is_valid() -> None:
-    """What `make up` and `make dev` start with."""
+    """What `make up` and `make dev` start with. The default model names conversations
+    too: on a laptop it is the one that is loaded already."""
     file = read_file(ROOT / "config" / "models.toml")
 
     assert file.default in file.models
@@ -115,6 +116,7 @@ def test_the_file_in_the_repository_is_valid() -> None:
     assert file.providers[standard.provider].kind == "ollama"
     assert file.providers[standard.provider].at_once == 1  # one answer at a time
     assert standard.model == "qwen3.5:4b-q4_K_M"
+    assert file.titles == "standard"
 
 
 def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() -> None:
@@ -131,6 +133,8 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
     assert standard.thinking is True  # so a test can ask for reasoning
     # Every answer is asked at once: the tests run side by side, on one fake.
     assert provider.at_once is None
+    # The tests find a conversation in the list by its first question's words.
+    assert file.titles is None
 
 
 def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:
@@ -140,6 +144,21 @@ def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:
     assert list(file.models) == ["standard", "big"]
     assert file.models["big"].thinking is True
     assert file.providers["lab"].url == "http://lab.internal:8000/v1"
+
+
+async def test_a_file_names_the_model_that_writes_titles_or_none(tmp_path: Path) -> None:
+    """Left out, no model does, and a conversation keeps its first question's first
+    line."""
+    named = parsed(GOOD.replace('default = "standard"', 'default = "standard"\ntitles = "big"'))
+
+    async with (
+        catalogs.build(named, ollama_url="http://ollama.internal:11434") as with_titles,
+        catalogs.build(parsed(GOOD), ollama_url="http://ollama.internal:11434") as without,
+    ):
+        assert named.titles == "big"
+        assert with_titles.titles == "big"
+        assert read_file(written(tmp_path, GOOD)).titles is None
+        assert without.titles is None
 
 
 def test_a_missing_file_says_where_it_looked_and_how_to_point_elsewhere(tmp_path: Path) -> None:
@@ -158,6 +177,11 @@ MISTAKES = {
         'default = "standard"',
         'default = "best"',
         "is not one of the models",
+    ),
+    "a model for titles that isn't one": (
+        'default = "standard"',
+        'default = "standard"\ntitles = "tiny"',
+        'titles = "tiny" is not one of the models',
     ),
     "a model on a provider that isn't there": (
         'provider = "lab"',

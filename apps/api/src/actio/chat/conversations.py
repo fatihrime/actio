@@ -13,6 +13,7 @@ from datetime import datetime
 
 from sqlalchemy import select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from actio.chat.models import Conversation
 
@@ -31,9 +32,14 @@ class Cursor:
 async def create(
     db: AsyncSession, conversation_id: uuid.UUID, *, user_id: uuid.UUID, now: datetime
 ) -> Conversation:
-    """Start an empty conversation for `user_id`, under the id the caller chose."""
+    """Start an empty conversation for `user_id`, under the id the caller chose. It is
+    named after its first question, which a model may replace (`title_by`)."""
     conversation = Conversation(
-        id=conversation_id, user_id=user_id, created_at=now, last_active_at=now
+        id=conversation_id,
+        user_id=user_id,
+        title_by="question",
+        created_at=now,
+        last_active_at=now,
     )
     db.add(conversation)
     await db.flush()
@@ -101,11 +107,17 @@ async def list_page(
 
 
 def rename(conversation: Conversation, title: str) -> None:
-    """Give the conversation a title. Its place in the list doesn't change."""
+    """Give the conversation a title. Its place in the list doesn't change. It is a
+    person's title now, which no model writes over (`actio.chat.titles`).
+
+    The title is written even when it is the one the conversation was read with: a
+    model may have written another since, and what the person said stands."""
     title = title.strip()
     if not title or len(title) > TITLE_MAX:
         raise ValueError(f"a title has 1 to {TITLE_MAX} characters")
     conversation.title = title
+    conversation.title_by = "person"
+    flag_modified(conversation, "title")
 
 
 async def delete(db: AsyncSession, conversation: Conversation) -> None:

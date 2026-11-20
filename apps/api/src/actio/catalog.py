@@ -126,6 +126,9 @@ class CatalogFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     default: Name
+    titles: Name | None = None
+    """The model that names a conversation after its first answer (`actio.chat.titles`).
+    Left out, none does, and a conversation keeps its first question's first line."""
     providers: dict[Name, ProviderEntry] = Field(min_length=1)
     models: dict[Name, ModelEntry] = Field(min_length=1)
 
@@ -133,6 +136,8 @@ class CatalogFile(BaseModel):
     def _names_what_exists(self) -> Self:
         if self.default not in self.models:
             raise ValueError(f'default = "{self.default}" is not one of the models')
+        if self.titles is not None and self.titles not in self.models:
+            raise ValueError(f'titles = "{self.titles}" is not one of the models')
         for name, model in self.models.items():
             provider = self.providers.get(model.provider)
             if provider is None:
@@ -242,12 +247,19 @@ class Catalog:
     """The models on offer. Iterating gives them in the file's order."""
 
     def __init__(
-        self, models: Mapping[str, OfferedModel], *, default: str, thinking: Mapping[str, bool]
+        self,
+        models: Mapping[str, OfferedModel],
+        *,
+        default: str,
+        thinking: Mapping[str, bool],
+        titles: str | None = None,
     ) -> None:
         self._models = dict(models)
         self._declared_thinking = dict(thinking)
         self._statuses: dict[str, tuple[datetime, ModelStatus]] = {}
         self.default = default
+        self.titles = titles
+        """The name of the model that names conversations. `None`: none does."""
 
     def __iter__(self) -> Iterator[OfferedModel]:
         return iter(self._models.values())
@@ -349,7 +361,7 @@ async def build(
             for name, entry in file.models.items()
         }
         declared = {name: bool(entry.thinking) for name, entry in file.models.items()}
-        yield Catalog(models, default=file.default, thinking=declared)
+        yield Catalog(models, default=file.default, thinking=declared, titles=file.titles)
 
 
 @asynccontextmanager

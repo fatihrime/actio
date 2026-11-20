@@ -27,7 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from valkey.exceptions import ConnectionError as ValkeyConnectionError
 
 from actio import worker
-from actio.chat import turns
+from actio.catalog import Catalog
+from actio.chat import titles, turns
 from actio.chat.models import Conversation, Message, Turn
 from actio.chat.parts import ReasoningPart, TextPart
 from actio.chat.turns import STALE_AFTER, Draft
@@ -53,6 +54,10 @@ pytestmark = pytest.mark.anyio
 # of usage its counters missed: where there is none, it never connects.
 NOWHERE_VALKEY = "valkey://127.0.0.1:1/0"
 NOWHERE_DATABASE = "postgresql://actio:unused@127.0.0.1:1/actio"  # nothing listens on port 1
+# The repository's models file, wherever the tests are run from: the worker reads it.
+MODELS = Path(__file__).resolve().parents[3] / "config" / "models.toml"
+NO_MODELS = Catalog({}, default="standard", thinking={})
+"""The models of a worker whose jobs, in these tests, ask none."""
 
 
 def the_sweep(listed: list[jobs.Job]) -> jobs.Job:
@@ -122,19 +127,22 @@ async def a_turn(db: AsyncSession, *, heard_from: datetime) -> Turn:
     return begun.turn
 
 
-async def test_the_worker_runs_each_of_its_four_jobs_every_ten_minutes(
+async def test_the_worker_runs_four_jobs_every_ten_minutes_and_writes_titles_when_told_to(
     settings: Settings, clock: Any
 ) -> None:
-    """The last looks after the queue itself, and is given it."""
+    """The fourth looks after the queue itself, and is given it. The fifth has no
+    schedule: a turn defers it, once for a conversation."""
     async with open_resources(settings) as resources:
-        listed = worker.listed(resources, clock=lambda: clock.now)
+        listed = worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
 
     assert [(job.name, job.every, job.with_queue) for job in listed] == [
         (worker.SWEEP, "*/10 * * * *", False),
         (worker.GIVE_UP, "*/10 * * * *", False),
         (worker.COUNT_MISSED, "*/10 * * * *", False),
         (worker.LOOK_AFTER_QUEUE, "*/10 * * * *", True),
+        ("write-title", None, False),
     ]
+    assert titles.WRITE_TITLE == "write-title"
 
 
 async def test_the_worker_keeps_a_job_that_ended_without_succeeding_for_a_week(
@@ -155,7 +163,9 @@ async def test_the_worker_keeps_a_job_that_ended_without_succeeding_for_a_week(
     await db.commit()
 
     async with open_resources(settings) as resources:
-        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        looking = looking_after_the_queue(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        )
         # Run when it was deferred only, not by its schedule as well.
         await work_through(dataclasses.replace(looking, every=None))
 
@@ -178,7 +188,9 @@ async def test_the_worker_says_how_many_jobs_it_ran_again_and_how_many_dead_work
     caplog.set_level(logging.INFO, logger="actio.worker")
 
     async with open_resources(settings) as resources:
-        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        looking = looking_after_the_queue(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        )
         leave_it = partial(queue_books.left_doing, left)
         await work_through(
             dataclasses.replace(looking, run=first_then(leave_it, looking), every=None),
@@ -229,7 +241,9 @@ async def test_the_worker_says_so_when_a_look_did_only_one_of_the_two(
             await queue_books.left_doing(left, worker_gone=True)
 
     async with open_resources(settings) as resources:
-        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        looking = looking_after_the_queue(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        )
         await work_through(
             dataclasses.replace(looking, run=first_then(leave_one_of_the_two, looking), every=None),
             jobs.Job("note", does_nothing),
@@ -256,7 +270,9 @@ async def test_the_worker_names_each_job_it_gives_up_on(
     caplog.set_level(logging.INFO, logger="actio.worker")
 
     async with open_resources(settings) as resources:
-        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        looking = looking_after_the_queue(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        )
         leave_it = partial(queue_books.left_doing, left, worker_gone=True)
         await work_through(
             dataclasses.replace(looking, run=first_then(leave_it, looking), every=None),
@@ -289,7 +305,9 @@ async def test_a_look_after_the_queue_that_finds_nothing_says_nothing(
     caplog.set_level(logging.INFO, logger="actio.worker")
 
     async with open_resources(settings) as resources:
-        looking = looking_after_the_queue(worker.listed(resources, clock=lambda: clock.now))
+        looking = looking_after_the_queue(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        )
         await work_through(dataclasses.replace(looking, every=None))
 
     assert [record for record in caplog.records if record.name == "actio.worker"] == []
@@ -322,7 +340,7 @@ async def test_the_sweep_deletes_what_expired_by_the_clock_it_was_given(
     caplog.set_level(logging.INFO, logger="actio.worker")
 
     async with open_resources(settings) as resources:
-        sweep = the_sweep(worker.listed(resources, clock=lambda: clock.now))
+        sweep = the_sweep(worker.listed(resources, NO_MODELS, clock=lambda: clock.now))
         # Run when it was deferred only, not by its schedule as well: that is the test above.
         await work_through(dataclasses.replace(sweep, every=None))
 
@@ -342,7 +360,7 @@ async def test_a_sweep_that_finds_nothing_says_nothing(
     caplog.set_level(logging.INFO, logger="actio.worker")
 
     async with open_resources(settings) as resources:
-        await the_sweep(worker.listed(resources, clock=lambda: clock.now)).run()
+        await the_sweep(worker.listed(resources, NO_MODELS, clock=lambda: clock.now)).run()
 
     assert (await db.scalars(select(User.id))).all() == [guest.user_id]
     assert [record for record in caplog.records if record.name == "actio.worker"] == []
@@ -366,7 +384,9 @@ async def test_the_worker_gives_up_on_stale_turns_by_the_clock_it_was_given(
     caplog.set_level(logging.INFO, logger="actio.worker")
 
     async with open_resources(settings) as resources:
-        giving_up = giving_up_on_stale_turns(worker.listed(resources, clock=lambda: clock.now))
+        giving_up = giving_up_on_stale_turns(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        )
         # Run when it was deferred only, not by its schedule as well.
         await work_through(dataclasses.replace(giving_up, every=None))
 
@@ -403,7 +423,9 @@ async def test_the_worker_keeps_what_a_dead_process_had_written_by_its_last_beat
     caplog.set_level(logging.INFO, logger="actio.worker")
 
     async with open_resources(settings) as resources:
-        await giving_up_on_stale_turns(worker.listed(resources, clock=lambda: clock.now)).run()
+        await giving_up_on_stale_turns(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        ).run()
 
     await db.refresh(wrote)
     await db.refresh(silent)
@@ -446,7 +468,9 @@ async def test_a_worker_that_finds_no_stale_turn_says_nothing(
     caplog.set_level(logging.INFO, logger="actio.worker")
 
     async with open_resources(settings) as resources:
-        await giving_up_on_stale_turns(worker.listed(resources, clock=lambda: clock.now)).run()
+        await giving_up_on_stale_turns(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        ).run()
 
     assert (await db.scalars(select(Turn.status))).all() == ["running"]
     assert [record for record in caplog.records if record.name == "actio.worker"] == []
@@ -476,7 +500,9 @@ async def test_the_worker_counts_what_the_api_couldnt_under_the_keys_the_api_rea
     missed = (await browser.get("/api/usage")).json()["windows"]
     clock.advance(seconds=COUNTED_WITHIN.total_seconds())
     async with open_resources(settings) as resources:
-        await counting_missed_usage(worker.listed(resources, clock=lambda: clock.now)).run()
+        await counting_missed_usage(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        ).run()
     counted = (await browser.get("/api/usage")).json()["windows"]
 
     assert answered.status_code == 200
@@ -530,8 +556,12 @@ async def test_the_worker_says_what_it_counted_that_the_counters_had_missed(
         clock.advance(seconds=COUNTED_WITHIN.total_seconds())
         caplog.set_level(logging.INFO, logger="actio.worker")
 
-        await counting_missed_usage(worker.listed(resources, clock=lambda: clock.now)).run()
-        await counting_missed_usage(worker.listed(resources, clock=lambda: clock.now)).run()
+        await counting_missed_usage(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        ).run()
+        await counting_missed_usage(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        ).run()
 
     said = [
         (record.levelno, record.getMessage())
@@ -568,7 +598,9 @@ async def test_a_worker_that_cant_reach_valkey_says_so_once_and_leaves_the_rows_
     cut_off = settings.model_copy(update={"valkey_url": SecretStr(NOWHERE_VALKEY)})
 
     async with open_resources(cut_off) as resources, asyncio.timeout(10):
-        await counting_missed_usage(worker.listed(resources, clock=lambda: clock.now)).run()
+        await counting_missed_usage(
+            worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
+        ).run()
 
     said = [
         (record.levelno, record.getMessage())
@@ -601,6 +633,7 @@ async def test_the_worker_process_sweeps_by_its_schedule_and_ends_well_when_told
     environment = os.environ | {
         "ACTIO_DATABASE_URL": migrated,
         "ACTIO_VALKEY_URL": NOWHERE_VALKEY,
+        "ACTIO_MODELS_FILE": str(MODELS),
         "ACTIO_ALIVE_FILE": str(alive_file),
     }
 
@@ -662,7 +695,11 @@ async def test_the_worker_process_gives_up_on_a_stale_turn_by_its_schedule(
     The process is in a group of its own, which is ended as one, pass or fail."""
     turn = await a_turn(db, heard_from=datetime.now(UTC) - timedelta(minutes=2))
     await db.commit()
-    environment = os.environ | {"ACTIO_DATABASE_URL": migrated, "ACTIO_VALKEY_URL": NOWHERE_VALKEY}
+    environment = os.environ | {
+        "ACTIO_DATABASE_URL": migrated,
+        "ACTIO_VALKEY_URL": NOWHERE_VALKEY,
+        "ACTIO_MODELS_FILE": str(MODELS),
+    }
 
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -710,16 +747,46 @@ async def test_the_worker_touches_its_file_only_when_its_settings_name_one(
         given.append(options)
 
     monkeypatch.setattr(jobs, "work", work)
-    database, valkey = SecretStr(NOWHERE_DATABASE), SecretStr(NOWHERE_VALKEY)
     alive_file = tmp_path / "alive"
 
-    await worker.run(Settings(database_url=database, valkey_url=valkey))
-    await worker.run(Settings(database_url=database, valkey_url=valkey, alive_file=alive_file))
+    await worker.run(nowhere())
+    await worker.run(nowhere(alive_file=alive_file))
 
     by_hand, in_a_container = given
     assert by_hand["on_beat"] is None
     in_a_container["on_beat"]()
     assert alive_file.is_file()
+
+
+async def test_the_worker_role_gives_its_jobs_the_models_its_settings_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its own: read from the models file, here one that names a model of its own for
+    titles. Nothing connects: the worker itself is replaced by one that does nothing,
+    and its list of jobs by one that notes what it was given."""
+    models = tmp_path / "models.toml"
+    models.write_text(
+        MODELS.read_text().replace('titles = "standard"', 'titles = "small"')
+        + '\n[models.small]\ntitle = "Small"\nprovider = "ollama"\nmodel = "small:1b"\n'
+        "context_window = 4096\nmax_output_tokens = 512\n"
+    )
+    given: list[Catalog] = []
+
+    def listing(_resources: Any, catalog: Catalog, *, clock: Any) -> list[jobs.Job]:  # noqa: ARG001
+        given.append(catalog)
+        return []
+
+    async def work(_listed: list[jobs.Job], **_options: Any) -> None:
+        pass
+
+    monkeypatch.setattr(worker, "listed", listing)
+    monkeypatch.setattr(jobs, "work", work)
+
+    await worker.run(nowhere(models_file=models))
+
+    [catalog] = given
+    assert [model.name for model in catalog] == ["standard", "small"]
+    assert catalog.titles == "small"
 
 
 async def test_a_worker_that_cant_ask_the_database_for_its_migration_says_so_in_one_line(
@@ -734,12 +801,9 @@ async def test_a_worker_that_cant_ask_the_database_for_its_migration_says_so_in_
         await options["check"]()
 
     monkeypatch.setattr(jobs, "work", work)
-    nowhere = Settings(
-        database_url=SecretStr(NOWHERE_DATABASE), valkey_url=SecretStr(NOWHERE_VALKEY)
-    )
 
     with pytest.raises(jobs.DatabaseUnreachableError) as refused:
-        await worker.run(nowhere)
+        await worker.run(nowhere())
 
     said = str(refused.value)
     assert said.startswith("couldn't read the database's migration: connection failed")
@@ -753,6 +817,7 @@ async def test_the_worker_process_told_to_stop_while_it_connects_ends_well() -> 
     environment = os.environ | {
         "ACTIO_DATABASE_URL": NOWHERE_DATABASE,
         "ACTIO_VALKEY_URL": NOWHERE_VALKEY,
+        "ACTIO_MODELS_FILE": str(MODELS),
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -792,9 +857,46 @@ async def test_the_worker_process_told_to_stop_while_it_connects_ends_well() -> 
     assert "Traceback" not in log
 
 
+async def test_the_worker_process_with_a_mistake_in_its_models_file_says_so_in_one_line(
+    tmp_path: Path,
+) -> None:
+    """As the API does: before it starts, with status 2. Its database is nowhere, and it
+    never gets as far as trying it."""
+    broken = tmp_path / "models.toml"
+    broken.write_text(MODELS.read_text().replace('titles = "standard"', 'titles = "best"'))
+    environment = os.environ | {
+        "ACTIO_DATABASE_URL": NOWHERE_DATABASE,
+        "ACTIO_VALKEY_URL": NOWHERE_VALKEY,
+        "ACTIO_MODELS_FILE": str(broken),
+    }
+
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "actio",
+        "--role",
+        "worker",
+        env=environment,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        async with asyncio.timeout(20):
+            out, err = await process.communicate()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.communicate()
+
+    assert process.returncode == 2, err.decode()
+    assert out == b""
+    assert err.decode() == f'actio: {broken}: titles = "best" is not one of the models\n'
+
+
 def nowhere(**more: Any) -> Settings:
     """Settings whose database and Valkey are nowhere: in the tests that take them,
-    nothing connects."""
+    nothing connects. The models file is the repository's, unless `more` says another."""
+    more.setdefault("models_file", MODELS)
     return Settings(
         database_url=SecretStr(NOWHERE_DATABASE), valkey_url=SecretStr(NOWHERE_VALKEY), **more
     )
@@ -827,8 +929,8 @@ async def test_inside_the_api_the_worker_leaves_the_signals_alone_and_touches_it
     alive_file = tmp_path / "alive"
 
     async with open_resources(nowhere()) as resources, asyncio.timeout(5):
-        await worker.run_inside(nowhere(), resources)
-        await worker.run_inside(nowhere(alive_file=alive_file), resources)
+        await worker.run_inside(nowhere(), resources, NO_MODELS)
+        await worker.run_inside(nowhere(alive_file=alive_file), resources, NO_MODELS)
 
     by_hand, in_a_container = given
     assert by_hand["on_signals"] is False
@@ -863,9 +965,11 @@ async def test_inside_the_api_a_beat_touches_the_file_and_tells_whoever_runs_the
     alive_file, untouchable = tmp_path / "alive", tmp_path / "a-file" / "alive"
 
     async with open_resources(nowhere()) as resources, asyncio.timeout(5):
-        await worker.run_inside(nowhere(alive_file=alive_file), resources, on_beat=hear)
-        await worker.run_inside(nowhere(alive_file=untouchable), resources, on_beat=hear)
-        await worker.run_inside(nowhere(alive_file=alive_file), resources, on_beat=fail_to_hear)
+        await worker.run_inside(nowhere(alive_file=alive_file), resources, NO_MODELS, on_beat=hear)
+        await worker.run_inside(nowhere(alive_file=untouchable), resources, NO_MODELS, on_beat=hear)
+        await worker.run_inside(
+            nowhere(alive_file=alive_file), resources, NO_MODELS, on_beat=fail_to_hear
+        )
 
     both, cant_touch, cant_hear = (options["on_beat"] for options in given)
     both()
@@ -913,7 +1017,7 @@ async def test_inside_the_api_a_worker_that_cant_work_says_why_in_one_line_each_
 
     monkeypatch.setattr(jobs, "work", work)
     async with open_resources(nowhere()) as resources:
-        inside = asyncio.create_task(worker.run_inside(nowhere(), resources))
+        inside = asyncio.create_task(worker.run_inside(nowhere(), resources, NO_MODELS))
         try:
             await until(lambda: len(tries) == 3, within=5)
         finally:
@@ -944,7 +1048,7 @@ async def test_inside_the_api_a_worker_that_ends_with_another_error_says_it_with
 
     monkeypatch.setattr(jobs, "work", work)
     async with open_resources(nowhere()) as resources:
-        inside = asyncio.create_task(worker.run_inside(nowhere(), resources))
+        inside = asyncio.create_task(worker.run_inside(nowhere(), resources, NO_MODELS))
         try:
             await until(lambda: len(tries) == 2, within=5)
         finally:
@@ -986,7 +1090,9 @@ async def test_inside_the_api_a_worker_that_ended_says_so_each_time_before_it_tr
 
     monkeypatch.setattr(jobs, "work", work)
     async with open_resources(nowhere()) as resources:
-        inside = asyncio.create_task(worker.run_inside(nowhere(), resources, on_stopped=stopped))
+        inside = asyncio.create_task(
+            worker.run_inside(nowhere(), resources, NO_MODELS, on_stopped=stopped)
+        )
         try:
             async with asyncio.timeout(5):
                 await working.wait()
@@ -1016,7 +1122,7 @@ async def test_inside_the_api_a_worker_told_to_stop_while_it_waits_to_try_again_
 
     monkeypatch.setattr(jobs, "work", work)
     async with open_resources(nowhere()) as resources:
-        inside = asyncio.create_task(worker.run_inside(nowhere(), resources))
+        inside = asyncio.create_task(worker.run_inside(nowhere(), resources, NO_MODELS))
         await until(lambda: bool(tries), within=5)
         await asyncio.sleep(0.05)  # in its pause
         told = time.monotonic()
@@ -1079,7 +1185,9 @@ async def test_inside_the_api_a_worker_whose_stop_ends_in_an_error_is_not_starte
     monkeypatch.setattr(jobs, "work", work)
     async with open_resources(nowhere()) as resources:
         inside = asyncio.create_task(
-            worker.run_inside(nowhere(), resources, on_stopped=lambda: stopped.append(True))
+            worker.run_inside(
+                nowhere(), resources, NO_MODELS, on_stopped=lambda: stopped.append(True)
+            )
         )
         try:
             async with asyncio.timeout(5):

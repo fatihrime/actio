@@ -58,10 +58,14 @@ def sqlalchemy_url(database_url: str) -> URL:
 
 
 def create_engine(database_url: str) -> AsyncEngine:
-    """The process's connection pool. It connects on first use, not here."""
+    """The process's connection pool. It connects on first use, not here.
+
+    A statement that fails is said without its values: they are what people wrote, a
+    question, an answer, a title, and an error's text ends up in the log."""
     return create_async_engine(
         sqlalchemy_url(database_url),
         pool_size=5,
         max_overflow=5,
         pool_pre_ping=True,  # replace a connection the server closed while it sat idle
+        hide_parameters=True,
     )

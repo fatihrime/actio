@@ -4,12 +4,18 @@
 # "standard". What is behind that name can then change, to a larger model or to another
 # server, without anything that asked for "standard" having to know.
 #
-# The API reads this file when it starts: restart it after a change. A mistake here
-# stops it from starting, with a message that says what is wrong.
+# The API and the worker read this file when they start: restart them after a change.
+# A mistake here stops them from starting, with a message that says what is wrong.
 # See docs/adr/0013-the-models-on-offer-are-a-file.md.
 
 # The model used when a request names none.
 default = "standard"
+
+# The model that names a conversation after its first answer, in a few words. It is
+# asked once per conversation, by the worker, and a title someone gave the conversation
+# is never written over. Left out, no model does, and a conversation keeps its first
+# question's first line. See docs/adr/0025-titles-written-by-a-model.md.
+titles = "standard"
 
 # --- Where models run -------------------------------------------------------------------
 #

@@ -265,6 +265,7 @@ async def start_turn(
             reserved,
             _Outlet(events, turn.id),
             halt,
+            ask_for_title=catalog.titles is not None,
         ),
     )
     # The turn has started: its own reader is part of it, however many the account has.
@@ -563,9 +564,13 @@ async def _write(
     reserved: Reserved,
     out: _Outlet,
     halt: Halt,
+    *,
+    ask_for_title: bool,
 ) -> None:
     """The turn itself: ask the model, and send what it writes as chunks, from
     `start-step` to `[DONE]`. `start` was sent when the stream was opened.
+    `ask_for_title`: a model is named for titles, and the conversation's first turn that
+    completes asks it for one (`turns.finish`).
 
     This runs in a task of its own (`actio.chat.running`), whoever reads."""
     turn = begun.turn
@@ -585,6 +590,7 @@ async def _write(
             emit=lambda step: out.send(ui_stream.for_step(step)),
             halt=halt,
             on_beat=out.keep,
+            ask_for_title=ask_for_title,
         )
     except Exception:
         # Something of Actio's own failed. Readers are told, and read the conversation.

@@ -97,6 +97,45 @@ def test_going_back_before_accounts_keeps_the_guests(database_url: str) -> None:
     assert schema.upgrade(database_url) == schema.head()
 
 
+def test_the_conversations_there_were_are_taken_as_named_by_a_person(database_url: str) -> None:
+    """Migration 0012 says who named a conversation. Nothing had recorded whether one
+    was renamed, so the conversations that were there are taken as named by a person,
+    and never asked for a title: no model writes over a title someone may have chosen.
+    The default that filled them in is gone again, and no one else can name one. Undone
+    and done again, it says the same."""
+    schema.upgrade(database_url)
+    schema.downgrade(database_url, "0011")
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            "INSERT INTO users (id, is_guest, created_at, expires_at)"
+            " VALUES ('01900000-0000-7000-8000-000000000001', true, now(), now())"
+        )
+        connection.execute(
+            "INSERT INTO conversations (id, user_id, title, created_at, last_active_at)"
+            " VALUES ('01900000-0000-7000-8000-000000000002',"
+            " '01900000-0000-7000-8000-000000000001', 'Bike repair', now(), now())"
+        )
+
+    schema.upgrade(database_url)
+
+    with psycopg.connect(database_url) as connection:
+        named = connection.execute("SELECT title, title_by, title_asked_at FROM conversations")
+        assert named.fetchall() == [("Bike repair", "person", None)]
+        default = connection.execute(
+            "SELECT column_default FROM information_schema.columns"
+            " WHERE table_name = 'conversations' AND column_name = 'title_by'"
+        )
+        assert default.fetchall() == [(None,)]
+        with pytest.raises(psycopg.errors.CheckViolation, match="title_by_is_known"):
+            connection.execute("UPDATE conversations SET title_by = 'robot'")
+        connection.rollback()
+    schema.downgrade(database_url, "0011")
+    assert schema.upgrade(database_url) == schema.head()
+    with psycopg.connect(database_url) as connection:
+        named = connection.execute("SELECT title, title_by FROM conversations")
+        assert named.fetchall() == [("Bike repair", "person")]
+
+
 def test_the_models_and_the_migrations_agree(database_url: str) -> None:
     """Fails when a table model changes and no migration was written for it. The job
     queue's tables are in the database too, and no model describes them: the

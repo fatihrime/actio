@@ -28,7 +28,7 @@ from valkey.asyncio import Valkey
 from actio import worker
 from actio.api import turns as turn_routes
 from actio.api import ui_stream
-from actio.catalog import Gate
+from actio.catalog import Catalog, Gate
 from actio.chat import events as turn_events
 from actio.chat import readers as turn_readers
 from actio.chat import running, turns
@@ -766,9 +766,10 @@ async def test_a_turn_that_ends_after_the_worker_gave_up_on_it_is_left_as_it_was
     clock.advance(seconds=60)  # no beat in the meantime: under test they are 15 real seconds apart
     given_up_at = clock.now
     async with open_resources(settings) as resources:
+        no_models = Catalog({}, default="standard", thinking={})  # the job asks none
         [giving_up] = [
             job
-            for job in worker.listed(resources, clock=lambda: clock.now)
+            for job in worker.listed(resources, no_models, clock=lambda: clock.now)
             if job.name == worker.GIVE_UP
         ]
         await giving_up.run()

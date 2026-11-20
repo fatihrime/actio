@@ -424,10 +424,17 @@ class ScriptedModel:
             self.closed.set()
 
 
-def catalog_of(model: ChatProvider, *, thinking: bool = True, also: Iterable[str] = ()) -> Catalog:
+def catalog_of(
+    model: ChatProvider,
+    *,
+    thinking: bool = True,
+    also: Iterable[str] = (),
+    titles: str | None = None,
+) -> Catalog:
     """A catalog that offers one model, `standard`, which is `model`. Each name in `also`
-    is the same model offered once more, such as `local`, titled "Local"."""
-    titles = {"standard": "Scripted"} | {name: name.capitalize() for name in also}
+    is the same model offered once more, such as `local`, titled "Local". `titles` names
+    the model that writes conversations' titles: by default none does."""
+    named = {"standard": "Scripted"} | {name: name.capitalize() for name in also}
     offered = {
         name: OfferedModel(
             name=name,
@@ -438,9 +445,11 @@ def catalog_of(model: ChatProvider, *, thinking: bool = True, also: Iterable[str
             max_output_tokens=512,
             chat=model,
         )
-        for name, title in titles.items()
+        for name, title in named.items()
     }
-    return Catalog(offered, default="standard", thinking=dict.fromkeys(offered, thinking))
+    return Catalog(
+        offered, default="standard", thinking=dict.fromkeys(offered, thinking), titles=titles
+    )
 
 
 class Lineup:
@@ -477,9 +486,16 @@ class Lineup:
     def names(self) -> list[str]:
         return list(self._offered)
 
-    def catalog(self) -> Catalog:
+    def catalog(self, *, titles: str | None = None) -> Catalog:
+        """The catalog of the models added so far. `titles` names the one that writes
+        conversations' titles: by default none does."""
         default = next(iter(self._offered))
-        return Catalog(self._offered, default=default, thinking=dict.fromkeys(self._offered, False))
+        return Catalog(
+            self._offered,
+            default=default,
+            thinking=dict.fromkeys(self._offered, False),
+            titles=titles,
+        )
 
 
 @pytest.fixture
@@ -489,17 +505,22 @@ def lineup() -> Lineup:
 
 
 class Offer(Protocol):
-    def __call__(self, *script: Any, thinking: bool = True) -> tuple[ScriptedModel, Catalog]: ...
+    def __call__(
+        self, *script: Any, thinking: bool = True, titles: str | None = None
+    ) -> tuple[ScriptedModel, Catalog]: ...
 
 
 @pytest.fixture
 def offer() -> Offer:
     """Call with a script to get a model that follows it, and the catalog that offers
-    only that model: for a test that starts the app itself, with `open_app`."""
+    only that model: for a test that starts the app itself, with `open_app`. With
+    `titles="standard"`, the model also writes conversations' titles."""
 
-    def make(*script: Any, thinking: bool = True) -> tuple[ScriptedModel, Catalog]:
+    def make(
+        *script: Any, thinking: bool = True, titles: str | None = None
+    ) -> tuple[ScriptedModel, Catalog]:
         model = ScriptedModel(*script)
-        return model, catalog_of(model, thinking=thinking)
+        return model, catalog_of(model, thinking=thinking, titles=titles)
 
     return make
 

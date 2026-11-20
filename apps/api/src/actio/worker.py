@@ -5,6 +5,11 @@ A job is deferred by its name, in the transaction of the change it follows
 (`actio.core.jobs.defer`). Every job a worker can run is listed here, in `listed`, with
 what its handler needs bound in. A job deferred under a name that isn't listed fails.
 
+Most jobs need only the database, and one Valkey. The one that writes a conversation's
+title asks a model, so the worker has the models on offer too (`actio.catalog`): its
+own in the worker role, the API's in the API's process, where a title waits at the same
+gate as the answers.
+
 This is a top layer, like `actio.api`: it reads the clock, and passes the time to the
 functions it calls as `now`. Except to the queue's own upkeep (`look_after_the_queue`),
 which goes by the database's clock, as the queue's books do.
@@ -12,6 +17,7 @@ which goes by the database's clock, as the queue's books do.
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -19,7 +25,8 @@ from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from actio.chat import turns
+from actio.catalog import Catalog, open_catalog
+from actio.chat import titles, turns
 from actio.core import alive, jobs, schema
 from actio.core.resources import Resources, open_resources
 from actio.core.settings import Settings
@@ -71,7 +78,7 @@ class NotMigratedError(Exception):
     start: its jobs would run on tables that aren't the ones they were written for."""
 
 
-def listed(resources: Resources, *, clock: Clock) -> list[jobs.Job]:
+def listed(resources: Resources, catalog: Catalog, *, clock: Clock) -> list[jobs.Job]:
     """Every job a worker runs, each with what it needs."""
     return [
         jobs.Job(SWEEP, partial(sweep_expired, resources, clock), every="*/10 * * * *"),
@@ -83,28 +90,35 @@ def listed(resources: Resources, *, clock: Clock) -> list[jobs.Job]:
             every="*/10 * * * *",
             with_queue=True,
         ),
+        # Deferred once for a conversation, by the first of its turns that completes.
+        jobs.Job(titles.WRITE_TITLE, partial(write_title, resources, catalog, clock)),
     ]
 
 
 async def run(settings: Settings) -> None:
     """Run the jobs until the process is told to stop.
 
+    The models on offer are the worker's own, read from `settings.models_file`, with
+    gates in front of their servers that only this process knows.
+
     Each time the worker has connected, it first makes sure that the database is
     migrated (`NotMigratedError`). While it works, it touches `settings.alive_file`, if
     there is one, for its health check to look at (`actio.core.alive`)."""
-    async with open_resources(settings) as resources:
-        await _work(settings, resources, on_signals=True)
+    async with open_resources(settings) as resources, open_catalog(settings) as catalog:
+        await _work(settings, resources, catalog, on_signals=True)
 
 
 async def run_inside(
     settings: Settings,
     resources: Resources,
+    catalog: Catalog,
     *,
     on_beat: Callable[[], None] | None = None,
     on_stopped: Callable[[], None] | None = None,
 ) -> None:
     """Run the jobs inside the API's process (`actio --role all`), on that process's
-    `resources`, until the task this runs in is cancelled.
+    `resources` and its `catalog`, until the task this runs in is cancelled: a title then
+    waits at the same gate as the API's answers.
 
     `on_beat` is called each time the worker says that it works, beside the touch of
     `settings.alive_file`, which is as in `run`. Each is done whatever the other does.
@@ -127,7 +141,7 @@ async def run_inside(
     """
     while True:
         try:
-            await _work(settings, resources, on_signals=False, on_beat=on_beat)
+            await _work(settings, resources, catalog, on_signals=False, on_beat=on_beat)
         except (jobs.DatabaseUnreachableError, NotMigratedError) as error:
             # Its own words say what is wrong, and what to do about it: no trace.
             logger.error("The worker can't work: %s.%s", error, _then("It tries again"))
@@ -146,15 +160,17 @@ async def run_inside(
 async def _work(
     settings: Settings,
     resources: Resources,
+    catalog: Catalog,
     *,
     on_signals: bool,
     on_beat: Callable[[], None] | None = None,
 ) -> None:
-    """One worker on `resources`, with every job of `listed`, which checks its database
-    each time it has connected, and while it works touches `settings.alive_file`, if
-    the settings name one, and calls `on_beat`, if there is one."""
+    """One worker on `resources` and `catalog`, with every job of `listed`, which checks
+    its database each time it has connected, and while it works touches
+    `settings.alive_file`, if the settings name one, and calls `on_beat`, if there is
+    one."""
     await jobs.work(
-        listed(resources, clock=_now),
+        listed(resources, catalog, clock=_now),
         database_url=settings.database_url.get_secret_value(),
         on_signals=on_signals,
         check=partial(_migrated, resources),
@@ -231,6 +247,15 @@ async def count_missed_usage(resources: Resources, clock: Clock) -> None:
             "usage the counters had missed: Valkey didn't answer, and what is left waits "
             "for the next run"
         )
+
+
+async def write_title(
+    resources: Resources, catalog: Catalog, clock: Clock, *, conversation_id: str
+) -> None:
+    """Ask a model for the conversation's title, and write it, unless someone named the
+    conversation meanwhile: see `titles.write`, which also says in the log what kept a
+    title from being written."""
+    await titles.write(resources.database, catalog, uuid.UUID(conversation_id), now=clock())
 
 
 async def look_after_the_queue(queue: jobs.Queue, *, kept_for: timedelta) -> None:

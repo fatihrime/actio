@@ -211,10 +211,11 @@ def test_the_all_role_logs_actio_and_the_queue_from_the_settings_level_and_the_r
     assert uvicorns_own == uvicorn.config.LOGGING_CONFIG  # given a copy, not its own
 
 
-def test_the_worker_role_runs_the_worker_without_the_models_and_plans_files(
+def test_the_worker_role_runs_the_worker_without_the_plans_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No job talks to a model yet."""
+    """A title asks a model, so the worker reads the models file. No job costs anything,
+    so it doesn't read the plans file."""
     ran: list[Settings] = []
 
     async def run(settings: Settings) -> None:
@@ -222,13 +223,85 @@ def test_the_worker_role_runs_the_worker_without_the_models_and_plans_files(
 
     monkeypatch.setattr(worker, "run", run)
     monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it served HTTP"))
-    monkeypatch.setenv("ACTIO_MODELS_FILE", str(tmp_path / "missing.toml"))
-    monkeypatch.setenv("ACTIO_PLANS_FILE", str(tmp_path / "missing-too.toml"))
+    monkeypatch.setenv("ACTIO_PLANS_FILE", str(tmp_path / "missing.toml"))
 
     cli.main(["--role", "worker"])
 
     [settings] = ran
     assert settings.database_url.get_secret_value() == DATABASE
+    assert settings.models_file == MODELS
+
+
+def test_the_worker_role_leaves_out_what_others_write_below_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alembic's lines about migrations the worker doesn't run, and the HTTP client's
+    line for each request to a model's server, two for every title: as the `all` role
+    leaves them out. Also when the settings ask for everything, and the worker's own
+    lines are written from the debug level."""
+    heard: dict[str, tuple[bool, bool]] = {}
+
+    async def run(settings: Settings) -> None:  # noqa: ARG001
+        for name in ("actio.worker", "httpx2", "alembic.runtime.migration"):
+            logger = logging.getLogger(name)
+            heard[name] = (logger.isEnabledFor(logging.INFO), logger.isEnabledFor(logging.WARNING))
+
+    monkeypatch.setattr(worker, "run", run)
+    monkeypatch.setenv("ACTIO_LOG_LEVEL", "debug")
+
+    with logging_put_back():
+        # As in a process of its own: with a handler there already, as the test runner
+        # has put one, the role's set-up of the log would change nothing.
+        logging.root.handlers = []
+        cli.main(["--role", "worker"])
+
+    assert heard == {
+        "actio.worker": (True, True),
+        "httpx2": (False, True),
+        "alembic.runtime.migration": (False, True),
+    }
+
+
+def test_the_worker_does_not_start_without_its_models_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    missing = tmp_path / "models.toml"
+    monkeypatch.setenv("ACTIO_MODELS_FILE", str(missing))
+    monkeypatch.setattr(worker, "run", lambda _settings: pytest.fail("the worker started"))
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "worker"])
+
+    assert stopped.value.code == 2
+    said = capsys.readouterr().err
+    assert said.startswith(f"actio: the models file '{missing}' doesn't exist.")
+    assert said.count("\n") == 1
+
+
+def test_a_worker_whose_models_cant_be_built_says_so_in_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The file reads well, and names the variable that holds a provider's key, which
+    isn't set: that shows only when the models are built, as the worker starts. Its
+    database is nowhere, and it never gets as far as trying it."""
+    keyed = tmp_path / "models.toml"
+    keyed.write_text(
+        MODELS.read_text()
+        + '\n[providers.lab]\nkind = "openai-compatible"\nurl = "http://lab.example.com/v1"\n'
+        'api_key_env = "ACTIO_TEST_UNSET_LAB_KEY"\n'
+    )
+    monkeypatch.setenv("ACTIO_MODELS_FILE", str(keyed))
+    monkeypatch.delenv("ACTIO_TEST_UNSET_LAB_KEY", raising=False)
+    no_longer_than_ten_seconds(monkeypatch)
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "worker"])
+
+    assert stopped.value.code == 2
+    assert capsys.readouterr().err == (
+        "actio: providers.lab: the environment variable ACTIO_TEST_UNSET_LAB_KEY, which"
+        " should hold its key, is not set\n"
+    )
 
 
 @pytest.mark.parametrize("role", ["migrate", "worker"])
@@ -360,7 +433,7 @@ def test_the_api_does_not_start_without_its_models_file(
     assert said.count("\n") == 1  # one line to read, not a stack of them
 
 
-@pytest.mark.parametrize("role", ["api", "all"])
+@pytest.mark.parametrize("role", ["api", "all", "worker"])
 def test_a_mistake_in_the_models_file_is_said_in_one_line(
     role: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -368,6 +441,7 @@ def test_a_mistake_in_the_models_file_is_said_in_one_line(
     broken.write_text(MODELS.read_text().replace('default = "standard"', 'default = "best"'))
     monkeypatch.setenv("ACTIO_MODELS_FILE", str(broken))
     monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it started"))
+    monkeypatch.setattr(worker, "run", lambda _settings: pytest.fail("the worker started"))
 
     with pytest.raises(SystemExit) as stopped:
         cli.main(["--role", role])
