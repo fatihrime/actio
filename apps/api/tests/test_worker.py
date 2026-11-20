@@ -21,14 +21,14 @@ from typing import Any
 import psycopg
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio import worker
 from actio.chat import turns
-from actio.chat.models import Turn
-from actio.chat.parts import TextPart
-from actio.chat.turns import STALE_AFTER
+from actio.chat.models import Conversation, Message, Turn
+from actio.chat.parts import ReasoningPart, TextPart
+from actio.chat.turns import STALE_AFTER, Draft
 from actio.core import jobs
 from actio.core.ids import new_id
 from actio.core.resources import open_resources
@@ -37,6 +37,7 @@ from actio.identity import accounts, sessions
 from actio.identity.models import BrowserSession, User
 from actio.identity.passwords import Passwords
 from actio.identity.sessions import ACCOUNT_IDLE_LIFETIME, GUEST_LIFETIME
+from actio.usage.models import UsageEntry
 
 pytestmark = pytest.mark.anyio
 
@@ -171,6 +172,60 @@ async def test_the_worker_gives_up_on_stale_turns_by_the_clock_it_was_given(
         if record.name == "actio.worker"
     ]
     assert said == [(logging.INFO, "gave up on stale turns: 1")]
+
+
+async def test_the_worker_keeps_what_a_dead_process_had_written_by_its_last_beat(
+    db: AsyncSession, settings: Settings, clock: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two turns whose process died, in conversations nobody looks at. One had saved at
+    its last beat what its answer held: it keeps that as its answer, dated at the beat,
+    and its conversation shows it. The other had written nothing yet, and is given up on
+    with no answer. Neither costs anything."""
+    last_beat = clock.now - STALE_AFTER - timedelta(seconds=5)
+    wrote = await a_turn(db, heard_from=last_beat - timedelta(seconds=15))
+    draft = Draft(
+        answer_id=new_id(),
+        parts=[ReasoningPart(text="Something to sit on."), TextPart(text="The sad")],
+    )
+    await turns.still_alive(db, wrote.id, now=last_beat, draft=draft)
+    silent_since = last_beat - timedelta(seconds=30)
+    silent = await a_turn(db, heard_from=silent_since)
+    await db.commit()
+    caplog.set_level(logging.INFO, logger="actio.worker")
+
+    async with open_resources(settings) as resources:
+        await giving_up_on_stale_turns(worker.listed(resources, clock=lambda: clock.now)).run()
+
+    await db.refresh(wrote)
+    await db.refresh(silent)
+    assert (wrote.status, wrote.answer_id, wrote.finished_at) == (
+        "interrupted",
+        draft.answer_id,
+        clock.now,
+    )
+    assert (silent.status, silent.answer_id, silent.finished_at) == ("interrupted", None, clock.now)
+    assert (await db.scalars(select(Turn.draft.is_(None)))).all() == [True, True]
+    answer = await db.get(Message, draft.answer_id)
+    assert answer is not None
+    assert (answer.role, answer.parent_id, answer.created_at) == (
+        "assistant",
+        wrote.question_id,
+        last_beat,
+    )
+    assert answer.parts == [
+        {"type": "reasoning", "text": "Something to sit on."},
+        {"type": "text", "text": "The sad"},
+    ]
+    shown = await db.execute(
+        select(Conversation.id, Conversation.current_leaf_id, Conversation.last_active_at)
+    )
+    assert {conversation: (leaf, at) for conversation, leaf, at in shown} == {
+        wrote.conversation_id: (draft.answer_id, last_beat),
+        silent.conversation_id: (silent.question_id, silent_since),
+    }
+    assert await db.scalar(select(func.count()).select_from(UsageEntry)) == 0
+    said = [record.getMessage() for record in caplog.records if record.name == "actio.worker"]
+    assert said == ["gave up on stale turns: 2"]
 
 
 async def test_a_worker_that_finds_no_stale_turn_says_nothing(

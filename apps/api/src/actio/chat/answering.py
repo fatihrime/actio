@@ -13,8 +13,8 @@ Whatever happens on the way, the turn doesn't stay `running`:
 
 Nobody has to be listening. A turn runs apart from the request that started it
 (`actio.chat.running`), and a reader who leaves ends nothing. So while a turn runs, it
-says every few seconds that it is alive, and renews the hold on its credits: see
-`_beat`.
+says every few seconds that it is alive, saves what it has written so far, and renews
+the hold on its credits: see `_beat`.
 
 A model's server that writes only so many answers at once has a gate in front of it
 (`actio.catalog.Gate`). A turn waits there, running like any other, and the model is
@@ -263,7 +263,9 @@ async def answer(
     """
     collected = Answer()
     ending: Ending | None = None
-    beats = asyncio.create_task(_beat(open_session, turn_id, clock, usage, reserved, on_beat))
+    beats = asyncio.create_task(
+        _beat(open_session, turn_id, answer_id, collected, clock, usage, reserved, on_beat)
+    )
     try:
         # Only waiting, for the gate or for the model, can be halted. A step that has
         # come is handed on whole, so what readers were shown is what gets stored.
@@ -364,6 +366,8 @@ def _waited(
 async def _beat(
     open_session: async_sessionmaker[AsyncSession],
     turn_id: uuid.UUID,
+    answer_id: uuid.UUID,
+    collected: Answer,
     clock: Callable[[], datetime],
     usage: UsageLimits,
     reserved: Reserved,
@@ -378,14 +382,20 @@ async def _beat(
     - the hold on its credits (`UsageLimits.extend`);
     - whatever `on_beat` keeps: what the turn streams.
 
+    With the same statement that says it is alive, the turn saves what `collected` holds
+    by then, as its draft, under `answer_id`: what a process that dies leaves as its
+    answer. Nothing while the model has written nothing.
+
     A beat that fails is tried again at the next: one or two may be missed.
     """
     while True:
         await asyncio.sleep(turns.BEAT.total_seconds())
         now = clock()
+        written = collected.parts
+        draft = turns.Draft(answer_id=answer_id, parts=written) if written else None
         try:
             async with open_session() as db:
-                await turns.still_alive(db, turn_id, now=now)
+                await turns.still_alive(db, turn_id, now=now, draft=draft)
                 await db.commit()
         except (SQLAlchemyError, OSError) as error:
             logger.warning(

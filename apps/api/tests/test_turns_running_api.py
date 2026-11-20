@@ -34,13 +34,14 @@ from actio.chat import readers as turn_readers
 from actio.chat import running, turns
 from actio.chat.events import EventsUnavailableError, TurnEvents
 from actio.chat.models import Conversation, Message, Turn
-from actio.chat.parts import TextPart
+from actio.chat.parts import ReasoningPart, TextPart
 from actio.core.ids import new_id
 from actio.core.resources import open_resources
 from actio.core.settings import Settings
 from actio.usage.models import UsageEntry
 from actio.usage.plans import Plans
 from actio_llm import (
+    Assistant,
     Finish,
     FinishReason,
     ProviderUnavailableError,
@@ -48,6 +49,7 @@ from actio_llm import (
     TextDelta,
     ToolCall,
     Usage,
+    User,
 )
 
 pytestmark = pytest.mark.anyio
@@ -200,6 +202,19 @@ async def alive_at(db: AsyncSession, turn_id: uuid.UUID) -> datetime:
     await db.commit()  # the next look starts from what the database has then
     assert moment is not None
     return moment
+
+
+async def the_draft(db: AsyncSession) -> Any:
+    """The turn's draft, as the database has it now: `None` when it has none."""
+    draft = await db.scalar(select(Turn.draft))
+    await db.commit()  # the next look starts from what the database has then
+    return draft
+
+
+async def drafted(db: AsyncSession, *texts: str) -> bool:
+    """Whether the turn's draft holds parts with these texts, in this order."""
+    draft = await the_draft(db)
+    return draft is not None and [part["text"] for part in draft["parts"]] == list(texts)
 
 
 async def left_running(db: AsyncSession, chat: Chat, clock: Any) -> Turn:
@@ -778,6 +793,163 @@ async def test_a_turn_that_ends_after_the_worker_gave_up_on_it_is_left_as_it_was
     assert said(again) == "Here now."
     await db.refresh(late)
     assert (late.status, late.finished_at, late.answer_id) == ("interrupted", given_up_at, None)
+
+
+# --- What a turn whose process died had written ---------------------------------------
+
+
+async def test_each_beat_saves_what_the_answer_holds_by_then(
+    scripted: Any, db: AsyncSession, clock: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reasoning and text, as parts, under the id the turn's stream gave the answer, each
+    beat replacing the one before. A beat while the model has written nothing saves
+    nothing, and the turn that has ended keeps nothing."""
+    monkeypatch.setattr(turns, "BEAT", timedelta(milliseconds=10))
+    first_word, more, last_word = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    model, browser = await scripted(
+        first_word,
+        ReasoningDelta("Something to sit on."),
+        TextDelta("The "),
+        more,
+        TextDelta("saddle."),
+        last_word,
+        DONE,
+    )
+    asked = Chat(browser).asking()
+    await held(model)
+
+    clock.advance(seconds=15)
+    await beaten(lambda: said_alive_at(db, clock.now))
+    before_a_word = await the_draft(db)
+    first_word.set()
+    await beaten(lambda: drafted(db, "Something to sit on.", "The "))
+    first = await the_draft(db)
+    more.set()
+    await beaten(lambda: drafted(db, "Something to sit on.", "The saddle."))
+    second = await the_draft(db)
+    last_word.set()
+    [answered] = await ended(asked)
+
+    answer_id = chunk(answered, "start")["messageId"]
+    assert before_a_word is None
+    thought = {"type": "reasoning", "text": "Something to sit on."}
+    assert first == {"answer_id": answer_id, "parts": [thought, {"type": "text", "text": "The "}]}
+    assert second == {
+        "answer_id": answer_id,
+        "parts": [thought, {"type": "text", "text": "The saddle."}],
+    }
+    assert await the_draft(db) is None
+    assert said(answered) == "The saddle."
+
+
+async def test_whoever_looks_finds_what_a_dead_process_had_written_as_its_answer(
+    scripted: Any, db: AsyncSession, clock: Any
+) -> None:
+    """The process was killed in the middle of an answer, and its last beat had saved
+    what the answer held. A minute later someone looks. The conversation shows that as
+    the question's answer, interrupted, and dated at the beat: the conversation doesn't
+    move up its owner's list because someone looked. It costs nothing, and the
+    conversation goes on from it: the model of the next question is shown it."""
+    model, browser = await scripted(TextDelta("Its rails."), DONE)
+    chat = Chat(browser)
+    turn = await left_running(db, chat, clock)
+    clock.advance(seconds=20)
+    draft = turns.Draft(
+        answer_id=new_id(),
+        parts=[ReasoningPart(text="Something to sit on."), TextPart(text="The saddle, which")],
+    )
+    await turns.still_alive(db, turn.id, now=clock.now, draft=draft)
+    await db.commit()
+
+    clock.advance(seconds=60)
+    seen = await chat.read()
+    usage = (await browser.get("/api/usage")).json()
+    entries = await count(db, UsageEntry)
+    still_drafted = await db.scalar(select(Turn.draft.is_not(None)).where(Turn.id == turn.id))
+    follow_up = {"id": str(new_id()), "parts": [{"type": "text", "text": "Which part of it?"}]}
+    went_on = await asyncio.wait_for(
+        browser.post(
+            f"{chat.path}/turns", json={"message": follow_up, "parent_id": str(draft.answer_id)}
+        ),
+        PATIENCE_S,
+    )
+
+    _, answer = seen["messages"]
+    assert (answer["id"], answer["metadata"]["created_at"]) == (
+        str(draft.answer_id),
+        "2026-11-10T12:00:20Z",
+    )
+    assert answer["parts"] == [
+        {"type": "reasoning", "text": "Something to sit on."},
+        {"type": "text", "text": "The saddle, which"},
+    ]
+    kept = answer["metadata"]["turn"]
+    assert (kept["id"], kept["status"], kept["finished_at"], kept["credits"]) == (
+        str(turn.id),
+        "interrupted",
+        "2026-11-10T12:01:20Z",
+        None,
+    )
+    assert (seen["current_leaf_id"], seen["last_active_at"], seen["unanswered"]) == (
+        str(draft.answer_id),
+        "2026-11-10T12:00:20Z",
+        None,
+    )
+    assert (still_drafted, entries) == (False, 0)
+    assert [(w["used"], w["reserved"]) for w in usage["windows"]] == [(0, 0), (0, 0)]
+    assert (went_on.status_code, said(went_on)) == (200, "Its rails.")
+    assert model.requests[-1].messages[1:] == [
+        User("Asked just before the server died"),
+        Assistant("The saddle, which"),
+        User("Which part of it?"),
+    ]
+
+
+async def test_a_turn_given_up_on_with_what_it_had_written_is_left_so_when_it_ends_after_all(
+    scripted: Any,
+    db: AsyncSession,
+    clock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A beat saved what the answer held, and then no beat reached the database for a
+    minute, when someone looked: the turn was given up on with that as its answer, under
+    the id its stream had named. Its process was only slow, and the answer ends after
+    all. The turn is left as it was: nothing more is stored, the question has the one
+    answer, and nothing is paid for."""
+    monkeypatch.setattr(turns, "BEAT", timedelta(milliseconds=10))
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("Sorry, "), hold, TextDelta("I'm late."), DONE)
+    chat = Chat(browser)
+    asked = chat.asking()
+    await held(model)
+    clock.advance(seconds=20)
+    await beaten(lambda: said_alive_at(db, clock.now))  # with what was written by then
+
+    async def lost(*_: Any, **__: Any) -> None:
+        """A beat that doesn't reach the database."""
+
+    monkeypatch.setattr(turns, "still_alive", lost)
+    clock.advance(seconds=60)
+    given_up_on = await chat.read()
+    hold.set()
+    [reader] = await ended(asked)
+    afterwards = await chat.read()
+    usage = (await browser.get("/api/usage")).json()
+
+    _, answer = given_up_on["messages"]
+    assert (answer["id"], answer["parts"]) == (
+        chunk(reader, "start")["messageId"],
+        [{"type": "text", "text": "Sorry, "}],
+    )
+    assert answer["metadata"]["created_at"] == "2026-11-10T12:00:20Z"
+    turn = answer["metadata"]["turn"]
+    assert (turn["status"], turn["finished_at"]) == ("interrupted", "2026-11-10T12:01:20Z")
+    assert afterwards == given_up_on
+    assert "it ended after it had been given up on" in caplog.text
+    assert (await count(db, Message), await count(db, UsageEntry)) == (2, 0)
+    assert [(w["used"], w["reserved"]) for w in usage["windows"]] == [(0, 0), (0, 0)]
+    assert said(reader) == "Sorry, I'm late."  # whoever read along saw it written
 
 
 # --- A shutdown -----------------------------------------------------------------------

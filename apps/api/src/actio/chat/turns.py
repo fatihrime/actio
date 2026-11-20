@@ -11,9 +11,10 @@ So a question never exists without the turn that is answering it. Finishing a tu
 writes the answer, if the model produced anything, and how the turn ended.
 
 One turn runs at a time in a conversation. While it runs, the process that writes its
-answer says every few seconds that it is still at it (`still_alive`). A turn whose
-process died would otherwise block its conversation for ever, so one that has been
-silent for too long is given up on, as `interrupted`: the next time someone looks at its
+answer says every few seconds that it is still at it, and saves what the answer holds so
+far, its draft (`still_alive`). A turn whose process died would otherwise block its
+conversation for ever, so one that has been silent for too long is given up on, as
+`interrupted`, with its draft as its answer: the next time someone looks at its
 conversation (`give_up_on_stale`), and by the worker, which goes through the turns of
 every conversation, those nobody looks at too (`give_up_on_stale_everywhere`).
 
@@ -24,11 +25,13 @@ be one too many is refused before anything of it is kept.
 These functions never commit, and take the time as `now`.
 """
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import BigInteger, ColumnElement, and_, func, literal, not_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,8 +41,10 @@ from actio.chat.models import Conversation, Message, Turn
 from actio.chat.parts import Part, TextPart
 from actio_llm import Timings, Usage
 
+logger = logging.getLogger(__name__)
+
 BEAT = timedelta(seconds=15)
-"""How often a running turn says that it is alive."""
+"""How often a running turn says that it is alive, and saves its draft."""
 
 STALE_AFTER = timedelta(seconds=60)
 """A running turn that hasn't said it is alive for this long is taken for dead. Four
@@ -125,6 +130,23 @@ class Ending:
     timings: Timings | None = None
 
 
+class Draft(BaseModel):
+    """What a running turn's answer holds so far, saved on the turn's row with each beat
+    (`still_alive`), as one JSON object. A turn whose process died is given up on with
+    it as its answer.
+
+    Read and written through this class only, which checks its shape both ways. The
+    parts are in their stored form (`actio.chat.parts`)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    answer_id: uuid.UUID
+    """The id the answer's message will have: the one the turn's stream has named to its
+    readers."""
+    parts: list[Part]
+    """What the model had written by the beat, reasoning and text."""
+
+
 async def ask(
     db: AsyncSession,
     *,
@@ -154,12 +176,17 @@ async def ask(
         if parent_id is not None:
             raise NoSuchConversationError
         conversation = await _create(db, conversation_id, user_id=user_id, parts=parts, now=now)
+    else:
+        # Before the message's id is looked up: a stale turn is given up on with its
+        # draft as its answer, which is a message too, and may have the very id this
+        # one comes under.
+        await give_up_on_stale(db, conversation.id, now=now)
     earlier = await db.get(Message, message_id)
     if earlier is not None:
         if earlier.conversation_id == conversation.id and earlier.role == "user":
             raise AlreadyAskedError(await latest_for(db, conversation, earlier.id))
         raise IdTakenError
-    await _require_free(db, conversation, now=now)
+    await _require_free(db, conversation)
     await _require_room(db, user_id, answers_at_once, now=now)
     question = await tree.append(
         db,
@@ -201,7 +228,8 @@ async def answer_again(
         raise tree.NoSuchMessageError
     if question.role != "user":
         raise tree.OutOfTurnError
-    await _require_free(db, conversation, now=now)
+    await give_up_on_stale(db, conversation.id, now=now)
+    await _require_free(db, conversation)
     await _require_room(db, user_id, answers_at_once, now=now)
     conversation.current_leaf_id = question.id
     conversation.last_active_at = now
@@ -233,56 +261,65 @@ async def finish(
     """
     # The conversation first, then the turn: the same order in which a new turn takes
     # them, so the two can't wait for each other.
-    conversation = await db.scalar(
-        select(Conversation).where(Conversation.id == conversation_id).with_for_update()
-    )
+    conversation = await _hold(db, conversation_id)
     if conversation is None:
         return "gone"
-    turn = await db.scalar(select(Turn).where(Turn.id == turn_id).with_for_update())
+    turn = await db.scalar(
+        select(Turn)
+        .where(Turn.id == turn_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if turn is None:
         return "gone"
     if turn.status != "running":
         return "left"
-    if ending.parts:
-        await tree.append(
-            db,
-            conversation,
-            message_id=answer_id,
-            parent_id=turn.question_id,
-            role="assistant",
-            parts=ending.parts,
-            now=now,
-        )
-        turn.answer_id = answer_id
-    turn.status = ending.status
-    turn.finish_reason = ending.finish_reason
-    turn.error = ending.error
-    if ending.usage is not None:
-        turn.input_tokens = ending.usage.input_tokens
-        turn.cached_input_tokens = ending.usage.cached_input_tokens
-        turn.output_tokens = ending.usage.output_tokens
-    if ending.timings is not None:
-        turn.load_ms = ending.timings.load_ms
-        turn.prompt_ms = ending.timings.prompt_ms
-        turn.generation_ms = ending.timings.generation_ms
-    turn.credits = credits
-    turn.finished_at = now
-    await db.flush()
+    await _end(db, conversation, turn, ending, answer_id=answer_id, now=now, credits=credits)
     return "recorded"
 
 
-async def still_alive(db: AsyncSession, turn_id: uuid.UUID, *, now: datetime) -> None:
-    """Say that a running turn is still being written. Whoever writes it calls this
-    every `BEAT`, so that nobody gives up on it."""
+async def still_alive(
+    db: AsyncSession, turn_id: uuid.UUID, *, now: datetime, draft: Draft | None = None
+) -> None:
+    """Say that a running turn is still being written, and save what its answer holds
+    so far: `draft`, or `None` while nothing is written. Whoever writes the turn calls
+    this every `BEAT`, so that nobody gives up on it, and so that a process that dies
+    leaves its answer as it was at its last beat. One statement does both."""
+    stored = None if draft is None else draft.model_dump(mode="json")
     await db.execute(
-        update(Turn).where(Turn.id == turn_id, Turn.status == "running").values(alive_at=now)
+        update(Turn)
+        .where(Turn.id == turn_id, Turn.status == "running")
+        .values(alive_at=now, draft=stored)
     )
 
 
 async def give_up_on_stale(db: AsyncSession, conversation_id: uuid.UUID, *, now: datetime) -> None:
     """Mark the conversation's turn as `interrupted` if it is stale: running, and it
-    hasn't said so for `STALE_AFTER`. The process that was writing it is gone."""
-    await _give_up(db, Turn.conversation_id == conversation_id, now=now)
+    hasn't said so for `STALE_AFTER`. The process that was writing it is gone, and its
+    draft becomes its answer.
+
+    Every read of a conversation calls this. So it first looks, holding nothing and
+    changing nothing, whether there is a stale turn at all. Only then does it take the
+    conversation's row and the turn's, and wait for them if it has to: whoever holds
+    them is about to be done."""
+    stale = await db.scalar(
+        select(Turn.id).where(Turn.conversation_id == conversation_id, _stale(now))
+    )
+    if stale is None:
+        return
+    # The conversation first, then the turn, as `ask` and `finish` take them. Then the
+    # question again: the turn may have said that it is alive, or ended, meanwhile.
+    conversation = await _hold(db, conversation_id)
+    if conversation is None:
+        return
+    turn = await db.scalar(
+        select(Turn)
+        .where(Turn.id == stale, _stale(now))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if turn is not None:
+        await _give_up(db, conversation, turn, now=now)
 
 
 async def give_up_on_stale_everywhere(
@@ -291,25 +328,48 @@ async def give_up_on_stale_everywhere(
     """Mark stale turns as `interrupted`, in every conversation, as `give_up_on_stale`
     does for one: those in conversations nobody looks at too. Returns their ids.
 
-    It works in batches of `limit`, the longest silent first, and skips turns another
-    transaction holds instead of waiting for them: one that is being recorded at that
-    moment, by a process that was only slow, keeps what it is given. Any number of runs
-    can go at once.
+    It works in batches of `limit`, the longest silent first, and never waits for a
+    row's lock. It skips a turn another transaction holds, and a turn whose conversation
+    another transaction holds: someone reads it, asks in it, or the turn is being
+    recorded at that moment by a process that was only slow, and keeps what it is
+    given. A turn skipped is left for the next run. Any number of runs can go at once.
+
+    One wait is left, for no row it takes: an answer it keeps is written under the id
+    the draft names, and if another transaction is adding a message under that id at
+    that moment, the insert waits for it to end, and then finds the id taken.
     """
-    # The batch is taken and held by a statement of its own. As a subquery of the
-    # update, the plan may read it once for each turn it looks at, and each time it
-    # skips the turns the update has changed already: the batch would grow past `limit`.
+    # The batch is taken and held by a statement of its own. As the subquery of an
+    # update, as it once was, it grew past `limit`: the plan read it once for each turn
+    # it looked at, and each time skipped the turns the update had changed already.
     held = await db.scalars(
-        select(Turn.id)
+        select(Turn)
         .where(_stale(now))
         .order_by(Turn.alive_at)
         .limit(limit)
         .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
     )
     batch = list(held.all())
     if not batch:
         return []
-    return await _give_up(db, Turn.id.in_(batch), now=now)
+    # Then their conversations, which giving up on a turn changes. Everyone else takes a
+    # conversation first, then its turn. The worker holds the turns already: if it waited
+    # for a conversation, it could be waiting for someone who waits for one of its turns.
+    # It takes neither by waiting, so it is never part of such a circle.
+    free = await db.scalars(
+        select(Conversation)
+        .where(Conversation.id.in_([turn.conversation_id for turn in batch]))
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
+    )
+    taken = {conversation.id: conversation for conversation in free.all()}
+    given_up: list[uuid.UUID] = []
+    for turn in batch:
+        conversation = taken.get(turn.conversation_id)
+        if conversation is not None:
+            await _give_up(db, conversation, turn, now=now)
+            given_up.append(turn.id)
+    return given_up
 
 
 async def being_written(db: AsyncSession, user_id: uuid.UUID, *, now: datetime) -> int:
@@ -408,22 +468,126 @@ def _stale(now: datetime) -> ColumnElement[bool]:
     return and_(Turn.status == "running", Turn.alive_at <= now - STALE_AFTER)
 
 
-async def _give_up(
-    db: AsyncSession, which: ColumnElement[bool], *, now: datetime
-) -> list[uuid.UUID]:
-    """Give up on the stale turns among `which`: each becomes `interrupted`, ended at
-    `now`. Returns their ids. Whoever gives up on turns does it through this."""
-    given_up = await db.scalars(
-        update(Turn)
-        .where(which, _stale(now))
-        .values(status="interrupted", finished_at=now)
-        .returning(Turn.id)
+async def _hold(db: AsyncSession, conversation_id: uuid.UUID) -> Conversation | None:
+    """Lock the conversation's row until the transaction ends, to write in it, and read
+    it as it is then. `None` if it is gone."""
+    found: Conversation | None = await db.scalar(
+        select(Conversation)
+        .where(Conversation.id == conversation_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)  # what this session holds may be old
     )
-    return list(given_up.all())
+    return found
 
 
-async def _require_free(db: AsyncSession, conversation: Conversation, *, now: datetime) -> None:
-    await give_up_on_stale(db, conversation.id, now=now)
+async def _give_up(
+    db: AsyncSession, conversation: Conversation, turn: Turn, *, now: datetime
+) -> None:
+    """Give up on a stale turn, whose row and whose conversation's row the caller holds:
+    it becomes `interrupted`, ended at `now`, with its draft as its answer, if it has
+    one. Whoever gives up on turns does it through this.
+
+    The answer is dated at the turn's last beat, when the draft was saved, and so is the
+    conversation's last activity: not at the moment someone, or the worker, noticed. It
+    costs nothing, as any interrupted turn.
+
+    A draft that can't be kept never keeps its turn from being given up on. The id its
+    answer was to have may be taken: readers are told that id while the answer is
+    written, and whoever sends a message chooses the message's id. Then the turn is
+    given up on without an answer, and the log says so."""
+    draft = _draft_of(turn)
+    if draft is not None:
+        turn_id = turn.id
+        try:
+            async with db.begin_nested():  # an answer that can't be written undoes only itself
+                await _end(
+                    db,
+                    conversation,
+                    turn,
+                    Ending("interrupted", draft.parts),
+                    answer_id=draft.answer_id,
+                    now=now,
+                    answered_at=turn.alive_at,
+                )
+            return
+        except IntegrityError as error:
+            if getattr(error.orig, "sqlstate", None) != _UNIQUE_VIOLATION:
+                raise
+            logger.warning(
+                "turn %s: its draft couldn't be kept, a message already has its answer's id",
+                turn_id,
+            )
+            # As they are in the database, after what was undone: both are still held.
+            await db.refresh(conversation)
+            await db.refresh(turn)
+    await _end(db, conversation, turn, Ending("interrupted"), answer_id=None, now=now)
+
+
+def _draft_of(turn: Turn) -> Draft | None:
+    """The turn's draft. `None` when it has none, or one this code can't read, written
+    by another version of it: then the turn is given up on without it, and the log says
+    so. Anything else that goes wrong is raised."""
+    if turn.draft is None:
+        return None
+    try:
+        return Draft.model_validate(turn.draft)
+    except ValidationError:
+        # Not the error itself: it quotes what the model wrote, and people's words stay
+        # out of the log.
+        logger.warning("turn %s: its draft couldn't be read, and nothing of it is kept", turn.id)
+        return None
+
+
+async def _end(
+    db: AsyncSession,
+    conversation: Conversation,
+    turn: Turn,
+    ending: Ending,
+    *,
+    answer_id: uuid.UUID | None,
+    now: datetime,
+    answered_at: datetime | None = None,
+    credits: int | None = None,
+) -> None:
+    """Write how a running turn ended, whose row and whose conversation's row the
+    caller holds, and its answer if it has one. Every ending is written through this:
+    `finish`, and giving up.
+
+    The answer is a message under `answer_id`, shown by the conversation, and dated
+    `answered_at`, or `now` when that isn't given. The turn ends at `now`. Its draft is
+    emptied in the statement that writes the outcome."""
+    if ending.parts:
+        assert answer_id is not None  # noqa: S101 - whoever has parts has their message's id
+        await tree.append(
+            db,
+            conversation,
+            message_id=answer_id,
+            parent_id=turn.question_id,
+            role="assistant",
+            parts=ending.parts,
+            now=now if answered_at is None else answered_at,
+        )
+        turn.answer_id = answer_id
+    turn.status = ending.status
+    turn.finish_reason = ending.finish_reason
+    turn.error = ending.error
+    if ending.usage is not None:
+        turn.input_tokens = ending.usage.input_tokens
+        turn.cached_input_tokens = ending.usage.cached_input_tokens
+        turn.output_tokens = ending.usage.output_tokens
+    if ending.timings is not None:
+        turn.load_ms = ending.timings.load_ms
+        turn.prompt_ms = ending.timings.prompt_ms
+        turn.generation_ms = ending.timings.generation_ms
+    turn.credits = credits
+    turn.draft = None
+    turn.finished_at = now
+    await db.flush()
+
+
+async def _require_free(db: AsyncSession, conversation: Conversation) -> None:
+    """Raise `StillAnsweringError` if a turn is running in the conversation. Whoever
+    asks has given up on a stale one before this (`give_up_on_stale`)."""
     running = await running_in(db, conversation)
     if running is not None:
         raise StillAnsweringError(running)

@@ -121,6 +121,7 @@ class Turn(Base):
             name="status_is_known",
         ),
         CheckConstraint("(status = 'running') = (finished_at IS NULL)", name="running_or_finished"),
+        CheckConstraint("status = 'running' OR draft IS NULL", name="draft_only_while_running"),
         # One answer is written at a time in a conversation, whatever code starts a turn.
         Index(
             "uq_turns_conversation_id_running",
@@ -171,4 +172,8 @@ class Turn(Base):
     """When the process that writes the answer last said it was still at it: every few
     seconds while the turn runs. A running turn that has been silent for too long is
     taken for dead: see `actio.chat.turns.STALE_AFTER`."""
+    draft: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    """What the answer holds so far, saved with each beat, and the id its message will
+    have: see `actio.chat.turns.Draft`. Empty until something is written, and once the
+    turn has ended. A turn whose process died is given up on with it as its answer."""
     finished_at: Mapped[datetime | None]
