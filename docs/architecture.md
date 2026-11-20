@@ -2,7 +2,7 @@
 
 ## Today
 
-`make up` runs six containers, after a seventh, `migrate`, has brought the database schema up to date and exited. Five serve one address, <http://localhost:8080>; the sixth, the worker, runs the background jobs, and nothing reaches it:
+`make up` runs six containers, after a seventh, `migrate`, has brought the database schema up to date and exited. Five serve one address, <http://localhost:8080>; the sixth, the worker, runs the background jobs, and nothing reaches it. The API and the worker also share a third network, `models`, their way out to the models' servers:
 
 ```mermaid
 flowchart LR
@@ -26,7 +26,8 @@ flowchart LR
     api --> valkey
     worker --> postgres
     worker --> valkey
-    api -->|"host.docker.internal"| ollama
+    api -->|"host.docker.internal, through models"| ollama
+    worker -->|"host.docker.internal, through models"| ollama
 ```
 
 - **Caddy** is the only entry point, and the only container with a port on your machine. It sends `/api/*` and `/v1/*` to the API, and every other path to the web app. It passes streamed responses through at once, which the chat's token-by-token replies need. A request to the API with a body over 2 MB it refuses itself, with a 413 in the API's own error format: a body that says its length before any of it is passed on, one sent in chunks once the limit is reached ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)). Its configuration, `deploy/caddy/Caddyfile`, is built into its image, as the API's code is into the API's: after a change to it, `make up` or `make dev` again applies it, and a mistake in it stops the build while the running proxy goes on as it was.
@@ -45,14 +46,15 @@ flowchart LR
     - a plan also says how many answers one account may have being written at once, and one more is answered 429, before anything is kept. An account reads along with an answer in six places at once at most: one more join is answered 429 too ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)).
 - **The worker** is the same application, run with `--role worker`, in a container of its own from the API's image. `make dev` runs it inside the API's process instead, with `--role all`, and it reloads with the API ([ADR 0024](adr/0024-background-jobs-in-a-queue-in-postgres.md)).
     - It runs background jobs from a queue in Postgres, Procrastinate's, one at a time. A job is deferred in the transaction of the change it follows, so the two are committed together, or not at all.
-    - A job can also have a schedule. Today there are four jobs, each every ten minutes. The worker deletes expired guests and sessions, which the API otherwise deletes only after a new guest arrives. It gives up on answers that have been silent for a minute, because the process writing them died, keeping what each had saved, which the API otherwise does only when someone looks at their conversation. It never waits for a lock: an answer whose conversation someone is reading, or asking in, it leaves for its next run ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md)). It counts in Valkey what the API wrote to the usage ledger and couldn't count there, because Valkey didn't answer or the process died in between ([ADR 0020](adr/0020-usage-limits-on-turns.md)). And it looks after its own queue: a job that a worker which died had in hand is run again, that worker is taken off the queue's list, and a job that ended without succeeding is deleted after a week.
+    - A job can also have a schedule. Today four jobs have one, each every ten minutes. The worker deletes expired guests and sessions, which the API otherwise deletes only after a new guest arrives. It gives up on answers that have been silent for a minute, because the process writing them died, keeping what each had saved, which the API otherwise does only when someone looks at their conversation. It never waits for a lock: an answer whose conversation someone is reading, or asking in, it leaves for its next run ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md)). It counts in Valkey what the API wrote to the usage ledger and couldn't count there, because Valkey didn't answer or the process died in between ([ADR 0020](adr/0020-usage-limits-on-turns.md)). And it looks after its own queue: a job that a worker which died had in hand is run again, that worker is taken off the queue's list, and a job that ended without succeeding is deleted after a week.
+    - A fifth job has no schedule: the first turn of a conversation that completes defers it, when `config/models.toml` names a model for titles. The worker asks that model for a title of a few words, from the conversation's first question, and writes it in place of the first line, unless someone has renamed the conversation meanwhile. It costs the account nothing ([ADR 0025](adr/0025-titles-written-by-a-model.md)). So the worker reads the models file too, as the API does, and reaches the models' servers: through the `models` network in its container, its one way out, and at the API's own gate inside the API's process.
     - A job may run more than once, from its start each time: after a stop cut it off, or after the worker that had it died, three times more at most. A job that fails is not run again.
     - It starts after the migration, and checks for itself that the database is at the migration its code expects. When it isn't, the worker takes no job, and ends with one line that says so.
     - Told to stop, by SIGTERM or Ctrl-C, it lets the job in hand finish for up to 15 seconds, then cuts it off and puts it back into the queue, and ends well, whenever it is told. A second signal changes nothing. Docker gives it 25 seconds.
     - It lives through a restart of the database: it stops, starts again a second later, and waits for the database as when it first started. When it can't go on, as 30 seconds after it lost its database, it ends, and Docker starts it again.
     - It has no port for Docker to probe. While it works it touches a file every five seconds, and its health check says whether it did so lately.
     - Inside the API's process, it never ends that process: when it can't work, it says why in the log and tries again ten seconds later. It is told to stop at the same moment as the answers being written. There `/api/readyz` says whether it works: `not working` before it has first said so, from the moment it ends with an error or can't work until it says so again, and 20 seconds after it last did, by the rule its health check has for the file.
-- **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API reaches it from its container.
+- **Ollama** runs the local models. It runs on your machine itself, where it can use the graphics processor, and the API and the worker reach it from their containers.
 - **The web app** is a Next.js application: the chat ([ADR 0015](adr/0015-the-web-chat-calls-the-api-from-the-browser.md)).
     - **Its server sends only the frame of the page.** Everything of yours is fetched by the browser, straight from the API, with the session cookie. Nothing but the API handles a session.
     - **A first visit starts a guest session,** so you can ask at once. `/` is a new conversation, and `/c/<id>` a stored one.
@@ -77,7 +79,7 @@ Inside the API, the code is split into layers that only import downward, and a t
 |---|---|
 | `actio.api` | The HTTP interface: routes, the session cookie, the check against requests from other sites, which attempts are rate-limited, the error format. The only layer that knows the web framework |
 | `actio.worker` | The worker: every background job it runs, with what each needs, and their schedules. Beside `actio.api`: neither imports the other |
-| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Running turns apart from their requests, the stream of what each writes, and how many answers and readers one account has at once. Tables and rules, with no HTTP |
+| `actio.chat` | Conversations, their tree of messages, and turns: starting one, following a model's answer as it streams, recording how it ended and what it cost. Running turns apart from their requests, the stream of what each writes, and how many answers and readers one account has at once. The titles a model writes for conversations. Tables and rules, with no HTTP |
 | `actio.catalog` | The models on offer: reading `config/models.toml`, asking a model's server about it, and the gate where answers wait while that server is busy |
 | `actio.identity` | Accounts and sessions: tables and rules, with no HTTP |
 | `actio.usage` | Usage limits: reading `config/plans.toml`, holding credits before a request and counting them after it through the [engine](reference/quota.md), the ledger, and counting again what the counters missed |
