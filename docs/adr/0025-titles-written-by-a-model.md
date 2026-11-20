@@ -193,3 +193,56 @@ By the supervisor: a MacBook Pro (M1 Pro, 16 GB), 2026-11-20, Ollama 0.40.16, `q
 - **How to reverse it:**
     - **for an installation:** leave `titles` out of the models file. No job is deferred, and one already queued ends with a warning;
     - **in the code:** `actio.chat.titles`, the job in `actio.worker.listed`, the deferral in `turns.finish` and the flag that reaches it from the route, a migration that drops the two columns, as 0012's downgrade does, and the worker's models in `compose.yaml`: its mount, its variable, its host and the `models` network.
+
+## Revisions
+
+### 2026-11-20: the page shows a title when it arrives, and the end-to-end stack writes titles
+
+The decision said: "**The page didn't change.** It shows a new title when it next reads the list". A title is written about half a second after its answer ended, and the page read the list at that end, a moment too early. So it showed the first line until something else made it read the list again. It now reads the list again while the server says that a title is on its way.
+
+**The API says it, on each conversation of the list** (`ConversationSummary.title_pending`):
+
+- **The rule is written once,** `on_its_way` in `actio.chat.titles`: the conversation is still named after its first question, a model was asked for its title, and less than `ON_ITS_WAY_FOR`, 15 seconds, has passed since. It takes the time as `now`, from the route.
+- **So it is false** before the first answer, where no model is named for titles, once the model's title is written, once a person has renamed the conversation, and from 15 seconds after the model was asked, whatever became of the job.
+- **And false when the model was asked more than 15 seconds after now,** as a clock that was set back makes it look. Without that, a page would look again every second for as long as the clock was set back. Found by the review of this revision.
+- **Everything that answers with a conversation's summary says it:** the list, a rename's answer, which is always false, and a conversation read whole, whose description builds on the summary's.
+- **Why 15 seconds:** a title took about half a second, measured (above). One that takes longer, such as one that waits behind a long answer at a server that writes one at a time, shows whenever the list is next read, as before.
+- **A job that ended without a title is said to be on its way until the time is up.** Nothing records that it ended, and this step adds nothing that would: the page reads the list for those seconds, for nothing.
+
+**The server says it, and the page doesn't work it out.** The page would need who named the conversation, when the model was asked, and the server's clock, which the browser's isn't ([ADR 0021](0021-usage-limits-in-the-page.md)). The rule would be written twice, and drift. The page follows the member, and stops when the server stops saying it.
+
+**What the page does** (`lib/chat/list.ts`): while a conversation of the list's first page says `title_pending`, it reads the list again every second (`TITLE_LOOK_MS`), through the list's own SWR hook. When none does, nothing is asked. This is a fourth moment at which the list is read again ([ADR 0018](0018-the-list-of-conversations-is-the-servers.md), revision of the same day).
+
+- **A look reads the first page alone,** where a conversation that was just answered is. SWR reads a later page again only when where the page before it ends has moved, or when the page changed it itself, by a rename or a delete.
+- **So the first page alone decides whether to look.** A title on its way in a later page would never be read again by a look, and the looks would not end: the build asked every page, and the review found it, in the end-to-end test that fills two pages.
+- **The interval is a function of what was read last, written inside the hook's options.** SWR 2.5.1 starts looking only when that option changes, and a function written once outside would never start once the list had been read.
+- **SWR leaves out a look within two seconds of the last answer, by default.** A look every second would have been one every two. The hook leaves out only those within half a second.
+- **What it costs:** one request for the list's first page, every second, for a few seconds after a conversation's first answer, and for 15 at most when no title comes.
+- **A title that arrives while its row's rename box is open leaves the box alone:** what was typed in it, the keyboard, and, with nothing typed yet, the title the box was opened with. The row needed no change for that. The box is given its text once, when it opens, and React makes that text the box's own: a title that arrives later doesn't reach it.
+- **What is in the box is the person's.** Enter on the box as it was opened, once a model's title has arrived under it, is a rename to what the box shows: what is saved is compared with the title the conversation has now, as it always was.
+- **The build had changed the row,** to keep the title a box was opened with, taking it that an untouched box would follow an arriving title. The review found that the change had dropped the rename above. A planted mistake then showed that nothing depended on the change at all, in the simulated browser and, with the end-to-end stack built from a copy without it, in a real one. It was taken out, and the row is as it was. Two tests keep what it was meant for: one of the page's, and one in a real browser.
+
+**The end-to-end stack writes titles too** ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md), revision of the same day). Its models file left `titles` out, because its tests find a conversation in the list by its first question's first line.
+
+- **The fake's echo couldn't serve.** A title is asked for in one message: the same instructions each time, then the question quoted. The fake echoes the last message of the person's, so every conversation would have been named "Echo: Write a title for the conversation…".
+- **So the fake serves a second model,** `fake-quiet`, which says nothing by itself: its reply has no text, and ends as a finished reply does. A model that writes nothing gives no title, so a conversation keeps its first line.
+- **`[[say: Flat tyres]]`** tells it what to say. The question is quoted in the request for its title, with its directives, so a test names its conversation by typing; the model that answers leaves the directive out of its echo, like every directive.
+- **The models file names `namer` for titles,** the fake's quiet model, priced like `standard`: a model that costs nothing is offered when a limit is reached. The stack's worker waits for the fake, as its API does.
+- **One test sees a title arrive:** a question that carries `[[say: Flat tyres]]` is listed by its first line, then by `Flat tyres` with nothing touched, and after a reload still.
+
+Under "Harder", "the page shows the first line until it next reads the list" holds now only for a title that takes longer than 15 seconds. Under "Not done yet", "the page showing a title the moment it arrives" is done, about a second after it arrives, and so is "the end-to-end stack". Retries after an error and a model for titles that isn't on offer to people are still to come.
+
+#### Measured
+
+By the supervisor, on a MacBook Pro (M1 Pro, 16 GB), 2026-11-20.
+
+- **On the running stack,** `make up` with this code, `qwen3.5:4b-q4_K_M`, in a headless Chromium, four first questions asked one after another, nothing touched after each:
+    - **the title showed by itself** 0.91 s, 0.69 s, 0.91 s and 1.00 s after the answer had ended;
+    - **one look each:** the list was asked for once after the answer had ended, a second after the turn's own reading, and that answer held the title. None followed in the 3.5 seconds after;
+    - **after a reload,** with no title on its way, the list wasn't asked for again in four seconds, and the four titles were there.
+- **In the end-to-end stack,** 35 tests, two of them new: a title shows by itself (`Flat tyres`, 5.1 s for the whole test, at a word every 0.2 s), and a title that arrives while its conversation is being renamed leaves the box, and Enter keeps what the box shows (8.0 s, with the title three seconds behind its answer). The 33 others passed unchanged, each conversation of theirs keeping its first line.
+- **The same sidebar tests of the end-to-end stack, built from a copy of the tree without the row's change** that the build had made: all passed, the new one among them. So the change was taken out.
+- **Mistakes were planted, one at a time, in a scratch copy:** 19 in the API, the fake and the end-to-end stack's files, and 8 in the page. Each fails a test, four of them only after a test was sharpened or added:
+    - the fifteen seconds and the one second were used by their tests as names, so another number failed nothing: each is held as a number now;
+    - a title on its way in a later page, which kept the page looking without end, had no test;
+    - the row's change, above, was no mistake to take out: nothing failed, anywhere.

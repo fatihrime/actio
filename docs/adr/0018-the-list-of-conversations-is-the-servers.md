@@ -162,3 +162,13 @@ The decision said: "Leaving a conversation stops the answer that is being writte
 - **The look every second and a half is left for an answer whose stream can't be read.**
 - **The list and the usage counts are read again** when the answer ends, as before.
 - **The tests of coming back were changed with it:** the component test now reads along, and the end-to-end test sees the answer arrive, with Stop offered, before it is whole.
+
+### 2026-11-20: read again while a title is on its way
+
+A model names a conversation now, about half a second after its first answer ended ([ADR 0025](0025-titles-written-by-a-model.md)). The list read at that end was a moment too early, and showed the first line until it was next read.
+
+- **A fourth moment at which the list is read again:** while the server says of a conversation on the list's first page that its title is on its way, `title_pending` on each conversation of the list, every second. The first page alone decides, since such a look reads the first page alone. The server stops saying so once the title is written, and 15 seconds after the model was asked at the latest.
+- **The page follows that member.** It never works out from titles, times or counts whether a title is coming.
+- **Such a look reads the first page alone,** where a conversation that was just answered is, unless where it ends has moved. The pages after it are read as before, from where the page before them ends.
+- **The rule of the decision holds:** the title shows once the server has it, and nothing on the page moves a row. A title that arrives while its row's rename box is open leaves the box as it is.
+- **What it costs:** a request a second for a few seconds after a conversation's first answer, and for 15 at most when no title comes. Where no model is named for titles, nothing.

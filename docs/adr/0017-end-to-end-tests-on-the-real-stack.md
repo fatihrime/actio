@@ -214,3 +214,14 @@ The job that runs these tests in CI installed the browser with `playwright insta
 - **What the archive adds is fonts.** The job's own log says so: every library the browser needs was on the runner already, which ships browsers of its own, and nine packages of fonts were to be fetched. No test here depends on a font: they read what the page says, and pass on a laptop with other fonts.
 - **So a failure of that step is a warning now, not the job's end.** The step tries the same command as before. When it fails, it says so in the run's summary and installs the browser alone. Playwright installs the packages first and the browser after, so one that failed on the packages has downloaded no browser yet.
 - **Why only now:** the job has run on every push since 2026-11-14, and until this day the archive had always answered.
+
+### 2026-11-20: a second model in the fake, which names conversations
+
+A model writes a conversation's title now, after its first answer, and the page shows it when it arrives ([ADR 0025](0025-titles-written-by-a-model.md), revision of the same day). The stack's models file named no model for titles: the tests find a conversation in the list by its first question's first line.
+
+- **The fake's echo couldn't name conversations.** A title is asked for with the same instructions each time and the question quoted after them, so an echo would have named every conversation alike.
+- **So the fake serves a second model,** `fake-quiet`, beside `fake-chat`. It says nothing by itself: its reply has no text, and ends as a finished reply does. Every directive works for both models.
+- **One more directive, `[[say: Flat tyres]]`,** for the quiet model: the reply's text. Several are joined by a space. The model that answers leaves it out of its echo, like every directive. The request for a title quotes the question, directives and all, so a test names its conversation by typing.
+- **The stack names a model for titles now:** `namer`, the quiet model, priced like `standard`, since a model that costs nothing is offered at a usage limit. Its conversations keep their first line, as the tests need, unless a question says otherwise. The worker waits for the fake to be healthy, as the API does, and a test of the containers' rules holds the overlay to that.
+- **One test more,** in `sidebar.spec.ts`: a question that carries `[[say: Flat tyres]]` is listed by its first line while its answer is written, then by `Flat tyres` with nothing touched, and after a reload still.
+- **That makes 34 tests.** The other 33 didn't change.
