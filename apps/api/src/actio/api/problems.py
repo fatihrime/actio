@@ -125,6 +125,8 @@ def install(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_request: Request, error: RequestValidationError) -> JSONResponse:
+        # Where it is wrong and how, never what was sent: deep inside a body that can
+        # still hold a character no response can carry (`actio.api.body`).
         errors = [
             {"where": ".".join(str(part) for part in issue["loc"]), "problem": issue["msg"]}
             for issue in error.errors()

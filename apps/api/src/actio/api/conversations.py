@@ -21,6 +21,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, StringConstraints
 
+from actio.api.body import Body
 from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now, Runner
 from actio.api.problems import Problem
 from actio.chat import conversations, tree, turns
@@ -152,13 +153,13 @@ class ConversationOut(ConversationSummary):
     says whether an answer is still being written, or why none came. Otherwise empty."""
 
 
-class Rename(BaseModel):
+class Rename(Body):
     title: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=TITLE_MAX)
     ]
 
 
-class ShowBranch(BaseModel):
+class ShowBranch(Body):
     message_id: uuid.UUID = Field(description="Any message of the branch to show.")
 
 

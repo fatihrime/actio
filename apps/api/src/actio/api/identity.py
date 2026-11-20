@@ -16,9 +16,10 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Response
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
+from actio.api.body import Body
 from actio.api.dependencies import (
     NO_SESSION,
     AppResources,
@@ -35,6 +36,7 @@ from actio.api.problems import Problem
 from actio.api.rate_limits import Limits
 from actio.chat import conversations
 from actio.core.resources import Resources
+from actio.core.text import MARK
 from actio.identity import accounts, sessions
 from actio.identity.passwords import MAX_LENGTH, MIN_LENGTH
 from actio.identity.sessions import Principal
@@ -66,18 +68,28 @@ class Me(BaseModel):
         )
 
 
-class SignUp(BaseModel):
+class SignUp(Body):
     email: EmailStr = Field(max_length=254)
     password: str = Field(min_length=MIN_LENGTH, max_length=MAX_LENGTH)
 
+    @field_validator("email")
+    @classmethod
+    def _is_somebodys(cls, email: str) -> str:
+        """An address with U+FFFD in it is nobody's mailbox. That mark stands where a
+        body held a character that can't be stored (`Body`), and the rules for an
+        address take it for a letter of some script."""
+        if MARK in email:
+            raise ValueError("an email address can't hold a character that can't be shown")
+        return email
 
-class LogIn(BaseModel):
+
+class LogIn(Body):
     # No rules about their form here: a malformed address is simply a wrong login.
     email: str = Field(max_length=254)
     password: str = Field(max_length=MAX_LENGTH)
 
 
-class PasswordChange(BaseModel):
+class PasswordChange(Body):
     current_password: str = Field(max_length=MAX_LENGTH)
     new_password: str = Field(min_length=MIN_LENGTH, max_length=MAX_LENGTH)
 

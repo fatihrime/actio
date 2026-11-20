@@ -47,6 +47,7 @@ from actio.catalog import Gate, OfferedModel
 from actio.chat import turns
 from actio.chat.parts import Part, ReasoningPart, TextPart
 from actio.chat.turns import Ending
+from actio.core.text import storable
 from actio.usage.limits import Reserved, UsageLimits, can_be_recorded
 from actio_llm import (
     ChatRequest,
@@ -196,6 +197,9 @@ class Answer:
     def _write(self, kind: Kind, text: str) -> list[Step]:
         if not text:
             return []
+        # Before a reader is shown it: what is streamed is what is stored. A character
+        # that can't be stored would keep the whole answer from being recorded.
+        text = storable(text)
         steps: list[Step] = []
         if not self._open or self._parts[-1][0] != kind:
             steps += self.close()

@@ -52,6 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import Receive, Scope, Send
 
 from actio.api import ui_stream
+from actio.api.body import Body
 from actio.api.conversations import MessageMetadata, OwnConversation, TurnOut
 from actio.api.dependencies import (
     NO_SESSION,
@@ -113,6 +114,8 @@ NOT_READY = {
 }
 
 
+# A part of a turn's request, not a body itself: `TurnRequest` is the `Body` that is
+# looked through, and this with it.
 class NewMessage(BaseModel):
     """A question, as its sender made it."""
 
@@ -132,7 +135,7 @@ class NewMessage(BaseModel):
         return self
 
 
-class TurnRequest(BaseModel):
+class TurnRequest(Body):
     model_config = ConfigDict(extra="forbid")
 
     message: NewMessage | None = None
