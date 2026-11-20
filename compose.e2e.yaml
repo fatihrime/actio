@@ -7,6 +7,12 @@
 #
 # The rules of compose.yaml hold here too, and deploy/tests/test_compose_policy.py
 # checks them on the two files together.
+
+# In place of ./config, for the API and the worker alike: a models file that offers the
+# fake, under the same name, and the plans that price it.
+x-e2e-config: &e2e-config
+  - ./deploy/e2e/config:/app/config:ro
+
 services:
   # Answers "Echo: <the question>", and does what a question's directives say: reason
   # first, fail, break off, take its time. So a test scripts the model by typing.
@@ -40,15 +46,18 @@ services:
       ACTIO_LIMIT_TURNS_PER_USER: 100000/hour
       # Not raised: password attempts per email address. Each test makes up its own
       # address, and the few attempts it makes are what a person would make.
-    volumes:
-      # In place of ./config: a models file that offers the fake, under the same name.
-      - ./deploy/e2e/config:/app/config:ro
-    networks: [models]
+    volumes: *e2e-config
     depends_on:
       fakellm:
         condition: service_healthy
 
+  # The real worker, but for its config folder. Its file names no model for titles yet,
+  # so it doesn't wait for the fake.
+  worker:
+    volumes: *e2e-config
+
 networks:
-  # The API and the model. Internal, like `backend`: the fake needs no way out.
+  # The API, the worker and the model. Internal here, like `backend`: the fake needs no
+  # way out, and the worker reaches the fake and nothing else.
   models:
     internal: true

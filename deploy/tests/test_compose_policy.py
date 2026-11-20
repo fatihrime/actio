@@ -151,12 +151,33 @@ def test_the_worker_starts_only_after_the_schema_is_migrated(stack: dict[str, An
     assert depends_on["migrate"]["condition"] == "service_completed_successfully"
 
 
-def test_the_worker_cannot_be_reached_or_reach_out(stack: dict[str, Any]) -> None:
-    """It serves nothing, and needs only the data services. (No port either: the rule
-    for every container, above.)"""
-    internal = {name for name, network in stack["networks"].items() if network.get("internal")}
+def test_the_worker_cannot_be_reached_and_its_one_way_out_is_to_the_models_servers(
+    stack: dict[str, Any],
+) -> None:
+    """It serves nothing: it publishes no port, the rule for every container above, and
+    it isn't on `edge`, beside Caddy and the web app. It needs the data services, on
+    `backend`, which has no route out, and, for a conversation's title, the models'
+    servers, such as Ollama on the machine itself: `models` is its one way out, and the
+    API's. See ADR 0024, revision of 2026-11-20."""
+    networks = stack["networks"]
+    worker = stack["services"]["worker"]
+    on_the_way_out = {
+        name for name, svc in stack["services"].items() if "models" in svc["networks"]
+    }
 
-    assert set(stack["services"]["worker"]["networks"]) <= internal
+    assert set(worker["networks"]) == {"backend", "models"}
+    assert not worker.get("ports")
+    assert networks["backend"].get("internal") is True
+    assert not networks["models"].get("internal")
+    assert on_the_way_out == {"api", "worker"}
+
+
+def test_the_worker_reads_the_models_file_where_the_api_does(stack: dict[str, Any]) -> None:
+    """One job asks a model for a conversation's title. The worker finds the models on
+    offer in the same folder as the API, mounted the same way, read-only: the two can't
+    offer different models. Where that folder lands, and that it is read-only, is held
+    for the API below."""
+    assert stack["services"]["worker"]["volumes"] == stack["services"]["api"]["volumes"]
 
 
 def test_only_the_worker_is_started_again_and_only_when_it_failed(stack: dict[str, Any]) -> None:
@@ -418,13 +439,21 @@ def test_the_api_reads_its_two_files_from_a_read_only_mount(
     assert "COPY config /app/config" in dockerfile  # so the image also starts on its own
 
 
-def test_the_api_finds_ollama_on_the_host_unless_told_otherwise() -> None:
-    """Ollama runs on the machine itself. A container's own 127.0.0.1 is the container."""
+@pytest.mark.parametrize(
+    "files", [["compose.yaml"], ["compose.yaml", "compose.e2e.yaml"]], ids=["stack", "e2e"]
+)
+@pytest.mark.parametrize("service", ["api", "worker"])
+def test_ollama_is_found_on_the_host_unless_told_otherwise(service: str, files: list[str]) -> None:
+    """Ollama runs on the machine itself. A container's own 127.0.0.1 is the container.
+    The worker looks where the API looks, in both stacks: it asks a model for a
+    conversation's title."""
     env = os.environ | {"POSTGRES_PASSWORD": "placeholder", "VALKEY_PASSWORD": "placeholder"}
     env.pop("ACTIO_OLLAMA_URL", None)
-    command = ["docker", "compose", "--env-file", ".env.example", "--file", "compose.yaml"]
+    command = ["docker", "compose", "--env-file", ".env.example"]
+    for name in files:
+        command += ["--file", name]
 
-    def api(**extra: str) -> dict[str, Any]:
+    def resolved(**extra: str) -> dict[str, Any]:
         result = subprocess.run(  # noqa: S603 - the docker CLI, with arguments fixed here
             [*command, "config", "--format", "json"],
             cwd=ROOT,
@@ -433,11 +462,11 @@ def test_the_api_finds_ollama_on_the_host_unless_told_otherwise() -> None:
             text=True,
             check=True,
         )
-        service: dict[str, Any] = json.loads(result.stdout)["services"]["api"]
-        return service
+        found: dict[str, Any] = json.loads(result.stdout)["services"][service]
+        return found
 
-    by_default = api()
-    elsewhere = api(ACTIO_OLLAMA_URL="http://192.168.1.50:11434")
+    by_default = resolved()
+    elsewhere = resolved(ACTIO_OLLAMA_URL="http://192.168.1.50:11434")
 
     assert by_default["environment"]["ACTIO_OLLAMA_URL"] == "http://host.docker.internal:11434"
     assert any(host.startswith("host.docker.internal") for host in by_default["extra_hosts"])
@@ -464,10 +493,17 @@ def e2e() -> dict[str, Any]:
 def test_the_e2e_stack_is_the_real_one_with_a_fake_model_added(
     stack: dict[str, Any], e2e: dict[str, Any]
 ) -> None:
-    """Tests that pass on another stack than the one people run would prove little."""
+    """Tests that pass on another stack than the one people run would prove little. The
+    worker is the real one too, but for the folder its models file is read from, as the
+    API's is: see `test_the_e2e_stack_reads_its_own_files_where_the_api_and_worker_expect_them`."""
     assert set(e2e["services"]) == set(stack["services"]) | {"fakellm"}
-    for name in ("caddy", "web", "migrate", "worker", "postgres", "valkey"):
+    for name in ("caddy", "web", "migrate", "postgres", "valkey"):
         assert e2e["services"][name] == stack["services"][name]
+    without_its_folder = [
+        {key: value for key, value in svc["worker"].items() if key != "volumes"}
+        for svc in (e2e["services"], stack["services"])
+    ]
+    assert without_its_folder[0] == without_its_folder[1]
 
 
 def test_the_e2e_stack_follows_the_same_rules(e2e: dict[str, Any]) -> None:
@@ -496,9 +532,11 @@ def test_the_e2e_stack_follows_the_same_rules(e2e: dict[str, Any]) -> None:
     assert on_the_edge == {"caddy", "web", "api"}
 
 
-def test_the_fake_model_is_reached_by_the_api_alone_and_has_no_way_out(
+def test_the_fake_model_is_reached_by_the_api_and_the_worker_alone_and_has_no_way_out(
     e2e: dict[str, Any],
 ) -> None:
+    """Here the models' network is internal, like `backend`: the worker, which reaches
+    out through it alone, reaches the fake and nothing else."""
     internal = {name for name, network in e2e["networks"].items() if network.get("internal")}
     its_networks = set(e2e["services"]["fakellm"]["networks"])
     sharing_one = {
@@ -506,15 +544,17 @@ def test_the_fake_model_is_reached_by_the_api_alone_and_has_no_way_out(
     }
 
     assert its_networks <= internal
-    assert sharing_one == {"api", "fakellm"}
+    assert sharing_one == {"api", "worker", "fakellm"}
+    assert set(e2e["services"]["worker"]["networks"]) <= internal
     assert e2e["services"]["api"]["depends_on"]["fakellm"]["condition"] == "service_healthy"
 
 
-def test_the_e2e_stack_reads_its_own_files_where_the_api_expects_them(
+def test_the_e2e_stack_reads_its_own_files_where_the_api_and_worker_expect_them(
     stack: dict[str, Any], e2e: dict[str, Any]
 ) -> None:
-    """The overlay swaps the folder that is mounted, not the place it is mounted at.
-    What the files say is checked by the API's own tests, which can read them."""
+    """The overlay swaps the folder that is mounted, not the place it is mounted at, and
+    for the worker as for the API. What the files say is checked by the API's own tests,
+    which can read them."""
     [usual] = stack["services"]["api"]["volumes"]
     [mount] = e2e["services"]["api"]["volumes"]
 
@@ -523,6 +563,7 @@ def test_the_e2e_stack_reads_its_own_files_where_the_api_expects_them(
     assert (Path(mount["source"]) / "plans.toml").is_file()
     assert mount["target"] == usual["target"]
     assert mount["read_only"] is True
+    assert e2e["services"]["worker"]["volumes"] == [mount]
 
 
 def test_no_test_meets_a_rate_limit_made_for_people(e2e: dict[str, Any]) -> None:

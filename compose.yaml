@@ -29,6 +29,23 @@ x-api-stores: &api-stores
   ACTIO_DATABASE_URL: postgresql://actio:${POSTGRES_PASSWORD:?run make bootstrap to create .env}@postgres:5432/actio
   ACTIO_VALKEY_URL: valkey://:${VALKEY_PASSWORD:?run make bootstrap to create .env}@valkey:6379/0
 
+# How the API and the worker find the models on offer: the file that lists them, and the
+# way to Ollama. The worker asks a model for a conversation's title. Shared, so that the
+# two can't find different models, or look for Ollama in different places.
+x-models: &models
+  extra_hosts:
+    # Docker Desktop knows that name by itself. On Linux, this line teaches it.
+    - "host.docker.internal:host-gateway"
+  volumes:
+    # The models on offer. Edit config/models.toml and restart the API and the worker:
+    # no rebuild.
+    - ./config:/app/config:ro
+x-ollama: &ollama
+  # Ollama runs on this machine itself, not in a container: there it can use the
+  # graphics processor, which a container on macOS can't. From inside a container the
+  # machine is called host.docker.internal.
+  ACTIO_OLLAMA_URL: ${ACTIO_OLLAMA_URL:-http://host.docker.internal:11434}
+
 services:
   caddy:
     # The pinned Caddy image with the config built in (deploy/caddy/Dockerfile). A
@@ -93,11 +110,11 @@ services:
 
   api:
     build: *api-build
-    <<: *hardening
+    <<: [*hardening, *models]
     user: actio
     tmpfs: [/tmp]
     environment:
-      <<: *api-stores
+      <<: [*api-stores, *ollama]
       # Only Caddy and the web app can reach the API here, so trust the client address
       # and scheme that Caddy forwards.
       ACTIO_FORWARDED_ALLOW_IPS: "*"
@@ -111,17 +128,7 @@ services:
       ACTIO_LIMIT_LOGINS_PER_ADDRESS:
       ACTIO_LIMIT_LOGINS_PER_EMAIL:
       ACTIO_LIMIT_TURNS_PER_USER:
-      # Ollama runs on this machine itself, not in a container: there it can use the
-      # graphics processor, which a container on macOS can't. From inside a container
-      # the machine is called host.docker.internal.
-      ACTIO_OLLAMA_URL: ${ACTIO_OLLAMA_URL:-http://host.docker.internal:11434}
-    extra_hosts:
-      # Docker Desktop knows that name by itself. On Linux, this line teaches it.
-      - "host.docker.internal:host-gateway"
-    volumes:
-      # The models on offer. Edit config/models.toml and restart the API: no rebuild.
-      - ./config:/app/config:ro
-    networks: [edge, backend]
+    networks: [edge, backend, models]
     mem_limit: 512m
     # Told to stop, the API first lets the answers that are being written come to an
     # end: they get 15 seconds, and what is unfinished then is halted and recorded as
@@ -149,7 +156,9 @@ services:
   # docs/adr/0024-background-jobs-in-a-queue-in-postgres.md.
   worker:
     build: *api-build
-    <<: *hardening
+    # The models on offer, where the API finds them: one job asks a model for a
+    # conversation's title. A mistake in the models file stops it, as it stops the API.
+    <<: [*hardening, *models]
     user: actio
     # Python listens for the stop signal only once it has started. As process 1 a
     # program gets no signal it has no handler for, so a stop in that first half
@@ -158,11 +167,15 @@ services:
     tmpfs: [/tmp]
     command: [actio, --role, worker]
     environment:
-      <<: *api-stores # Valkey for one job: counting again what the usage counters missed
+      # Where its data is, Valkey for one job, counting again what the usage counters
+      # missed, and Ollama for another, a conversation's title.
+      <<: [*api-stores, *ollama]
       # The file it touches every 5 seconds while it works, for its health check below.
       # On the tmpfs: the root filesystem is read-only.
       ACTIO_ALIVE_FILE: /tmp/actio-worker-alive
-    networks: [backend] # nothing reaches it, and it reaches only the data services
+    # Nothing reaches it: no port, and not on `edge`. It reaches the data services on
+    # `backend`, and the models' servers through `models`, its one way out.
+    networks: [backend, models]
     mem_limit: 256m
     # It ends when it can't go on: 30 seconds after it lost its database, or with an
     # error it has no answer to. Docker starts it again then, and only then: not when
@@ -239,6 +252,7 @@ networks:
   edge: {} # Caddy, the web app and the API
   backend:
     internal: true # no route out: only the API, migrate and the worker reach the data
+  models: {} # the way out to the models' servers, such as Ollama: the API and the worker
 
 volumes:
   postgres-data:

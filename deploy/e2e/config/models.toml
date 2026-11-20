@@ -1,11 +1,15 @@
 # The models the end-to-end test stack offers (`make e2e`): the fake, under two names.
 #
-# compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API
-# reads this file in place of config/models.toml. "standard" is the same name as there:
-# the web app asks for the default model and never learns that this one only echoes.
+# compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API and
+# the worker read this file in place of config/models.toml. "standard" is the same name
+# as there: the web app asks for the default model and never learns that this one only
+# echoes.
 # See packages/fakellm/README.md for what it answers, and how a test scripts it.
 
 default = "standard"
+
+# No `titles`: the end-to-end tests find a conversation in the list by its first
+# question's words, so no model names conversations here yet.
 
 [providers.fake]
 kind = "openai-compatible"
