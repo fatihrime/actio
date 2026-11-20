@@ -37,6 +37,7 @@ from actio_llm import (
     FinishReason,
     ReasoningDelta,
     TextDelta,
+    Timings,
     Usage,
     prompt_tokens,
     tokens_in,
@@ -520,6 +521,170 @@ async def test_a_turn_whose_model_reports_no_counts_is_counted_by_guess(
     assert turn["input_tokens"] is None  # the turn keeps only what a provider counted
     [entry] = await ledger(db)
     assert (entry.credits, entry.estimated, entry.output_tokens) == (guessed, True, written)
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        Usage(input_tokens=-1, output_tokens=3),
+        Usage(input_tokens=40, output_tokens=-3),
+        Usage(input_tokens=40, output_tokens=3, cached_input_tokens=-1),
+        Usage(input_tokens=2**31, output_tokens=3),
+        Usage(input_tokens=40, output_tokens=2**31),
+        Usage(input_tokens=40, output_tokens=0),
+    ],
+    ids=[
+        "read less than nothing",
+        "wrote less than nothing",
+        "less than nothing from its cache",
+        "read more than a row holds",
+        "wrote more than a row holds",
+        "wrote nothing, beside an answer with words",
+    ],
+)
+async def test_a_count_that_cannot_be_right_is_no_count_and_the_turn_is_counted_by_guess(
+    scripted: Any, db: AsyncSession, caplog: pytest.LogCaptureFixture, reported: Usage
+) -> None:
+    """A model's server's counts are someone else's numbers. One that can't be right
+    must not keep the answer from being recorded, and is not written down: the turn is
+    counted as one whose server counted nothing."""
+    model, browser = await scripted(
+        TextDelta("Three little words"), Finish(FinishReason.STOP, reported)
+    )
+    chat = Chat(browser)
+
+    response = await chat.ask()
+
+    written = tokens_in("Three little words")
+    guessed = prompt_tokens(model.requests[0].messages) + written
+    turn = turn_of(response)
+    assert (response.status_code, turn["status"], turn["credits"]) == (200, "completed", guessed)
+    assert (turn["input_tokens"], turn["output_tokens"]) == (None, None)
+    stored = (await browser.get(chat.path)).json()
+    assert [message["role"] for message in stored["messages"]] == ["user", "assistant"]
+    kept = stored["messages"][1]["metadata"]["turn"]  # the turn's own record keeps none
+    counts = (kept["input_tokens"], kept["cached_input_tokens"], kept["output_tokens"])
+    assert counts == (None, None, None)
+    [entry] = await ledger(db)
+    assert (entry.credits, entry.estimated, entry.output_tokens) == (guessed, True, written)
+    assert (await windows(browser))["session"][:2] == (guessed, 0)
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "actio.chat.answering"]
+    assert said == [
+        (
+            logging.WARNING,
+            f"turn {turn['id']}: its model's server reported counts that can't be right "
+            f"(read {reported.input_tokens}, {reported.cached_input_tokens} of that from its "
+            f"cache, wrote {reported.output_tokens}); it is counted by guess",
+        )
+    ]
+
+
+async def test_a_count_that_costs_more_than_the_counters_count_is_no_count_either(
+    scripted: Any, plans_with: Any, db: AsyncSession
+) -> None:
+    """Each of its numbers fits in a row. At five credits a token their cost is more
+    than the engine counts exactly, and the settle of such a row would be refused."""
+    model, browser = await scripted(
+        TextDelta("Three little words"),
+        used(read=40, written=1_900_000_000),
+        plans=plans_with(credits_a_token=5),
+    )
+
+    response = await Chat(browser).ask()
+
+    guessed = 5 * (prompt_tokens(model.requests[0].messages) + tokens_in("Three little words"))
+    turn = turn_of(response)
+    assert (response.status_code, turn["status"], turn["credits"]) == (200, "completed", guessed)
+    assert turn["output_tokens"] is None
+    [entry] = await ledger(db)
+    assert (entry.credits, entry.estimated) == (guessed, True)
+    assert (await windows(browser))["session"][:2] == (guessed, 0)
+    assert await count(db, Uncounted) == 0
+
+
+async def test_a_model_that_says_it_wrote_nothing_and_wrote_nothing_is_believed(
+    scripted: Any, db: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing written is a count like any other, as long as the answer has no words."""
+    _, browser = await scripted(used(read=40, written=0))
+
+    response = await Chat(browser).ask()
+
+    turn = turn_of(response)
+    assert (turn["status"], turn["credits"], turn["input_tokens"]) == ("completed", 40, 40)
+    [entry] = await ledger(db)
+    assert (entry.credits, entry.estimated) == (40, False)
+    assert "can't be right" not in caplog.text
+
+
+async def test_a_count_of_nothing_written_is_believed_beside_an_answer_without_words(
+    scripted: Any, db: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two line breaks are an answer, and no words: Actio's own guess counts no token in
+    them. Counting such a turn by guess would make it cost nothing, where its server
+    counted what was read."""
+    _, browser = await scripted(TextDelta("\n\n"), used(read=40, written=0))
+
+    response = await Chat(browser).ask()
+
+    turn = turn_of(response)
+    assert (turn["status"], turn["credits"], turn["input_tokens"]) == ("completed", 40, 40)
+    [entry] = await ledger(db)
+    assert (entry.credits, entry.estimated) == (40, False)
+    assert "can't be right" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        Timings(load_ms=2**31, prompt_ms=120, generation_ms=75, total_ms=2**31 + 195),
+        Timings(load_ms=1800, prompt_ms=-1, generation_ms=75, total_ms=1874),
+        Timings(load_ms=1800, prompt_ms=120, generation_ms=75, total_ms=2**31),
+    ],
+    ids=["longer to load than a row holds", "less than no time to read", "longer in all"],
+)
+async def test_times_that_cannot_be_right_are_not_kept_and_the_turn_ends_as_ever(
+    scripted: Any, db: AsyncSession, caplog: pytest.LogCaptureFixture, reported: Timings
+) -> None:
+    """Where the time went is a model's server's own account too. One that a turn's
+    record can't hold is left out, and nothing else about the turn changes: its count
+    is believed, and it costs what it used."""
+    _, browser = await scripted(
+        TextDelta("A derailleur."),
+        Finish(FinishReason.STOP, Usage(input_tokens=40, output_tokens=3), reported),
+    )
+    chat = Chat(browser)
+
+    response = await chat.ask()
+
+    turn = turn_of(response)
+    assert (response.status_code, turn["status"], turn["credits"]) == (200, "completed", 43)
+    assert (turn["load_ms"], turn["prompt_ms"], turn["generation_ms"]) == (None, None, None)
+    stored = (await browser.get(chat.path)).json()["messages"][1]["metadata"]["turn"]
+    assert stored == turn
+    [entry] = await ledger(db)
+    assert (entry.credits, entry.estimated) == (43, False)
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "actio.chat.answering"]
+    assert said == [
+        (
+            logging.WARNING,
+            f"turn {turn['id']}: its model's server reported times that can't be right "
+            f"({reported.load_ms} ms to load, {reported.prompt_ms} to read, "
+            f"{reported.generation_ms} to write, {reported.total_ms} in all); none is kept",
+        )
+    ]
+
+
+async def test_times_a_models_server_reports_are_kept_on_the_turn(scripted: Any) -> None:
+    told = Timings(load_ms=1800, prompt_ms=120, generation_ms=75, total_ms=2000)
+    _, browser = await scripted(
+        TextDelta("A derailleur."),
+        Finish(FinishReason.STOP, Usage(input_tokens=40, output_tokens=3), told),
+    )
+
+    turn = turn_of(await Chat(browser).ask())
+
+    assert (turn["load_ms"], turn["prompt_ms"], turn["generation_ms"]) == (1800, 120, 75)
 
 
 async def test_passing_a_share_of_a_limit_is_announced_once(scripted: Any, plans_with: Any) -> None:

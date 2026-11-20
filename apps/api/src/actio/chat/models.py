@@ -155,7 +155,8 @@ class Turn(Base):
     cached_input_tokens: Mapped[int | None]
     output_tokens: Mapped[int | None]
     """Token counts as the provider reported them. Empty when it reported none: a turn
-    that was stopped, or failed, usually has none."""
+    that was stopped, or failed, usually has none. Empty too when what it reported
+    couldn't be right (`actio.chat.answering`)."""
     load_ms: Mapped[int | None]
     prompt_ms: Mapped[int | None]
     generation_ms: Mapped[int | None]

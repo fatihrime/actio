@@ -213,13 +213,14 @@ def plans_for_tests(
     models: Iterable[str] = ("standard",),
     free_models: Iterable[str] = (),
     answers_at_once: int | None = None,
+    credits_a_token: int = 1,
 ) -> Plans:
     """Prices and plans for the app under test.
 
     A model costs a credit a token, read or written, so what a turn costs is its tokens
-    added up. `free=True` makes it cost nothing. `guest` and `account` are what each may
-    use in a session and in a week, or `None` for no limits; by default far more than a
-    test uses. `models` are the models to price: the one that nearly every catalog here
+    added up. `credits_a_token` makes it dearer, and `free=True` makes it cost nothing.
+    `guest` and `account` are what each may use in a session and in a week, or `None`
+    for no limits; by default far more than a test uses. `models` are the models to price: the one that nearly every catalog here
     offers, unless a test offers others. `free_models` are offered beside them, and cost
     nothing whatever `free` says. `answers_at_once` is how many answers a guest and an
     account may each have being written at once; by default as many as they ask for.
@@ -233,7 +234,7 @@ def plans_for_tests(
             limits["answers_at_once"] = answers_at_once
         return limits
 
-    price = 0 if free else 1_000_000
+    price = 0 if free else credits_a_token * 1_000_000
     prices = {name: {"input": price, "output": price} for name in models}
     prices |= {name: {"input": 0, "output": 0} for name in free_models}
     return Plans(
@@ -262,6 +263,7 @@ class PlansWith(Protocol):
         models: Iterable[str] = ...,
         free_models: Iterable[str] = ...,
         answers_at_once: int | None = ...,
+        credits_a_token: int = ...,
     ) -> Plans: ...
 
 

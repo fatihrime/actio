@@ -48,6 +48,7 @@ from actio_quota import (
     UsageWarning,
     cost_credits,
 )
+from actio_quota.cost import MAX_CREDITS
 from actio_quota.engine import ValkeyQuota
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,30 @@ def held_for_prompt(prompt_tokens: int) -> int:
     afterwards.
     """
     return prompt_tokens + -(-prompt_tokens // 4)
+
+
+MAX_TOKENS = 2**31 - 1
+"""The largest count of tokens that a row of the ledger holds, and a turn's own record:
+their columns are 32-bit integers."""
+
+
+def can_be_recorded(
+    price: Rates, *, input_tokens: int, output_tokens: int, cached_input_tokens: int = 0
+) -> bool:
+    """Whether token counts that a provider reported can be written down and counted at
+    all: none of them negative, none more than a row holds (`MAX_TOKENS`), and together
+    a cost that the engine counts exactly.
+
+    A provider's counts are someone else's numbers. Counts that fail this would stop a
+    request from being recorded, in the ledger's insert or in the settle that follows:
+    ask before `record`, and count such a request by guess instead. Whether counts that
+    pass are true, nothing here can tell.
+    """
+    counts = (input_tokens, output_tokens, cached_input_tokens)
+    if not all(0 <= count <= MAX_TOKENS for count in counts):
+        return False
+    tokens = Usage(input_tokens, output_tokens, min(cached_input_tokens, input_tokens))
+    return cost_credits(tokens, price) <= MAX_CREDITS
 
 
 class LimitReachedError(Exception):

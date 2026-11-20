@@ -27,11 +27,13 @@ from actio.core.database import create_engine, create_session_factory
 from actio.core.ids import new_id
 from actio.usage import ledger
 from actio.usage.limits import (
+    MAX_TOKENS,
     Account,
     LimitReachedError,
     Reserved,
     UsageLimits,
     UsageUnavailableError,
+    can_be_recorded,
     held_for_prompt,
     to_ms,
 )
@@ -39,7 +41,7 @@ from actio.usage.missed import COUNTED_WITHIN, Repeated, count_missed
 from actio.usage.models import Uncounted, UsageEntry
 from actio.usage.plans import Plans, PlansFile
 from actio_llm import ChatRequest, Finish, FinishReason, StreamEvent, TextDelta, Usage, User
-from actio_quota import Finished, UsageWarning
+from actio_quota import Finished, Rates, UsageWarning
 from actio_quota import Usage as Tokens
 from actio_quota.cost import MAX_CREDITS
 from actio_quota.engine import ValkeyQuota
@@ -267,6 +269,49 @@ async def test_a_providers_count_that_makes_no_sense_still_gets_recorded(
     entry = await db.get(UsageEntry, reserved.id)
     assert entry is not None
     assert entry.cached_input_tokens == 100
+
+
+@pytest.mark.parametrize(
+    ("read", "from_cache", "written", "possible"),
+    [
+        (100, 0, 10, True),
+        (0, 0, 0, True),
+        (MAX_TOKENS, 0, MAX_TOKENS, True),  # the most a row holds, at a credit a token
+        (100, 250, 10, True),  # more from the cache than was read: `record` puts it right
+        (-1, 0, 10, False),
+        (100, -1, 10, False),
+        (100, 0, -1, False),
+        (MAX_TOKENS + 1, 0, 10, False),
+        (100, 0, MAX_TOKENS + 1, False),
+        (100, MAX_TOKENS + 1, 10, False),
+    ],
+)
+def test_counts_that_no_row_holds_cannot_be_recorded(
+    read: int, from_cache: int, written: int, possible: bool
+) -> None:
+    a_credit_a_token = Rates(input=1_000_000, output=1_000_000)
+
+    assert (
+        can_be_recorded(
+            a_credit_a_token,
+            input_tokens=read,
+            cached_input_tokens=from_cache,
+            output_tokens=written,
+        )
+        is possible
+    )
+
+
+def test_counts_that_cost_more_than_the_counters_count_cannot_be_recorded() -> None:
+    """Each count fits in a row. At five credits a token read and four a token written,
+    their cost comes to the most the engine counts exactly, and then past it: a settle
+    of that would be refused."""
+    dear = Rates(input=5_000_000, output=4_000_000)
+    most = MAX_CREDITS // 5  # read tokens: four credits short of the most
+
+    assert can_be_recorded(dear, input_tokens=most, output_tokens=1)  # the most, exactly
+    assert not can_be_recorded(dear, input_tokens=most, output_tokens=2)
+    assert not can_be_recorded(dear, input_tokens=most + 1, output_tokens=0)
 
 
 async def test_a_request_that_used_nothing_is_released(

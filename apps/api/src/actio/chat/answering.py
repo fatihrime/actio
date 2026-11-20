@@ -47,7 +47,7 @@ from actio.catalog import Gate, OfferedModel
 from actio.chat import turns
 from actio.chat.parts import Part, ReasoningPart, TextPart
 from actio.chat.turns import Ending
-from actio.usage.limits import Reserved, UsageLimits
+from actio.usage.limits import Reserved, UsageLimits, can_be_recorded
 from actio_llm import (
     ChatRequest,
     ContextOverflowError,
@@ -61,6 +61,8 @@ from actio_llm import (
     StreamEvent,
     StreamInterruptedError,
     TextDelta,
+    Timings,
+    Usage,
     tokens_in,
 )
 from actio_quota import UsageWarning
@@ -286,8 +288,8 @@ async def answer(
                 "completed",
                 collected.parts,
                 finish_reason=collected.finish.reason.value,
-                usage=collected.finish.usage,
-                timings=collected.finish.timings,
+                usage=_believed(collected.finish.usage, collected.parts, reserved, turn_id),
+                timings=_kept(collected.finish.timings, turn_id),
             )
         elif halt.reason is not None:
             ending = Ending(halt.reason, collected.parts)
@@ -423,12 +425,75 @@ class _Used:
     """Whether they are Actio's guess, because the provider reported none."""
 
 
+def _believed(
+    reported: Usage | None, written: list[Part], reserved: Reserved, turn_id: uuid.UUID
+) -> Usage | None:
+    """What the model's server counted for a turn, unless that can't be right. Then
+    nothing, as if the server had counted nothing: the turn keeps no count, and is
+    counted by guess (`_used`). The log says what the server reported.
+
+    A count can't be right when it can't be recorded at all, as a negative one can't,
+    or one beyond what a row holds (`can_be_recorded`); or when it says that nothing was
+    written, beside an answer that has words: one that Actio's own guess counts tokens
+    in. Such counts are someone else's mistake, and must not keep an answer that was
+    written from being recorded. Whether a count that passes is true, nothing here can
+    tell: it is taken as it is.
+    """
+    if reported is None:
+        return None
+    possible = can_be_recorded(
+        reserved.price,
+        input_tokens=reported.input_tokens,
+        output_tokens=reported.output_tokens,
+        cached_input_tokens=reported.cached_input_tokens,
+    )
+    # By the guess that would count the turn instead: an answer of nothing but line
+    # breaks has no tokens by it, and would then cost nothing at all.
+    has_words = any(tokens_in(part.text) for part in written)
+    if possible and (reported.output_tokens > 0 or not has_words):
+        return reported
+    logger.warning(
+        "turn %s: its model's server reported counts that can't be right (read %d, %d of "
+        "that from its cache, wrote %d); it is counted by guess",
+        turn_id,
+        reported.input_tokens,
+        reported.cached_input_tokens,
+        reported.output_tokens,
+    )
+    return None
+
+
+_LONGEST_MS = 2**31 - 1
+"""The longest time that a turn's record holds, in milliseconds: its columns are 32-bit
+integers. Some 24 days."""
+
+
+def _kept(reported: Timings | None, turn_id: uuid.UUID) -> Timings | None:
+    """What the model's server said of where the time went, unless a turn's record can't
+    hold it: a negative time, or one longer than `_LONGEST_MS`. Then nothing, with a
+    line in the log. Like a count that can't be right, it must not keep the answer from
+    being recorded."""
+    if reported is None:
+        return None
+    times = (reported.load_ms, reported.prompt_ms, reported.generation_ms, reported.total_ms)
+    if all(0 <= time <= _LONGEST_MS for time in times):
+        return reported
+    logger.warning(
+        "turn %s: its model's server reported times that can't be right (%d ms to load, %d to "
+        "read, %d to write, %d in all); none is kept",
+        turn_id,
+        *times,
+    )
+    return None
+
+
 def _used(ending: Ending, reserved: Reserved) -> _Used | None:
     """What to count for a turn that ended this way. `None`: nothing.
 
     - **A failed turn costs nothing,** and neither does one that a shutdown
       interrupted. The fault was the model's, or Actio's own.
-    - **A provider's count is taken as it is.**
+    - **A provider's count is taken as it is.** One that couldn't be right was dropped
+      when the turn ended (`_believed`), and never gets here.
     - **Without one, what was written is counted by guess,** with the guess at the
       prompt that was made before the turn started. That is every stopped turn: a
       stream that is closed never sends its count. So stopping an answer at its last
