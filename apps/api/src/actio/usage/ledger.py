@@ -2,18 +2,20 @@
 
 A row is added in the same transaction that records how a request ended, and before
 the counters in Valkey are told: whatever the counters hold, the ledger has it too.
+With it goes a note that the counters haven't been told of it yet (`Uncounted`), which
+is taken away once they have.
 
 These functions never commit, and take the time as an argument.
 """
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from actio.usage.models import UsageEntry
+from actio.usage.models import Uncounted, UsageEntry
 from actio_quota import LedgerEntry, Usage
 
 
@@ -29,7 +31,8 @@ def add(
     windows: Mapping[str, int],
     now: datetime,
 ) -> UsageEntry:
-    """Write what one request used. The caller's transaction decides when it counts."""
+    """Write what one request used, and that the counters haven't been told of it yet.
+    The caller's transaction decides when it counts."""
     entry = UsageEntry(
         reservation_id=reservation_id,
         user_id=user_id,
@@ -43,7 +46,13 @@ def add(
         occurred_at=now,
     )
     db.add(entry)
+    db.add(Uncounted(entry=entry))
     return entry
+
+
+async def counted(db: AsyncSession, reservation_ids: Collection[uuid.UUID]) -> None:
+    """Note that the counters have been told of these rows of the ledger."""
+    await db.execute(delete(Uncounted).where(Uncounted.reservation_id.in_(reservation_ids)))
 
 
 async def since(db: AsyncSession, user_id: uuid.UUID, moment: datetime) -> list[LedgerEntry]:

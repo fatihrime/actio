@@ -1,12 +1,13 @@
-"""The ledger's table: the lasting record of what was used."""
+"""The ledger's tables: the lasting record of what was used, and which of it the
+counters haven't been told of yet."""
 
 import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, CheckConstraint, Index
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from actio.core.database import Base
 
@@ -48,3 +49,26 @@ class UsageEntry(Base):
     milliseconds: `{"session": 1794312000000, "week": …}`. Usage counts toward the
     window that admitted it, so a rebuild needs these, not the time of writing."""
     occurred_at: Mapped[datetime]
+
+
+class Uncounted(Base):
+    """A row of the ledger that hasn't reached the counters in Valkey, as far as the
+    database knows.
+
+    Written with the ledger's row, in the same transaction, and deleted once the
+    counters have answered a settle for it. What is left, because Valkey didn't answer
+    or the process died in between, the worker settles again (`actio.usage.missed`).
+
+    Who used what is in the ledger's row alone: this one only points at it, so the two
+    can't disagree. Unlike the ledger's, these rows are deleted.
+    """
+
+    __tablename__ = "usage_uncounted"
+
+    reservation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(UsageEntry.reservation_id), primary_key=True
+    )
+    entry: Mapped[UsageEntry] = relationship(lazy="raise")
+    """The ledger's row, never loaded. It is here so that the ledger's row is written
+    first when the two are added together: a foreign key alone doesn't order them, and
+    SQLAlchemy would write this one first, pointing at a row that isn't there yet."""

@@ -23,6 +23,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from valkey.exceptions import ConnectionError as ValkeyConnectionError
 
 from actio import worker
 from actio.chat import turns
@@ -37,11 +38,19 @@ from actio.identity import accounts, sessions
 from actio.identity.models import BrowserSession, User
 from actio.identity.passwords import Passwords
 from actio.identity.sessions import ACCOUNT_IDLE_LIFETIME, GUEST_LIFETIME
-from actio.usage.models import UsageEntry
+from actio.usage import ledger
+from actio.usage.limits import Account, UsageLimits
+from actio.usage.missed import COUNTED_WITHIN
+from actio.usage.models import Uncounted, UsageEntry
+from actio_llm import Finish, FinishReason, TextDelta, Usage
+from actio_quota import Usage as Tokens
+from actio_quota.engine import ValkeyQuota
 
 pytestmark = pytest.mark.anyio
 
-NOWHERE_VALKEY = "valkey://127.0.0.1:1/0"  # required by the settings; the worker never uses it
+# Required by the settings, and nothing listens on port 1. The worker asks Valkey only
+# of usage its counters missed: where there is none, it never connects.
+NOWHERE_VALKEY = "valkey://127.0.0.1:1/0"
 NOWHERE_DATABASE = "postgresql://actio:unused@127.0.0.1:1/actio"  # nothing listens on port 1
 
 
@@ -53,6 +62,11 @@ def the_sweep(listed: list[jobs.Job]) -> jobs.Job:
 def giving_up_on_stale_turns(listed: list[jobs.Job]) -> jobs.Job:
     [giving_up] = [job for job in listed if job.name == worker.GIVE_UP]
     return giving_up
+
+
+def counting_missed_usage(listed: list[jobs.Job]) -> jobs.Job:
+    [counting] = [job for job in listed if job.name == worker.COUNT_MISSED]
+    return counting
 
 
 async def a_turn(db: AsyncSession, *, heard_from: datetime) -> Turn:
@@ -74,7 +88,7 @@ async def a_turn(db: AsyncSession, *, heard_from: datetime) -> Turn:
     return begun.turn
 
 
-async def test_the_worker_sweeps_and_gives_up_on_stale_turns_every_ten_minutes(
+async def test_the_worker_runs_each_of_its_three_jobs_every_ten_minutes(
     settings: Settings, clock: Any
 ) -> None:
     async with open_resources(settings) as resources:
@@ -83,6 +97,7 @@ async def test_the_worker_sweeps_and_gives_up_on_stale_turns_every_ten_minutes(
     assert [(job.name, job.every) for job in listed] == [
         (worker.SWEEP, "*/10 * * * *"),
         (worker.GIVE_UP, "*/10 * * * *"),
+        (worker.COUNT_MISSED, "*/10 * * * *"),
     ]
 
 
@@ -243,6 +258,139 @@ async def test_a_worker_that_finds_no_stale_turn_says_nothing(
     assert [record for record in caplog.records if record.name == "actio.worker"] == []
 
 
+async def test_the_worker_counts_what_the_api_couldnt_under_the_keys_the_api_reads(
+    scripted: Any, settings: Settings, clock: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer is recorded, and its settle doesn't reach Valkey: for that moment the
+    settle is one that fails as when Valkey has gone away. A minute later the worker's
+    job, on resources of its own opened from the same settings, tells the counters. The
+    app's own reading of the usage then shows the answer as used, and nothing held."""
+    _, browser = await scripted(
+        TextDelta("A derailleur."),
+        Finish(FinishReason.STOP, Usage(input_tokens=40, output_tokens=3)),
+    )
+    question = {"id": str(new_id()), "parts": [{"type": "text", "text": "Name a bike part."}]}
+
+    async def away(*_args: Any, **_kwargs: Any) -> None:
+        raise ValkeyConnectionError("Connection refused")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(ValkeyQuota, "settle", away)
+        answered = await browser.post(
+            f"/api/conversations/{new_id()}/turns", json={"message": question}
+        )
+    missed = (await browser.get("/api/usage")).json()["windows"]
+    clock.advance(seconds=COUNTED_WITHIN.total_seconds())
+    async with open_resources(settings) as resources:
+        await counting_missed_usage(worker.listed(resources, clock=lambda: clock.now)).run()
+    counted = (await browser.get("/api/usage")).json()["windows"]
+
+    assert answered.status_code == 200
+    assert [w["used"] for w in missed] == [0, 0]  # and its credits still held
+    assert [(w["used"], w["reserved"]) for w in counted] == [(43, 0), (43, 0)]
+
+
+async def test_the_worker_says_what_it_counted_that_the_counters_had_missed(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    plans_with: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Three rows of the ledger whose notes are a minute old: one the counters never
+    heard of, one they had counted already, and one of an account they have no counters
+    for. A second run finds nothing, and says nothing."""
+    async with open_resources(settings) as resources:
+        limits = UsageLimits(resources.quota, plans_with())
+        guest = Account(new_id(), is_guest=True)
+        never_heard_of, counted_already = [
+            await limits.reserve(
+                db,
+                guest,
+                new_id(),
+                model="standard",
+                prompt_tokens=10,
+                max_output_tokens=100,
+                hold_for=STALE_AFTER,
+                now=clock.now,
+            )
+            for _ in range(2)
+        ]
+        for reserved in (never_heard_of, counted_already):
+            limits.record(
+                db, reserved, input_tokens=10, output_tokens=20, estimated=False, now=clock.now
+            )
+        ledger.add(
+            db,
+            reservation_id=new_id(),
+            user_id=new_id(),
+            model="standard",
+            credits=30,
+            tokens=Tokens(input_tokens=10, output_tokens=20),
+            estimated=False,
+            windows={},
+            now=clock.now,
+        )
+        await db.commit()
+        await limits.settle(counted_already, 30, now=clock.now)
+        clock.advance(seconds=COUNTED_WITHIN.total_seconds())
+        caplog.set_level(logging.INFO, logger="actio.worker")
+
+        await counting_missed_usage(worker.listed(resources, clock=lambda: clock.now)).run()
+        await counting_missed_usage(worker.listed(resources, clock=lambda: clock.now)).run()
+
+    said = [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == "actio.worker"
+    ]
+    assert said == [
+        (
+            logging.INFO,
+            "usage the counters had missed, counted now: 1, counted before: 1, "
+            "left to their next rebuild: 1",
+        )
+    ]
+    assert await db.scalar(select(func.count()).select_from(Uncounted)) == 0
+
+
+async def test_a_worker_that_cant_reach_valkey_says_so_once_and_leaves_the_rows_for_its_next_run(
+    db: AsyncSession, settings: Settings, clock: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    for _ in range(2):
+        ledger.add(
+            db,
+            reservation_id=new_id(),
+            user_id=new_id(),
+            model="standard",
+            credits=30,
+            tokens=Tokens(input_tokens=10, output_tokens=20),
+            estimated=False,
+            windows={},
+            now=clock.now - COUNTED_WITHIN,
+        )
+    await db.commit()
+    caplog.set_level(logging.INFO, logger="actio.worker")
+    cut_off = settings.model_copy(update={"valkey_url": SecretStr(NOWHERE_VALKEY)})
+
+    async with open_resources(cut_off) as resources, asyncio.timeout(10):
+        await counting_missed_usage(worker.listed(resources, clock=lambda: clock.now)).run()
+
+    said = [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == "actio.worker"
+    ]
+    assert said == [
+        (
+            logging.WARNING,
+            "usage the counters had missed: Valkey didn't answer, and what is left waits for "
+            "the next run",
+        )
+    ]
+    assert await db.scalar(select(func.count()).select_from(Uncounted)) == 2
+
+
 @pytest.mark.parametrize("told", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
 async def test_the_worker_process_sweeps_by_its_schedule_and_ends_well_when_told_to_stop(
     told: signal.Signals, db: AsyncSession, migrated: str, tmp_path: Path
@@ -335,7 +483,7 @@ async def test_the_worker_process_gives_up_on_a_stale_turn_by_its_schedule(
     )
     ended_well = False
     try:
-        # Until the turn is given up on, and the queue is empty: both jobs succeeded.
+        # Until the turn is given up on, and the queue is empty: every job succeeded.
         async with asyncio.timeout(30):
             while await turn_and_queue(migrated, turn.id) != ("interrupted", 0):
                 assert process.returncode is None, await process.communicate()

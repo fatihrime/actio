@@ -23,6 +23,7 @@ from actio.core import alive, jobs, schema
 from actio.core.resources import Resources, open_resources
 from actio.core.settings import Settings
 from actio.identity import sessions
+from actio.usage import missed
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,12 @@ GIVE_UP = "give-up-on-stale-turns"
 """Gives up on a batch of stale turns, those a process that died left `running`, in
 every conversation, every ten minutes. Whoever looks at a conversation still gives up
 on its turn at once: this is for the conversations nobody looks at."""
+
+COUNT_MISSED = "count-missed-usage"
+"""Tells the usage counters in Valkey of a batch of usage they missed, every ten
+minutes: rows of the ledger whose settle Valkey didn't answer, or whose process died
+before it settled. The process that writes a row tells the counters itself; this is for
+what it couldn't."""
 
 TRIES_AGAIN_AFTER_S = 10.0
 """How long the worker inside the API's process (`run_inside`) waits to try again, after
@@ -56,6 +63,7 @@ def listed(resources: Resources, *, clock: Clock) -> list[jobs.Job]:
     return [
         jobs.Job(SWEEP, partial(sweep_expired, resources, clock), every="*/10 * * * *"),
         jobs.Job(GIVE_UP, partial(give_up_on_stale_turns, resources, clock), every="*/10 * * * *"),
+        jobs.Job(COUNT_MISSED, partial(count_missed_usage, resources, clock), every="*/10 * * * *"),
     ]
 
 
@@ -184,6 +192,26 @@ async def give_up_on_stale_turns(resources: Resources, clock: Clock) -> None:
         await db.commit()
     if given_up:
         logger.info("gave up on stale turns: %d", len(given_up))
+
+
+async def count_missed_usage(resources: Resources, clock: Clock) -> None:
+    """Tell the usage counters of a batch of usage they missed, as its own unit of work."""
+    async with resources.database() as db:
+        repeated = await missed.count_missed(db, resources.quota, now=clock())
+        await db.commit()
+    if repeated.taken or repeated.had_already or repeated.not_taken:
+        logger.info(
+            "usage the counters had missed, counted now: %d, counted before: %d, "
+            "left to their next rebuild: %d",
+            repeated.taken,
+            repeated.had_already,
+            repeated.not_taken,
+        )
+    if repeated.valkey_away:
+        logger.warning(
+            "usage the counters had missed: Valkey didn't answer, and what is left waits "
+            "for the next run"
+        )
 
 
 async def _migrated(resources: Resources) -> None:

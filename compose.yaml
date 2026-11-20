@@ -158,7 +158,7 @@ services:
     tmpfs: [/tmp]
     command: [actio, --role, worker]
     environment:
-      <<: *api-stores # the settings require both; no job uses Valkey yet
+      <<: *api-stores # Valkey for one job: counting again what the usage counters missed
       # The file it touches every 5 seconds while it works, for its health check below.
       # On the tmpfs: the root filesystem is read-only.
       ACTIO_ALIVE_FILE: /tmp/actio-worker-alive

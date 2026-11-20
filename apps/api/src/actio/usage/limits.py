@@ -1,14 +1,17 @@
 """Usage limits for one request: credits held before it runs, and counted when it ends.
 
-A request that costs credits goes through three moments:
+A request that costs credits goes through four moments:
 
 1. **`reserve`**, before it runs. Its largest possible cost is held in every window of
    the account's plan, or the request is refused: `LimitReachedError`. Near a limit it
    is given less room for its answer instead.
 2. **`record`**, when it has ended: what it really used is written to the ledger, in
-   the transaction that records the request's own outcome.
+   the transaction that records the request's own outcome, with a note that the
+   counters haven't been told of it yet.
 3. **`settle`**, after that transaction is committed: the counters give back what was
    held and count what was used. A request that used nothing is `release`d instead.
+4. **`counted`**, after a settle that told the counters: the note is taken away. What
+   a settle couldn't tell them, the worker tells them later (`actio.usage.missed`).
 
 A hold lasts only so long. A request that is still running when it would run out
 renews it with **`extend`**.
@@ -232,7 +235,8 @@ class UsageLimits:
         """Write what a request used to the ledger, and return what that costs.
 
         The row is added to `db`'s transaction, which the caller commits together with
-        the request's own outcome. Then, and only then, `settle` the same credits.
+        the request's own outcome, and so is the note that the counters haven't been
+        told of it yet. Then, and only then, `settle` the same credits.
         """
         # A provider's counts are someone else's numbers: more cached than read at all
         # would be nonsense, and must not stop a request from being recorded.
@@ -253,12 +257,17 @@ class UsageLimits:
 
     async def settle(
         self, reserved: Reserved, credits: int, *, now: datetime
-    ) -> tuple[UsageWarning, ...]:
+    ) -> tuple[UsageWarning, ...] | None:
         """Count what a request cost, and give back what was held for it.
 
-        Returns the thresholds its windows crossed, each announced once per window. Call
-        it after the ledger row is committed. It doesn't raise: when Valkey is away, the
-        hold runs out by itself, and the usage is in the ledger for the next rebuild.
+        Call it after the ledger row is committed. Returns the thresholds its windows
+        crossed, each announced once per window: possibly none. Whatever the counters
+        answered, they have been told, and nothing a repeat could add is left: then
+        call `counted`.
+
+        Returns `None` when Valkey didn't answer. It doesn't raise: the hold runs out by
+        itself, and the usage is in the ledger, still noted as not counted. The worker
+        settles it again later.
         """
         try:
             finished = await self._engine.settle(
@@ -272,16 +281,27 @@ class UsageLimits:
                 credits,
                 type(error).__name__,
             )
-            return ()
+            return None
         if not finished.applied:
             # The counters were lost and rebuilt while the request ran. If that was
             # after its ledger row was written, the rebuild has counted it already.
+            # Or, more than `missed.COUNTED_WITHIN` after that, the worker settled it
+            # first (`settled`).
             logger.info(
                 "usage: reservation %s was no longer held when it was settled (%s)",
                 reserved.id,
                 finished.outcome,
             )
         return finished.warnings
+
+    async def counted(self, db: AsyncSession, reserved: Reserved) -> None:
+        """Note that the counters have been told of what a request used: after a
+        `settle` that didn't return `None`. In `db`'s transaction, which the caller
+        commits.
+
+        Until that is committed, the worker may settle the request again. That does no
+        harm: the counters answer that it was settled already."""
+        await ledger.counted(db, [reserved.id])
 
     async def extend(self, reserved: Reserved, *, hold_for: timedelta, now: datetime) -> None:
         """Keep what is held for a request that is still running, for `hold_for` from
@@ -325,6 +345,11 @@ class UsageLimits:
     async def status(self, db: AsyncSession, account: Account, *, now: datetime) -> Status:
         """An account's plan, and how full its windows are right now.
 
+        Holds that have run out are given back first, as a request's `reserve` does, so
+        that they aren't shown as held: up to 32 of them a read (`GC_BATCH`, in the
+        engine), and the next read takes the next ones. That is a write, which also
+        pushes back when the account's counters expire.
+
         `db` is read as in `reserve`. Raises `UsageUnavailableError`.
         """
         plan = self.plans.plan_for(is_guest=account.is_guest)
@@ -332,6 +357,7 @@ class UsageLimits:
         windows = self.plans.windows(plan, now_ms=now_ms)
         user = str(account.user_id)
         try:
+            await self._engine.collect_expired(user, now_ms=now_ms)
             views = await self._engine.snapshot(user, windows, now_ms=now_ms)
             if views is None:
                 await self._rebuild(db, account.user_id, windows, now_ms)

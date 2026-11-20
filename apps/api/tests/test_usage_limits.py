@@ -1,12 +1,14 @@
 """Usage limits below the API, against a real Valkey and a real Postgres.
 
 The engine's own rules are tested in `packages/quota`. Here: how the application uses
-it. Which windows a plan gives, what is held and what is counted, the ledger, and what
-happens when the counters are lost, or Valkey or the database is away.
+it. Which windows a plan gives, what is held and what is counted, the ledger, what
+happens when the counters are lost, or Valkey or the database is away, and how the
+counters are told again of what they missed.
 
 In these tests a credit is a token, read or written, so the numbers can be followed.
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ from actio.catalog import OfferedModel
 from actio.chat import answering
 from actio.core.database import create_engine, create_session_factory
 from actio.core.ids import new_id
+from actio.usage import ledger
 from actio.usage.limits import (
     Account,
     LimitReachedError,
@@ -30,10 +33,15 @@ from actio.usage.limits import (
     UsageLimits,
     UsageUnavailableError,
     held_for_prompt,
+    to_ms,
 )
-from actio.usage.models import UsageEntry
+from actio.usage.missed import COUNTED_WITHIN, Repeated, count_missed
+from actio.usage.models import Uncounted, UsageEntry
 from actio.usage.plans import Plans, PlansFile
 from actio_llm import ChatRequest, Finish, FinishReason, StreamEvent, TextDelta, Usage, User
+from actio_quota import Finished, UsageWarning
+from actio_quota import Usage as Tokens
+from actio_quota.cost import MAX_CREDITS
 from actio_quota.engine import ValkeyQuota
 
 pytestmark = pytest.mark.anyio
@@ -67,9 +75,11 @@ def plans(**changes: Any) -> Plans:
 
 @dataclass
 class Counters:
-    """The limits under test, and a way to lose what Valkey holds for them."""
+    """The limits under test, their engine, and a way to lose what Valkey holds for
+    them."""
 
     limits: UsageLimits
+    engine: ValkeyQuota
     lose: Callable[[], Awaitable[None]]
 
 
@@ -88,7 +98,8 @@ def counters(valkey: Valkey) -> Counters:
         # What a restart does to a Valkey that keeps nothing on disk.
         await valkey.delete(*await valkey.keys(f"{prefix}:*"))
 
-    return Counters(UsageLimits(ValkeyQuota(valkey, prefix=prefix), plans()), lose)
+    engine = ValkeyQuota(valkey, prefix=prefix)
+    return Counters(UsageLimits(engine, plans()), engine, lose)
 
 
 @pytest.fixture
@@ -150,6 +161,11 @@ async def windows(
     """Each window as (used, reserved, resets_at)."""
     status = await limits.status(db, account, now=now)
     return {w.name: (w.used, w.reserved, w.resets_at) for w in status.windows}
+
+
+async def uncounted(db: AsyncSession) -> set[uuid.UUID]:
+    """The rows of the ledger that are noted as not counted yet."""
+    return set((await db.scalars(select(Uncounted.reservation_id))).all())
 
 
 # --- Holding and counting -------------------------------------------------------------
@@ -435,6 +451,23 @@ async def test_a_hold_runs_out_by_itself_when_its_request_never_ends(
     assert (after.max_output_tokens, after.capped) == (900, False)
 
 
+async def test_a_hold_that_ran_out_is_not_shown_as_held_even_before_the_next_question(
+    limits: UsageLimits, db: AsyncSession, guest: Account
+) -> None:
+    """Reading the windows gives back what has run out, as a question would: nothing
+    else is asked in between."""
+    await reserve(limits, db, guest, prompt=80, answer=400)
+
+    a_second_before = await windows(limits, db, guest, NOON + HOLD - timedelta(seconds=1))
+    when_it_runs_out = await windows(limits, db, guest, NOON + HOLD)
+
+    assert a_second_before["session"][:2] == (0, 500)
+    assert when_it_runs_out == {
+        "session": (0, 0, NOON + timedelta(hours=5)),
+        "week": (0, 0, WEEK_ENDS),
+    }
+
+
 # --- The ledger -----------------------------------------------------------------------
 
 
@@ -470,12 +503,33 @@ async def test_a_request_is_never_in_the_ledger_twice(
         await db.commit()
 
 
+async def test_a_row_of_the_ledger_is_noted_as_not_counted_in_the_same_transaction(
+    limits: UsageLimits, db: AsyncSession, guest: Account
+) -> None:
+    """A free model's row too: whatever the credits, the counters have to be told."""
+    kept = await reserve(limits, db, guest)
+    free = await reserve(limits, db, guest, model="local")
+    dropped = await reserve(limits, db, guest)
+
+    for reserved in (kept, free):
+        limits.record(db, reserved, input_tokens=90, output_tokens=150, estimated=False, now=NOON)
+    await db.commit()
+    limits.record(db, dropped, input_tokens=90, output_tokens=150, estimated=False, now=NOON)
+    await db.rollback()
+
+    in_the_ledger = set((await db.scalars(select(UsageEntry.reservation_id))).all())
+    assert in_the_ledger == {kept.id, free.id}
+    assert await uncounted(db) == {kept.id, free.id}
+
+
 @pytest.mark.parametrize(
     "change",
     [
         "UPDATE usage_ledger SET credits = 0",
         "DELETE FROM usage_ledger",
-        "TRUNCATE usage_ledger",
+        # With CASCADE: the notes of what isn't counted yet point at the ledger, and a
+        # plain TRUNCATE is refused for their sake before the trigger is asked.
+        "TRUNCATE usage_ledger CASCADE",
     ],
 )
 async def test_the_database_refuses_to_change_or_delete_what_is_in_the_ledger(
@@ -568,10 +622,16 @@ async def test_a_request_running_while_the_counters_are_lost_goes_uncounted_unti
 
 
 @pytest.fixture
-async def away() -> AsyncIterator[UsageLimits]:
-    """Limits whose Valkey doesn't answer: nothing listens on port 1."""
-    async with Valkey.from_url("valkey://127.0.0.1:1/0", socket_connect_timeout=0.5) as nowhere:
-        yield UsageLimits(ValkeyQuota(nowhere, prefix="away"), plans())
+async def nowhere() -> AsyncIterator[Valkey]:
+    """A Valkey that doesn't answer: nothing listens on port 1."""
+    async with Valkey.from_url("valkey://127.0.0.1:1/0", socket_connect_timeout=0.5) as client:
+        yield client
+
+
+@pytest.fixture
+def away(nowhere: Valkey) -> UsageLimits:
+    """Limits whose Valkey doesn't answer."""
+    return UsageLimits(ValkeyQuota(nowhere, prefix="away"), plans())
 
 
 async def test_without_valkey_nothing_is_admitted_or_shown(
@@ -641,7 +701,8 @@ async def test_without_valkey_a_request_that_ended_is_still_in_the_ledger(
         db, reserved, input_tokens=100, output_tokens=500, estimated=False, now=NOON
     )
     await db.commit()
-    assert await away.settle(reserved, credits, now=NOON) == ()  # no error, and it says so
+    # No error: it says that the counters weren't told.
+    assert await away.settle(reserved, credits, now=NOON) is None
     await away.release(reserved, now=NOON)
 
     assert "couldn't be settled in Valkey" in caplog.text
@@ -649,3 +710,303 @@ async def test_without_valkey_a_request_that_ended_is_still_in_the_ledger(
     entry = await db.get(UsageEntry, reserved.id)
     assert entry is not None
     assert entry.credits == 600
+    assert await uncounted(db) == {reserved.id}  # for the worker to tell them later
+
+
+async def test_a_settle_says_whether_the_counters_were_told_and_counted_notes_that_they_were(
+    limits: UsageLimits, away: UsageLimits, db: AsyncSession, guest: Account
+) -> None:
+    """Any answer of the counters counts as told, one that changed nothing too: a second
+    settle of the same request is answered, and has nothing to add."""
+    reserved = await reserve(limits, db, guest)
+    credits = limits.record(
+        db, reserved, input_tokens=100, output_tokens=500, estimated=False, now=NOON
+    )
+    await db.commit()
+
+    not_told = await away.settle(reserved, credits, now=NOON)
+    told = await limits.settle(reserved, credits, now=NOON)
+    told_again = await limits.settle(reserved, credits, now=NOON)
+    noted = await uncounted(db)
+    await limits.counted(db, reserved)
+    await db.commit()
+
+    assert not_told is None
+    assert told == (UsageWarning("session", 50),)  # 600 of 1,000
+    assert told_again == ()
+    assert noted == {reserved.id}
+    assert await uncounted(db) == set()
+    assert (await windows(limits, db, guest))["session"][:2] == (600, 0)
+
+
+# --- Usage the counters missed --------------------------------------------------------
+
+
+class CountedSettles(ValkeyQuota):
+    """An engine that counts how often it was asked to settle."""
+
+    def __init__(self, client: Valkey, *, prefix: str) -> None:
+        super().__init__(client, prefix=prefix)
+        self.settles = 0
+
+    async def settle(self, user_id: str, rid: str, credits: int, *, now_ms: int) -> Finished:
+        self.settles += 1
+        return await super().settle(user_id, rid, credits, now_ms=now_ms)
+
+
+async def recorded(
+    limits: UsageLimits,
+    db: AsyncSession,
+    account: Account,
+    *,
+    hold_for: timedelta = HOLD,
+    at: datetime = NOON,
+) -> Reserved:
+    """A request that held its credits at noon, and was recorded at `at` for 200 credits
+    and committed. Nobody settled it: as if its process died in between."""
+    reserved = await reserve(limits, db, account, prompt=80, answer=100, hold_for=hold_for)
+    limits.record(db, reserved, input_tokens=100, output_tokens=100, estimated=False, now=at)
+    await db.commit()
+    return reserved
+
+
+async def test_usage_whose_settle_valkey_missed_is_counted_by_the_job_once(
+    counters: Counters, away: UsageLimits, db: AsyncSession, guest: Account
+) -> None:
+    limits = counters.limits
+    reserved = await reserve(limits, db, guest)
+    credits = away.record(
+        db, reserved, input_tokens=100, output_tokens=500, estimated=False, now=NOON
+    )
+    await db.commit()
+    assert await away.settle(reserved, credits, now=NOON) is None
+    missed = await windows(limits, db, guest)
+    later = NOON + COUNTED_WITHIN
+
+    first = await count_missed(db, counters.engine, now=later)
+    await db.commit()
+    counted = await windows(limits, db, guest, later)
+    second = await count_missed(db, counters.engine, now=later)
+    await db.commit()
+
+    assert missed["session"][:2] == (0, 500)  # held, and not counted
+    assert first == Repeated(taken=1)
+    assert counted == {
+        "session": (600, 0, NOON + timedelta(hours=5)),
+        "week": (600, 0, WEEK_ENDS),
+    }
+    assert await uncounted(db) == set()
+    assert second == Repeated()
+    assert await windows(limits, db, guest, later) == counted
+
+
+@pytest.mark.parametrize("given_back", [False, True], ids=["still held", "given back"])
+async def test_usage_whose_hold_ran_out_is_counted_by_the_job_once(
+    counters: Counters, db: AsyncSession, guest: Account, given_back: bool
+) -> None:
+    """The process died between the ledger's commit and the settle, and its hold ran out
+    a minute later. The hold may still be among the counters' holds, or a read of the
+    windows may have given it back already: either way, the job counts it once."""
+    limits = counters.limits
+    reserved = await recorded(limits, db, guest, hold_for=timedelta(minutes=1))
+    later = NOON + timedelta(minutes=2)
+    if given_back:
+        assert (await windows(limits, db, guest, later))["session"][:2] == (0, 0)
+    stored = await counters.engine.dump(str(guest.user_id), now_ms=to_ms(later))
+    assert stored is not None
+
+    repeated = await count_missed(db, counters.engine, now=later)
+    await db.commit()
+
+    if given_back:
+        assert stored["done"][str(reserved.id)]["outcome"] == "expired"
+    else:
+        assert str(reserved.id) in stored["reservations"]
+    assert repeated == Repeated(taken=1)
+    assert (await windows(limits, db, guest, later))["session"][:2] == (200, 0)
+
+
+async def test_the_job_leaves_a_row_to_its_own_process_for_a_minute(
+    counters: Counters, db: AsyncSession, guest: Account
+) -> None:
+    reserved = await recorded(counters.limits, db, guest)
+
+    too_soon = await count_missed(
+        db, counters.engine, now=NOON + COUNTED_WITHIN - timedelta(milliseconds=1)
+    )
+    await db.commit()
+    left = await uncounted(db)
+    in_time = await count_missed(db, counters.engine, now=NOON + COUNTED_WITHIN)
+    await db.commit()
+
+    assert too_soon == Repeated()
+    assert left == {reserved.id}
+    assert in_time == Repeated(taken=1)
+    assert await uncounted(db) == set()
+
+
+async def test_usage_the_counters_had_counted_is_not_counted_twice(
+    counters: Counters, db: AsyncSession, guest: Account
+) -> None:
+    """The settle reached the counters, and only the note that it had was left: its
+    process couldn't take it away."""
+    limits = counters.limits
+    reserved = await recorded(limits, db, guest)
+    assert await limits.settle(reserved, 200, now=NOON) == ()
+    before = await windows(limits, db, guest)
+
+    repeated = await count_missed(db, counters.engine, now=NOON + COUNTED_WITHIN)
+    await db.commit()
+
+    assert repeated == Repeated(had_already=1)
+    assert await uncounted(db) == set()
+    assert before["session"][:2] == (200, 0)
+    assert await windows(limits, db, guest) == before
+
+
+async def test_usage_whose_counters_were_lost_is_left_to_their_rebuild(
+    counters: Counters, db: AsyncSession, guest: Account
+) -> None:
+    """The counters were lost after the request was written, and rebuilt from the
+    ledger, which has it: they no longer know the request, and counting it again would
+    count it twice."""
+    limits = counters.limits
+    await recorded(limits, db, guest)
+    await counters.lose()
+    rebuilt = await windows(limits, db, guest)
+
+    repeated = await count_missed(db, counters.engine, now=NOON + COUNTED_WITHIN)
+    await db.commit()
+
+    assert repeated == Repeated(not_taken=1)
+    assert await uncounted(db) == set()
+    assert rebuilt["session"][:2] == (200, 0)
+    assert await windows(limits, db, guest) == rebuilt
+
+
+async def test_when_valkey_is_away_the_job_stops_at_once_and_the_next_run_counts_the_rows(
+    counters: Counters, nowhere: Valkey, db: AsyncSession, guest: Account
+) -> None:
+    """Each further try would wait out its timeout: with three rows, three timeouts."""
+    limits = counters.limits
+    for _ in range(3):
+        await recorded(limits, db, guest)
+    unreachable = CountedSettles(nowhere, prefix="away")
+    later = NOON + COUNTED_WITHIN
+
+    stopped = await count_missed(db, unreachable, now=later)
+    await db.commit()
+    left = await uncounted(db)
+    back = await count_missed(db, counters.engine, now=later)
+    await db.commit()
+
+    assert stopped == Repeated(valkey_away=True)
+    assert unreachable.settles == 1
+    assert len(left) == 3
+    assert back == Repeated(taken=3)
+    assert await uncounted(db) == set()
+    assert (await windows(limits, db, guest, later))["session"][:2] == (600, 0)
+
+
+async def test_the_job_takes_one_batch_a_run_oldest_first(
+    counters: Counters, db: AsyncSession, guest: Account
+) -> None:
+    """Written in an order that is neither that of their times nor its reverse, so that
+    neither is the order of their ids: the middle one, the newest, the oldest."""
+    limits = counters.limits
+    await recorded(limits, db, guest, at=NOON + timedelta(seconds=1))
+    newest = await recorded(limits, db, guest, at=NOON + timedelta(seconds=2))
+    await recorded(limits, db, guest, at=NOON)
+    later = NOON + timedelta(minutes=2)
+
+    first = await count_missed(db, counters.engine, now=later, limit=2)
+    await db.commit()
+    left = await uncounted(db)
+    second = await count_missed(db, counters.engine, now=later, limit=2)
+    await db.commit()
+
+    assert first == Repeated(taken=2)
+    assert left == {newest.id}
+    assert second == Repeated(taken=1)
+    assert await uncounted(db) == set()
+
+
+async def test_the_job_skips_a_row_another_transaction_holds_instead_of_waiting(
+    counters: Counters, db: AsyncSession, guest: Account, migrated: str
+) -> None:
+    """As when the request's own process takes the note away at that moment."""
+    limits = counters.limits
+    await recorded(limits, db, guest)
+    held = await recorded(limits, db, guest)
+    other_engine = create_engine(migrated)
+    try:
+        async with create_session_factory(other_engine)() as other:
+            await other.execute(
+                select(Uncounted.reservation_id)
+                .where(Uncounted.reservation_id == held.id)
+                .with_for_update()
+            )
+            async with asyncio.timeout(5):  # a job that waited would wait for ever
+                repeated = await count_missed(db, counters.engine, now=NOON + COUNTED_WITHIN)
+                await db.commit()
+            await other.rollback()
+    finally:
+        await other_engine.dispose()
+
+    assert repeated == Repeated(taken=1)
+    assert await uncounted(db) == {held.id}
+
+
+async def test_the_job_holds_only_the_notes_and_never_the_ledgers_rows(
+    counters: Counters, db: AsyncSession, guest: Account, migrated: str
+) -> None:
+    """A ledger row that another transaction holds is no reason to leave its note: the
+    job reads the row, and changes nothing but the note."""
+    reserved = await recorded(counters.limits, db, guest)
+    other_engine = create_engine(migrated)
+    try:
+        async with create_session_factory(other_engine)() as other:
+            await other.execute(
+                select(UsageEntry.reservation_id)
+                .where(UsageEntry.reservation_id == reserved.id)
+                .with_for_update()
+            )
+            async with asyncio.timeout(5):
+                repeated = await count_missed(db, counters.engine, now=NOON + COUNTED_WITHIN)
+                await db.commit()
+            await other.rollback()
+    finally:
+        await other_engine.dispose()
+
+    assert repeated == Repeated(taken=1)
+    assert await uncounted(db) == set()
+
+
+async def test_a_row_the_engine_refuses_does_not_stop_the_job_at_that_row(
+    counters: Counters, db: AsyncSession, guest: Account, caplog: pytest.LogCaptureFixture
+) -> None:
+    """More credits than the engine counts exactly: it refuses the row before it asks
+    Valkey, and would at every run. The oldest row comes first in every batch, so a job
+    that failed there would never get to the rows behind it. No repeat can tell the
+    counters of such a row: its note goes, and the log names it."""
+    limits = counters.limits
+    refused = ledger.add(
+        db,
+        reservation_id=new_id(),
+        user_id=guest.user_id,
+        model="standard",
+        credits=MAX_CREDITS + 1,
+        tokens=Tokens(input_tokens=100, output_tokens=100),
+        estimated=False,
+        windows={},
+        now=NOON - timedelta(seconds=1),
+    ).reservation_id
+    await recorded(limits, db, guest)
+
+    repeated = await count_missed(db, counters.engine, now=NOON + COUNTED_WITHIN)
+    await db.commit()
+
+    assert repeated == Repeated(taken=1, not_taken=1)
+    assert await uncounted(db) == set()
+    assert (await windows(limits, db, guest))["session"][:2] == (200, 0)
+    assert f"reservation {refused} can't be counted" in caplog.text

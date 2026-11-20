@@ -11,6 +11,7 @@ How the limits themselves behave, below the API, is in `test_usage_limits.py`.
 
 import asyncio
 import json
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -18,16 +19,18 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from valkey.asyncio import Valkey
+from valkey.exceptions import ConnectionError as ValkeyConnectionError
 
 from actio.api.rate_limits import in_words
 from actio.chat import turns
 from actio.chat.models import Conversation, Message, Turn
 from actio.core.ids import new_id
 from actio.core.settings import Settings
-from actio.usage.limits import held_for_prompt
-from actio.usage.models import UsageEntry
+from actio.usage.limits import UsageLimits, held_for_prompt
+from actio.usage.models import Uncounted, UsageEntry
 from actio.usage.plans import Plans
 from actio_llm import (
     Finish,
@@ -38,6 +41,7 @@ from actio_llm import (
     prompt_tokens,
     tokens_in,
 )
+from actio_quota.engine import ValkeyQuota
 
 pytestmark = pytest.mark.anyio
 
@@ -206,7 +210,7 @@ async def test_credits_are_held_while_an_answer_is_being_written(scripted: Any) 
     await asyncio.wait_for(model.started.wait(), PATIENCE_S)
     during = await windows(browser)
     hold.set()
-    await asked
+    await asyncio.wait_for(asked, PATIENCE_S)  # an ending that hung would wait for ever
 
     held = held_for_prompt(prompt_tokens(model.requests[0].messages)) + ROOM
     assert during["session"][:2] == (0, held)  # the prompt, by guess, and the longest answer
@@ -659,7 +663,7 @@ async def test_the_credits_held_for_a_long_answer_stay_held_until_it_ends(
                 await asyncio.sleep(0.005)
         during.append((await windows(browser))["session"][:2])
     hold.set()
-    await asked
+    await asyncio.wait_for(asked, PATIENCE_S)  # an ending that hung would wait for ever
 
     assert during == [(0, held)] * 8
     assert (await windows(browser))["session"][:2] == (44, 0)
@@ -685,11 +689,36 @@ async def test_what_was_held_for_a_turn_that_fell_silent_comes_back_by_itself(
     clock.advance(seconds=1)  # no beat came meanwhile: under test they are 15 real seconds apart
     afterwards = await Chat(browser).ask()
     hold.set()
-    await asked
+    await asyncio.wait_for(asked, PATIENCE_S)  # an ending that hung would wait for ever
 
     assert turn_of(while_held)["capped_by_usage"] is True
     assert turn_of(afterwards)["capped_by_usage"] is False
     assert (await windows(browser))["session"][:2] == (3 * 44, 0)
+
+
+async def test_what_was_held_for_a_turn_that_fell_silent_is_shown_as_free_without_a_question(
+    scripted: Any, clock: Any
+) -> None:
+    """The same, as the meter sees it: reading the usage gives back a hold that ran out.
+    Nothing else is asked in between."""
+    hold = asyncio.Event()
+    model, browser = await scripted(
+        TextDelta("Half"), hold, TextDelta(" an answer."), used(read=40, written=4)
+    )
+    asked = asyncio.create_task(Chat(browser).ask())
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
+    held = held_for_prompt(prompt_tokens(model.requests[0].messages)) + ROOM
+
+    clock.advance(seconds=59)
+    while_held = await windows(browser)
+    clock.advance(seconds=1)  # no beat came meanwhile: under test they are 15 real seconds apart
+    ran_out = await windows(browser)
+    hold.set()
+    await asyncio.wait_for(asked, PATIENCE_S)  # an ending that hung would wait for ever
+
+    assert while_held["session"][:2] == while_held["week"][:2] == (0, held)
+    assert ran_out["session"][:2] == ran_out["week"][:2] == (0, 0)
+    assert (await windows(browser))["session"][:2] == (44, 0)  # counted when it ends after all
 
 
 # --- When the counters are lost -------------------------------------------------------
@@ -722,3 +751,84 @@ async def test_usage_survives_the_loss_of_what_valkey_held(
     assert (answered.status_code, turn_of(answered)["capped_by_usage"]) == (200, True)
     assert again.status_code == 429  # the two turns filled the session, lost counters or not
     assert (await windows(browser))["session"][0] == 1_000
+
+
+# --- When the counters aren't told ----------------------------------------------------
+
+
+async def test_a_turn_that_was_counted_leaves_nothing_noted_as_not_counted(
+    scripted: Any, db: AsyncSession
+) -> None:
+    _, browser = await scripted(TextDelta("A derailleur."), used(read=40, written=3))
+
+    response = await Chat(browser).ask()
+
+    [entry] = await ledger(db)
+    assert str(entry.reservation_id) == turn_of(response)["id"]
+    assert await count(db, Uncounted) == 0
+
+
+async def test_a_turn_whose_settle_valkey_missed_is_delivered_and_left_noted_for_the_worker(
+    scripted: Any,
+    db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Valkey went away between the question and the end of its answer."""
+    _, browser = await scripted(TextDelta("A derailleur."), used(read=40, written=3))
+    chat = Chat(browser)
+
+    async def away(*_args: Any, **_kwargs: Any) -> None:
+        raise ValkeyConnectionError("Connection refused")
+
+    monkeypatch.setattr(ValkeyQuota, "settle", away)
+
+    response = await chat.ask()
+
+    turn = turn_of(response)
+    assert (response.status_code, turn["status"], turn["credits"]) == (200, "completed", 43)
+    stored = (await browser.get(chat.path)).json()
+    assert [message["role"] for message in stored["messages"]] == ["user", "assistant"]
+    [entry] = await ledger(db)
+    assert (str(entry.reservation_id), entry.credits) == (turn["id"], 43)
+    noted = await db.scalars(select(Uncounted.reservation_id))
+    assert [str(reservation_id) for reservation_id in noted] == [turn["id"]]
+    assert "couldn't be settled in Valkey" in caplog.text
+
+
+async def test_a_turn_whose_count_cannot_be_noted_is_recorded_and_counted_all_the_same(
+    scripted: Any,
+    plans_with: Any,
+    db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The database went away after the turn was recorded and counted, before the note
+    that it was counted could be taken away. The turn ends as ever, with the share of
+    its window that it passed. The note stays: the worker settles the turn again, is
+    told that it was settled already, and takes the note away."""
+    plans = plans_with(guest=(1_000, 100_000))
+    _, browser = await scripted(TextDelta("An answer."), used(read=300, written=250), plans=plans)
+    chat = Chat(browser)
+
+    async def cannot_write(*_args: Any, **_kwargs: Any) -> None:
+        raise OperationalError("DELETE FROM usage_uncounted", None, OSError("connection lost"))
+
+    monkeypatch.setattr(UsageLimits, "counted", cannot_write)
+
+    response = await chat.ask()
+
+    turn = turn_of(response)
+    assert (response.status_code, turn["status"], turn["credits"]) == (200, "completed", 550)
+    assert warnings_in(response) == [("session", 50)]
+    stored = (await browser.get(chat.path)).json()
+    assert [message["role"] for message in stored["messages"]] == ["user", "assistant"]
+    assert (await windows(browser))["session"][:2] == (550, 0)
+    assert await count(db, Uncounted) == 1
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "actio.chat.answering"]
+    assert said == [
+        (
+            logging.WARNING,
+            f"turn {turn['id']}: couldn't note that its usage was counted (OperationalError)",
+        )
+    ]

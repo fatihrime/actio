@@ -460,10 +460,12 @@ async def _record(
     reserved: Reserved,
 ) -> tuple[int | None, tuple[UsageWarning, ...]]:
     """Write how the turn ended, and what it used, in one transaction. Then tell the
-    counters. Returns what it cost, and the warnings the counters gave.
+    counters, and once they were told, note that they were, in a transaction of its
+    own. Returns what it cost, and the warnings the counters gave.
 
     In that order, because the counters can be lost and are then rebuilt from the
-    ledger: what they have counted must be in the ledger already.
+    ledger: what they have counted must be in the ledger already. What they weren't
+    told, the worker tells them later: the ledger's row is still noted as not counted.
     """
     used = _used(ending, reserved)
     credits = None
@@ -501,4 +503,31 @@ async def _record(
     if credits is None:
         await usage.release(reserved, now=now)
         return None, ()
-    return credits, await usage.settle(reserved, credits, now=now)
+    warnings = await usage.settle(reserved, credits, now=now)
+    if warnings is None:
+        return credits, ()  # the counters weren't told: `settle` said so in the log
+    await _counted(open_session, turn_id, usage, reserved)
+    return credits, warnings
+
+
+async def _counted(
+    open_session: async_sessionmaker[AsyncSession],
+    turn_id: uuid.UUID,
+    usage: UsageLimits,
+    reserved: Reserved,
+) -> None:
+    """Note that the counters were told of what the turn used.
+
+    A note that can't be written fails nothing: the turn is recorded, and counted. The
+    worker finds its ledger row still noted as not counted, settles it again, is told
+    that it was settled already, and takes the note away."""
+    try:
+        async with open_session() as db:
+            await usage.counted(db, reserved)
+            await db.commit()
+    except (SQLAlchemyError, OSError) as error:
+        logger.warning(
+            "turn %s: couldn't note that its usage was counted (%s)",
+            turn_id,
+            type(error).__name__,
+        )

@@ -24,7 +24,6 @@ from actio.identity.passwords import Passwords
 from actio.usage.limits import UsageLimits
 from actio.usage.plans import Plans
 from actio.usage.plans import load as load_plans
-from actio_quota.engine import ValkeyQuota
 
 DESCRIPTION = """\
 Actio's HTTP API, which its web app is built on.
@@ -80,11 +79,7 @@ def create_app(
                 priced = plans.require_prices_for(names)
             app.state.resources = resources
             app.state.catalog = offered
-            app.state.usage = UsageLimits(
-                # Beside the rate limits' keys, under the same prefix.
-                ValkeyQuota(resources.valkey, prefix=f"{settings.valkey_prefix}:q"),
-                priced,
-            )
+            app.state.usage = UsageLimits(resources.quota, priced)
             app.state.turn_events = TurnEvents(
                 resources.valkey, prefix=f"{settings.valkey_prefix}:turn"
             )
