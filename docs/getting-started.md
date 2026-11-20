@@ -215,13 +215,13 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 :   A request to the API was larger than 2 MB, and the proxy in front of it refused it. A question has room for 100,000 characters, which is far less.
 
 **"The server was restarted while this answer was being written"**
-:   The API was stopped in the middle of an answer: by `make down`, by `make up` after a change, or by a saved file under `make dev`. It gives the answers being written 15 seconds to finish, then keeps what each had written and marks it interrupted. Such an answer costs nothing. **Try again** asks for it once more.
+:   The API was stopped in the middle of an answer: by `make down`, by `make up` after a change, or by a saved file under `make dev`. It gives the answers being written 15 seconds to finish, then keeps what each had written and marks it interrupted. If the API was killed instead, the answer is marked so once it has been silent for a minute, with what it had written when it last saved it: an answer that is being written is saved every 15 seconds. Such an answer costs nothing. **Try again** asks for it once more.
 
 **`make down` takes a quarter of a minute**
 :   An answer was being written: see the entry above. With none under way it takes a second or two.
 
 **"An answer to this is still being written", and it stays**
-:   The answer is being written at the server, and the page can't read along with it: the stream of its words was lost, as after a restart of Valkey, or couldn't be asked for. It can't be asked for when six of your windows or tabs already read along with answers, the most one account may. Otherwise the page shows the words as they arrive. It looks again every second and a half, and shows the answer when it is done. If the API was killed while writing it, nothing ever finishes it: the page notices a minute after the answer was last heard from, and offers to try again.
+:   The answer is being written at the server, and the page can't read along with it: the stream of its words was lost, as after a restart of Valkey, or couldn't be asked for. It can't be asked for when six of your windows or tabs already read along with answers, the most one account may. Otherwise the page shows the words as they arrive. It looks again every second and a half, and shows the answer when it is done. If the API was killed while writing it, nothing ever finishes it: the page notices a minute after the answer was last heard from, shows what had been written when it was, and offers to try again.
 
 **A question answers 503, "Usage can't be counted right now"**
 :   The API can't reach Valkey, where usage is counted, and refuses instead of answering uncounted. `/api/readyz` and `docker compose ps` show what is down.
