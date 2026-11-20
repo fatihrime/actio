@@ -79,7 +79,8 @@ class NotMigratedError(Exception):
 
 
 def listed(resources: Resources, catalog: Catalog, *, clock: Clock) -> list[jobs.Job]:
-    """Every job a worker runs, each with what it needs."""
+    """Every job a worker runs, each with what it needs, and, for the one job that has
+    any, the errors of its own that are worth another try."""
     return [
         jobs.Job(SWEEP, partial(sweep_expired, resources, clock), every="*/10 * * * *"),
         jobs.Job(GIVE_UP, partial(give_up_on_stale_turns, resources, clock), every="*/10 * * * *"),
@@ -90,8 +91,13 @@ def listed(resources: Resources, catalog: Catalog, *, clock: Clock) -> list[jobs
             every="*/10 * * * *",
             with_queue=True,
         ),
-        # Deferred once for a conversation, by the first of its turns that completes.
-        jobs.Job(titles.WRITE_TITLE, partial(write_title, resources, catalog, clock)),
+        # Deferred once for a conversation, by the first of its turns that completes. A
+        # title its model couldn't give for now is asked for again, later.
+        jobs.Job(
+            titles.WRITE_TITLE,
+            partial(write_title, resources, catalog, clock),
+            again=jobs.Again(errors=(titles.NotWrittenError,), waits=titles.ASKED_AGAIN_AFTER),
+        ),
     ]
 
 
@@ -254,7 +260,8 @@ async def write_title(
 ) -> None:
     """Ask a model for the conversation's title, and write it, unless someone named the
     conversation meanwhile: see `titles.write`, which also says in the log what kept a
-    title from being written."""
+    title from being written. It raises `titles.NotWrittenError` when the model couldn't
+    give one for now, and the queue runs the job again, after the wait `listed` gives."""
     await titles.write(resources.database, catalog, uuid.UUID(conversation_id), now=clock())
 
 

@@ -6,14 +6,16 @@ The first line a new conversation is named after is tested with the turns, throu
 API. Here the job is deferred as a turn defers it, and run as the worker runs it
 (`work_through`), or its handler alone when a test acts while the model writes: the
 model is a `ScriptedModel`, which a test can hold half-way. Every wait has a time limit,
-so that a broken job fails its test instead of hanging the run. Whether a title is on its
-way is read where a page reads it, in the list, with the clock moved by the test.
+so that a broken job fails its test instead of hanging the run. A job that is put back,
+to ask the model again later, is made due through the database
+(`queue_books.wait_is_over`), and run again. Whether a title is on its way is read where
+a page reads it, in the list, with the clock moved by the test.
 """
 
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -37,13 +39,18 @@ from actio.core.settings import Settings
 from actio.identity import sessions
 from actio_llm import (
     ChatRequest,
+    ContextOverflowError,
     Finish,
     FinishReason,
+    LLMError,
     ProviderError,
     ProviderUnavailableError,
+    RateLimitedError,
     ReasoningDelta,
+    RequestRejectedError,
     StreamEvent,
     TextDelta,
+    UnsupportedServerError,
     Usage,
     User,
 )
@@ -245,6 +252,22 @@ def said(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
         for record in caplog.records
         if record.name == "actio.chat.titles"
     ]
+
+
+def put_back(run_again: int, in_seconds: float) -> list[tuple[str, str, int, float]]:
+    """The queue, as `queue_books.due()` reads it, holding the one job that writes a
+    title, put back to ask the model again: run again `run_again` times so far, and due
+    in `in_seconds`."""
+    return [(titles.WRITE_TITLE, "todo", run_again, in_seconds)]
+
+
+def status_of(state: Any) -> Callable[..., Awaitable[ModelStatus]]:
+    """What stands in for `Catalog.status`: the model is in `state`, whichever is asked."""
+
+    async def status(name: str, *, now: datetime) -> ModelStatus:  # noqa: ARG001
+        return ModelStatus(state, thinking=False)
+
+    return status
 
 
 # --- When a title is asked for ---------------------------------------------------------
@@ -902,7 +925,66 @@ async def test_two_runs_at_once_leave_one_title_and_no_error(
             (ProviderUnavailableError("connection refused"),),
             "no title, its model failed (ProviderUnavailableError)",
         ),
+        (
+            (RateLimitedError("too many requests", retry_after_s=20),),
+            "no title, its model failed (RateLimitedError)",
+        ),
         ((TextDelta("Fixing a fl"),), "no title, its model failed (StreamInterruptedError)"),
+        ((ProviderError("bad gateway"),), "no title, its model failed (ProviderError)"),
+        ((NEVER, DONE), "no title, its model took longer than 0.2 s"),
+    ],
+    ids=[
+        "its server doesn't answer",
+        "its provider refuses for now",
+        "its answer breaks off",
+        "its provider fails",
+        "it takes too long",
+    ],
+)
+async def test_a_title_the_model_couldnt_give_for_now_is_asked_for_again_in_thirty_seconds(
+    script: tuple[Any, ...],
+    says: str,
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    offer: Any,
+    work_through: Any,
+    queue_books: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The job goes back into the queue, and the conversation keeps its first line, and
+    the moment its title was asked for, meanwhile. The log says which conversation, and
+    what kind of trouble, once. Too long is a fifth of a second here."""
+    monkeypatch.setattr(titles, "WRITTEN_WITHIN_S", 0.2)
+    model, catalog = offer(*scripted(script), titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert len(model.requests) == 1
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert await queue_books.due() == put_back(1, 30)
+    assert said(caplog) == [(logging.WARNING, f"conversation {begun.conversation.id}: {says}")]
+
+
+@pytest.mark.parametrize(
+    ("script", "says"),
+    [
+        (
+            (RequestRejectedError("the request is malformed"),),
+            "no title, its model failed (RequestRejectedError)",
+        ),
+        (
+            (ContextOverflowError("the prompt is too long"),),
+            "no title, its model failed (ContextOverflowError)",
+        ),
+        (
+            (UnsupportedServerError("the server is older than this client"),),
+            "no title, its model failed (UnsupportedServerError)",
+        ),
+        ((LLMError("something else went wrong"),), "no title, its model failed (LLMError)"),
         ((DONE,), "its model wrote nothing to make a title of, and it keeps its first line"),
         (
             (TextDelta('"'), TextDelta('"'), DONE),
@@ -912,18 +994,18 @@ async def test_two_runs_at_once_leave_one_title_and_no_error(
             (ReasoningDelta("Fixing a flat tyre"), DONE),
             "its model wrote nothing to make a title of, and it keeps its first line",
         ),
-        ((NEVER, DONE), "no title, its model took longer than 0.2 s"),
     ],
     ids=[
-        "the model fails",
-        "its answer breaks off",
+        "the provider refuses the request",
+        "the question is too long for it",
+        "its server is too old",
+        "it fails otherwise",
         "it writes nothing",
         "only quotation marks",
         "only its reasoning",
-        "it takes too long",
     ],
 )
-async def test_a_title_the_model_doesnt_give_leaves_the_first_line_and_the_job_ends_well(
+async def test_a_title_the_model_wont_give_leaves_the_first_line_and_the_job_ends_well(
     script: tuple[Any, ...],
     says: str,
     db: AsyncSession,
@@ -932,12 +1014,10 @@ async def test_a_title_the_model_doesnt_give_leaves_the_first_line_and_the_job_e
     clock: Any,
     offer: Any,
     work_through: Any,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The log says which conversation, and what kind of trouble. Too long is a fifth of
-    a second here."""
-    monkeypatch.setattr(titles, "WRITTEN_WITHIN_S", 0.2)
+    """It would be the same at the next try, so there is none. The log says which
+    conversation, and what kind of trouble."""
     model, catalog = offer(*scripted(script), titles="standard")
     begun = await started(db)
     await ended(db, begun)
@@ -950,26 +1030,29 @@ async def test_a_title_the_model_doesnt_give_leaves_the_first_line_and_the_job_e
     assert said(caplog) == [(logging.WARNING, f"conversation {begun.conversation.id}: {says}")]
 
 
-@pytest.mark.parametrize("state", ["missing", "unreachable"])
+@pytest.mark.parametrize(
+    ("state", "then"),
+    [("missing", []), ("unreachable", put_back(1, 30))],
+    ids=["missing from its server, for good", "its server doesn't answer, for now"],
+)
 async def test_a_model_that_isnt_ready_is_not_asked_for_a_title(
     state: Any,
+    then: list[tuple[str, str, int, float]],
     db: AsyncSession,
-    migrated: str,
     settings: Settings,
     clock: Any,
     offer: Any,
     work_through: Any,
+    queue_books: Any,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """As a turn doesn't ask one. What such a model can do isn't known: one that reasons
-    unless told not to would spend the title's few tokens on reasoning."""
+    unless told not to would spend the title's few tokens on reasoning. One that is
+    missing ends the job well. One whose server doesn't answer puts it back, to ask again
+    in thirty seconds."""
     model, catalog = offer(TextDelta("Fixing a flat tyre"), DONE, titles="standard")
-
-    async def not_ready(name: str, *, now: datetime) -> ModelStatus:  # noqa: ARG001
-        return ModelStatus(state, thinking=False)
-
-    monkeypatch.setattr(catalog, "status", not_ready)
+    monkeypatch.setattr(catalog, "status", status_of(state))
     begun = await started(db)
     await ended(db, begun)
 
@@ -977,7 +1060,7 @@ async def test_a_model_that_isnt_ready_is_not_asked_for_a_title(
 
     assert model.requests == []
     assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
-    assert await queued(migrated) == []  # it succeeded, and was deleted
+    assert await queue_books.due() == then
     assert said(caplog) == [
         (logging.WARNING, f"conversation {begun.conversation.id}: no title, its model is {state}")
     ]
@@ -985,17 +1068,17 @@ async def test_a_model_that_isnt_ready_is_not_asked_for_a_title(
 
 async def test_a_title_that_waits_too_long_for_its_models_server_is_given_up_on_at_the_gate(
     db: AsyncSession,
-    migrated: str,
     settings: Settings,
     clock: Any,
     lineup: Any,
     work_through: Any,
+    queue_books: Any,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The time limit is over the wait for the server and the model's writing together:
     here an answer holds the server's one place throughout. The model is never asked,
-    and the title leaves the gate as it found it."""
+    the title leaves the gate as it found it, and is asked for again in thirty seconds."""
     monkeypatch.setattr(titles, "WRITTEN_WITHIN_S", 0.2)
     one_at_a_time = Gate(1)
     naming = lineup.add("standard", TextDelta("Fixing a flat tyre"), DONE, gate=one_at_a_time)
@@ -1011,13 +1094,155 @@ async def test_a_title_that_waits_too_long_for_its_models_server_is_given_up_on_
     assert waiting_afterwards == 0
     assert not one_at_a_time.full
     assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
-    assert await queued(migrated) == []  # it succeeded, and was deleted
+    assert await queue_books.due() == put_back(1, 30)
     assert said(caplog) == [
         (
             logging.WARNING,
             f"conversation {begun.conversation.id}: no title, its model took longer than 0.2 s",
         )
     ]
+
+
+async def test_a_later_try_that_the_model_answers_writes_the_title(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    offer: Any,
+    work_through: Any,
+    queue_books: Any,
+) -> None:
+    """The same job, run again from its start once its wait is over: its server answers
+    by then, and the title is written as at a first try."""
+    model, catalog = offer(ProviderUnavailableError("connection refused"), titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+    await run_the_job(settings, catalog, clock, work_through)
+    model.script = [TextDelta("Fixing a flat tyre"), DONE]
+    await queue_books.wait_is_over()
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert len(model.requests) == 2
+    assert await named(db, begun.conversation.id) == (
+        "Fixing a flat tyre",
+        "model",
+        ANSWERED,
+        ANSWERED,
+    )
+    assert await queue_books.due() == []  # it succeeded, and was deleted
+
+
+async def test_a_later_try_asks_the_models_server_itself_and_not_what_it_said_the_last_time(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    offer: Any,
+    work_through: Any,
+    queue_books: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The catalog keeps what a server said about a model for a while, and the try that
+    found the server away had just asked. The first wait is longer than that: at the
+    next try the server is asked itself, answers by then, and the title is written. The
+    clock is the test's, moved by the first wait."""
+    model, catalog = offer(TextDelta("Fixing a flat tyre"), DONE, titles="standard")
+    its_server_says = [
+        ModelStatus("unreachable", thinking=False),
+        ModelStatus("ready", thinking=False),
+    ]
+
+    async def ask(offered: OfferedModel) -> ModelStatus:  # noqa: ARG001
+        return its_server_says.pop(0)
+
+    monkeypatch.setattr(catalog, "_ask", ask)
+    begun = await started(db)
+    await ended(db, begun)
+    await run_the_job(settings, catalog, clock, work_through)
+    clock.advance(seconds=titles.ASKED_AGAIN_AFTER[0].total_seconds())
+    await queue_books.wait_is_over()
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert its_server_says == []
+    assert len(model.requests) == 1
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+
+
+async def test_a_title_the_model_couldnt_give_four_times_is_given_up_on_and_its_job_kept(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    offer: Any,
+    work_through: Any,
+    queue_books: Any,
+) -> None:
+    """Asked again after half a minute, two minutes, then ten. The fourth try fails the
+    job: the conversation keeps its first line for good, and the job is kept as any that
+    failed, to be looked at. A worker that comes by afterwards asks nothing."""
+    model, catalog = offer(ProviderError("bad gateway"), titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+    queue_after_each: list[list[tuple[str, str, int, float | None]]] = []
+
+    for _ in range(4):
+        await run_the_job(settings, catalog, clock, work_through)
+        queue_after_each.append(await queue_books.due())
+        await queue_books.wait_is_over()
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert queue_after_each[:3] == [put_back(1, 30), put_back(2, 120), put_back(3, 600)]
+    assert [(name, status) for name, status, *_ in queue_after_each[3]] == [
+        (titles.WRITE_TITLE, "failed")
+    ]
+    assert len(model.requests) == 4
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert [(name, status) for name, status, *_ in await queue_books.due()] == [
+        (titles.WRITE_TITLE, "failed")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("how", "then"), [("renamed", ("Flat tyres", "person")), ("deleted", None)]
+)
+async def test_a_conversation_renamed_or_deleted_between_two_tries_is_left_as_it_is(
+    how: str,
+    then: tuple[str, str] | None,
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    offer: Any,
+    work_through: Any,
+    queue_books: Any,
+) -> None:
+    """The next try is the job run again from its start: it finds the conversation named
+    by a person, or gone, asks the model nothing, and ends well."""
+    model, catalog = offer(ProviderError("bad gateway"), titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+    await run_the_job(settings, catalog, clock, work_through)
+    after_the_first_try = await queue_books.due()
+    conversation = await db.get(Conversation, begun.conversation.id)
+    assert conversation is not None
+    if how == "renamed":
+        conversations.rename(conversation, "Flat tyres")
+    else:
+        await conversations.delete(db, conversation)
+    await db.commit()
+    await queue_books.wait_is_over()
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert after_the_first_try == put_back(1, 30)  # so there is a second try, and it ran
+    assert len(model.requests) == 1
+    found = await db.execute(
+        select(Conversation.title, Conversation.title_by).where(
+            Conversation.id == begun.conversation.id
+        )
+    )
+    row = found.one_or_none()
+    assert (None if row is None else tuple(row)) == then
+    assert await queue_books.due() == []  # it succeeded, and was deleted
 
 
 async def test_a_job_cancelled_while_the_model_writes_is_cancelled_and_writes_nothing(
@@ -1077,10 +1302,13 @@ async def test_no_line_of_the_job_carries_the_question_or_the_title(
     clock: Any,
     offer: Any,
     work_through: Any,
+    queue_books: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """At any level, the queue's own lines included. One job writes its title; the
-    other's model fails, with an error that quotes the question."""
+    """At any level, the queue's own lines included, each with the trace of its error.
+    One job writes its title. The other's model fails at each of its four tries, with an
+    error that quotes the question: the queue writes the trace of the last one, which
+    fails the job."""
     caplog.set_level(logging.DEBUG, logger="actio")
     caplog.set_level(logging.DEBUG, logger="procrastinate")
     question = "Velora Cycles: how tight should the saddle clamp be?"
@@ -1092,19 +1320,18 @@ async def test_no_line_of_the_job_carries_the_question_or_the_title(
     await run_the_job(settings, catalog, clock, work_through)
     not_written = await started(db, question)
     await ended(db, not_written)
-    await run_the_job(settings, failing, clock, work_through)
+    for _ in range(4):
+        await run_the_job(settings, failing, clock, work_through)
+        await queue_books.wait_is_over()
 
-    ours = [
-        record
-        for record in caplog.records
-        if record.name.split(".")[0] in ("actio", "procrastinate")
-    ]
-    lines = [record.getMessage() for record in ours]
-    assert (len(writes.requests), len(fails.requests)) == (1, 1)
+    everything_said = caplog.text  # every record, with the trace of its error
+    assert (len(writes.requests), len(fails.requests)) == (1, 4)
     assert await named(db, written.conversation.id) == (title, "model", ANSWERED, ANSWERED)
-    assert any(record.name.startswith("procrastinate") for record in ours)
-    assert any("its model failed (ProviderError)" in line for line in lines)
-    assert [line for line in lines if "saddle" in line.lower()] == []
+    assert [status for _, status, *_ in await queue_books.due()] == ["failed"]
+    assert "procrastinate.worker" in everything_said
+    assert everything_said.count("its model failed (ProviderError)") == 4 + 1  # the trace's
+    assert "Traceback" in everything_said
+    assert "saddle" not in everything_said.lower()
 
 
 async def test_a_title_the_database_refuses_fails_its_job_without_a_word_of_it_in_the_log(
@@ -1114,12 +1341,13 @@ async def test_a_title_the_database_refuses_fails_its_job_without_a_word_of_it_i
     clock: Any,
     offer: Any,
     work_through: Any,
+    queue_books: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The write fails at the database, as when the database is lost in that moment:
-    here a trigger of the test's own refuses it. The job fails, and the queue says so
-    with the error and its trace, which name the statement and none of its values: the
-    title is one of them."""
+    here a trigger of the test's own refuses it. The job fails at once, and isn't run
+    again, and the queue says so with the error and its trace, which name the statement
+    and none of its values: the title is one of them."""
     caplog.set_level(logging.DEBUG)
     question = "Velora Cycles: how tight should the saddle clamp be?"
     model, catalog = offer(TextDelta("Saddle clamp torque"), DONE, titles="standard")
@@ -1141,6 +1369,7 @@ async def test_a_title_the_database_refuses_fails_its_job_without_a_word_of_it_i
     title, by, *_ = await named(db, begun.conversation.id)
     assert (title, by) == (question, "question")
     assert await queued(migrated) == asked_for(begun.conversation.id)  # it failed, and stays
+    assert [status for _, status, *_ in await queue_books.due()] == ["failed"]
     everything_said = caplog.text  # every record, with the trace of its error
     assert "no titles today" in everything_said
     assert "UPDATE conversations SET title=" in everything_said

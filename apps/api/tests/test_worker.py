@@ -131,16 +131,22 @@ async def test_the_worker_runs_four_jobs_every_ten_minutes_and_writes_titles_whe
     settings: Settings, clock: Any
 ) -> None:
     """The fourth looks after the queue itself, and is given it. The fifth has no
-    schedule: a turn defers it, once for a conversation."""
+    schedule: a turn defers it, once for a conversation. It is the one job run again
+    after an error of its own, a title its model couldn't give for now: asked for again
+    after half a minute, two minutes, then ten."""
     async with open_resources(settings) as resources:
         listed = worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
 
-    assert [(job.name, job.every, job.with_queue) for job in listed] == [
-        (worker.SWEEP, "*/10 * * * *", False),
-        (worker.GIVE_UP, "*/10 * * * *", False),
-        (worker.COUNT_MISSED, "*/10 * * * *", False),
-        (worker.LOOK_AFTER_QUEUE, "*/10 * * * *", True),
-        ("write-title", None, False),
+    asked_again = jobs.Again(
+        errors=(titles.NotWrittenError,),
+        waits=(timedelta(seconds=30), timedelta(seconds=120), timedelta(seconds=600)),
+    )
+    assert [(job.name, job.every, job.with_queue, job.again) for job in listed] == [
+        (worker.SWEEP, "*/10 * * * *", False, None),
+        (worker.GIVE_UP, "*/10 * * * *", False, None),
+        (worker.COUNT_MISSED, "*/10 * * * *", False, None),
+        (worker.LOOK_AFTER_QUEUE, "*/10 * * * *", True, None),
+        ("write-title", None, False, asked_again),
     ]
     assert titles.WRITE_TITLE == "write-title"
 

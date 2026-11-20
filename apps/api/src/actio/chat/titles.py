@@ -11,6 +11,11 @@ Who named a conversation is on its row (`Conversation.title_by`): `question`, `m
 or `person`. Only `write` makes a `question` a `model`, and nothing writes over a
 `person`: a title someone chose stays.
 
+A title the model couldn't give for now, because its server didn't answer, failed or was
+too busy, is asked for again later, up to three times more (`NotWrittenError`,
+`ASKED_AGAIN_AFTER`). One it won't give, because it refused the request or wrote nothing
+to make a title of, is not: the conversation keeps its first line.
+
 For a moment after a model was asked, a title is on its way (`on_its_way`). The list of
 conversations says so, and a page that reads it reads it again until it no longer does.
 
@@ -41,6 +46,8 @@ from actio_llm import (
     ChatRequest,
     Finish,
     LLMError,
+    ProviderError,
+    ProviderUnavailableError,
     StreamEvent,
     StreamInterruptedError,
     TextDelta,
@@ -67,13 +74,26 @@ below, a model wrote 2 to 13."""
 
 WRITTEN_WITHIN_S = 30.0
 """How long a title may take: the wait for the model's server, and the model's answer,
-together. Past it, the conversation keeps its first line."""
+together. Past it, the conversation keeps its first line, and its title is asked for
+again later (`ASKED_AGAIN_AFTER`)."""
+
+ASKED_AGAIN_AFTER = (timedelta(seconds=30), timedelta(minutes=2), timedelta(minutes=10))
+"""How long the job waits before it asks the model again, after a try that the model
+couldn't answer for now (`NotWrittenError`): before the second try, the third and the
+fourth. After the fourth, the conversation keeps its first line for good. A run that a
+stop cut off, or that a worker died in, counts as a try: the queue has one count for
+every time it runs a job again (`actio.core.jobs.RUNS_AGAIN`).
+
+30 seconds for a server that restarted or hiccuped: a try itself takes up to
+`WRITTEN_WITHIN_S`, so behind a busy server the second starts about a minute after the
+first. 2 minutes for a long answer at a server that writes one at a time, or a model
+being loaded. 10 minutes for a server that was away for a while, or a provider's limit."""
 
 ON_ITS_WAY_FOR = timedelta(seconds=15)
 """How long after a model was asked for a title the title is said to be on its way, while
 none has come. A title took about half a second, measured (ADR 0025). One that takes
-longer, as behind a long answer at a server that writes one at a time, shows whenever
-the list is next read."""
+longer, as behind a long answer at a server that writes one at a time, or one that comes
+at a later try (`ASKED_AGAIN_AFTER`), shows whenever the list is next read."""
 
 INSTRUCTIONS = (
     "Write a title for the conversation that starts with the message below: at most six "
@@ -118,6 +138,22 @@ _AROUND = re.compile(r"^([*_`]+)((?:(?!\1).)+)\1$")
 _NAMED = re.compile(r"^([*_`]*)title\s*(?::\s*\1|\1\s*:)\s*", re.IGNORECASE)
 """A title that says it is one: `Title: …`, `**Title:** …`, or `**Title**: …`."""
 
+_FOR_NOW = (ProviderUnavailableError, StreamInterruptedError, ProviderError)
+"""The model's errors that may be gone at a later try: its server away, overloaded or
+refusing for now (`RateLimitedError` is one of the first), an answer that broke off, a
+provider that failed. A request the provider refused, or a server older than its client
+knows, would be the same the next time: those, and any other `LLMError`, are not."""
+
+
+class NotWrittenError(Exception):
+    """A title the model couldn't give for now: its server doesn't answer, failed or was
+    too busy, its answer broke off, or the title took longer than `WRITTEN_WITHIN_S`.
+    Worth another try, later: the worker lists the job with it, and `ASKED_AGAIN_AFTER`.
+
+    Its text holds the conversation's id and the kind of trouble, never a word of the
+    question, the title or the model's error: the queue writes its trace in the log when
+    the last try fails. It is raised without its cause, for the same reason."""
+
 
 def title_from(parts: list[Part]) -> str | None:
     """A title for a conversation, from its first question: its first line, cut at a
@@ -137,8 +173,9 @@ def on_its_way(conversation: Conversation, *, now: datetime) -> bool:
     Not before the first answer, nor where no model is named for titles: no model was
     asked. Not once the model's title is written, nor once a person named the
     conversation. And not after `ON_ITS_WAY_FOR`, whatever became of the job: one that
-    ended without a title is said to be on its way until then, since nothing records
-    that it ended.
+    ended without a title, or waits to ask the model again, is said to be on its way
+    until then, since nothing records that it did. A title that comes at a later try
+    isn't said to be on its way, and shows when the list is next read.
 
     Nor when the model was asked more than that long after `now`, as a clock that was
     set back makes it look: a page would otherwise look again for as long as the clock
@@ -219,10 +256,14 @@ async def write(
     written, so that a rename made while the model writes is kept, and of two runs at
     once, the second leaves the first one's title.
 
-    Nothing that goes wrong with the model fails the job: a model that fails, writes
-    nothing to make a title of, or takes longer than `WRITTEN_WITHIN_S` leaves the first
-    line, and the log says so, with the conversation's id. A cancellation is passed on,
-    as ever: it is how a stop cuts the job off, and the queue runs it again.
+    What goes wrong with the model leaves the first line, and the log says what, with the
+    conversation's id. When the model couldn't give a title for now, this then raises
+    `NotWrittenError`, and the queue runs the job again later, from its start: its server
+    doesn't answer, failed or was too busy, its answer broke off, or it took longer than
+    `WRITTEN_WITHIN_S`. When it won't give one, the job ends well, since it would be the
+    same the next time: it is missing from its server, the provider refused the request,
+    or it wrote nothing to make a title of. A cancellation is passed on, as ever: it is
+    how a stop cuts the job off, and the queue runs it again.
     """
     if catalog.titles is None:
         logger.warning(
@@ -290,8 +331,14 @@ async def _ask(
     now: datetime,
 ) -> str | None:
     """What the model wrote for a title: its text, never its reasoning. `None` when it
-    isn't ready, failed, or took longer than `WRITTEN_WITHIN_S`, and then the log says
-    which.
+    won't give one: it is missing from its server, or the provider refused the request.
+    Raises `NotWrittenError` when it couldn't for now: its server doesn't answer, it
+    failed in a way that may be gone at a later try (`_FOR_NOW`), or it took longer than
+    `WRITTEN_WITHIN_S`. Either way the log says which first.
+
+    A model's status is `unreachable` whenever its server didn't say whether it has the
+    model: when it doesn't answer, and also when it answers that question with an error,
+    whatever the error. The status doesn't say which, so each is asked again.
 
     The request is shaped as a turn's is, where the two meet: the same context window,
     since a local server reloads its model when that changes, and reasoning off, for a
@@ -309,6 +356,10 @@ async def _ask(
                 logger.warning(
                     "conversation %s: no title, its model is %s", conversation_id, status.state
                 )
+                if status.state == "unreachable":  # its server may answer at a later try
+                    raise NotWrittenError(
+                        f"conversation {conversation_id}: no title, its model is unreachable"
+                    )
                 return None
             request = ChatRequest(
                 model=offered.model,
@@ -324,17 +375,15 @@ async def _ask(
             ):
                 return await _text_of(events)
     except LLMError as error:
-        logger.warning(
-            "conversation %s: no title, its model failed (%s)",
-            conversation_id,
-            type(error).__name__,
-        )
+        said = f"no title, its model failed ({type(error).__name__})"
+        logger.warning("conversation %s: %s", conversation_id, said)
+        if isinstance(error, _FOR_NOW):
+            # Without its cause: the model's error may quote the question.
+            raise NotWrittenError(f"conversation {conversation_id}: {said}") from None
     except TimeoutError:
-        logger.warning(
-            "conversation %s: no title, its model took longer than %g s",
-            conversation_id,
-            WRITTEN_WITHIN_S,
-        )
+        said = f"no title, its model took longer than {WRITTEN_WITHIN_S:g} s"
+        logger.warning("conversation %s: %s", conversation_id, said)
+        raise NotWrittenError(f"conversation {conversation_id}: {said}") from None
     return None
 
 
