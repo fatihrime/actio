@@ -417,7 +417,7 @@
           "conversations"
         ],
         "summary": "List Conversations",
-        "description": "Your conversations, most recently active first, a page at a time.",
+        "description": "Your conversations, most recently active first, a page at a time. While a\nconversation's title is on its way, its `title_pending` says so.",
         "operationId": "list_conversations",
         "parameters": [
           {
@@ -1129,6 +1129,10 @@
             ],
             "title": "Title"
           },
+          "title_pending": {
+            "type": "boolean",
+            "title": "Title Pending"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -1173,6 +1177,7 @@
         "required": [
           "id",
           "title",
+          "title_pending",
           "created_at",
           "last_active_at",
           "current_leaf_id",
@@ -1199,6 +1204,10 @@
             ],
             "title": "Title"
           },
+          "title_pending": {
+            "type": "boolean",
+            "title": "Title Pending"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -1214,6 +1223,7 @@
         "required": [
           "id",
           "title",
+          "title_pending",
           "created_at",
           "last_active_at"
         ],

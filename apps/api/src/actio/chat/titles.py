@@ -11,6 +11,9 @@ Who named a conversation is on its row (`Conversation.title_by`): `question`, `m
 or `person`. Only `write` makes a `question` a `model`, and nothing writes over a
 `person`: a title someone chose stays.
 
+For a moment after a model was asked, a title is on its way (`on_its_way`). The list of
+conversations says so, and a page that reads it reads it again until it no longer does.
+
 A title costs the account nothing: nothing is held for it, and the usage ledger doesn't
 hear of it. It is one small call per conversation, bounded by `QUESTION_CHARS` and
 `TITLE_TOKENS`, and it comes only after a turn that passed the limits itself.
@@ -25,7 +28,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing, nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -65,6 +68,12 @@ below, a model wrote 2 to 13."""
 WRITTEN_WITHIN_S = 30.0
 """How long a title may take: the wait for the model's server, and the model's answer,
 together. Past it, the conversation keeps its first line."""
+
+ON_ITS_WAY_FOR = timedelta(seconds=15)
+"""How long after a model was asked for a title the title is said to be on its way, while
+none has come. A title took about half a second, measured (ADR 0025). One that takes
+longer, as behind a long answer at a server that writes one at a time, shows whenever
+the list is next read."""
 
 INSTRUCTIONS = (
     "Write a title for the conversation that starts with the message below: at most six "
@@ -118,6 +127,27 @@ def title_from(parts: list[Part]) -> str | None:
     if not first_line:
         return None
     return cut(first_line)
+
+
+def on_its_way(conversation: Conversation, *, now: datetime) -> bool:
+    """Whether the conversation's title is on its way: a model was asked for it less
+    than `ON_ITS_WAY_FOR` ago, and the conversation is still named after its first
+    question. So the list is worth reading again shortly.
+
+    Not before the first answer, nor where no model is named for titles: no model was
+    asked. Not once the model's title is written, nor once a person named the
+    conversation. And not after `ON_ITS_WAY_FOR`, whatever became of the job: one that
+    ended without a title is said to be on its way until then, since nothing records
+    that it ended.
+
+    Nor when the model was asked more than that long after `now`, as a clock that was
+    set back makes it look: a page would otherwise look again for as long as the clock
+    was set back."""
+    return (
+        conversation.title_by == "question"
+        and conversation.title_asked_at is not None
+        and abs(now - conversation.title_asked_at) < ON_ITS_WAY_FOR
+    )
 
 
 def cut(title: str) -> str:

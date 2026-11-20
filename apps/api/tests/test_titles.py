@@ -6,7 +6,8 @@ The first line a new conversation is named after is tested with the turns, throu
 API. Here the job is deferred as a turn defers it, and run as the worker runs it
 (`work_through`), or its handler alone when a test acts while the model writes: the
 model is a `ScriptedModel`, which a test can hold half-way. Every wait has a time limit,
-so that a broken job fails its test instead of hanging the run.
+so that a broken job fails its test instead of hanging the run. Whether a title is on its
+way is read where a page reads it, in the list, with the clock moved by the test.
 """
 
 import asyncio
@@ -16,6 +17,7 @@ from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import psycopg
 import pytest
 from sqlalchemy import select, text
@@ -1241,3 +1243,138 @@ async def test_inside_the_api_a_title_waits_behind_an_answer_at_its_server_and_c
     assert answering.closed.is_set()
     title, by, *_ = await named(db, earlier.conversation.id)
     assert (title, by) == ("Fixing a flat tyre", "model")
+
+
+# --- Whether the list says a title is on its way ---------------------------------------
+
+
+def pending(listed: httpx.Response) -> list[bool]:
+    """What a page of the list says of each conversation: whether its title is on its
+    way."""
+    return [item["title_pending"] for item in listed.json()["items"]]
+
+
+async def answered_once(browser: httpx.AsyncClient, conversation_id: uuid.UUID) -> None:
+    """Ask the conversation's first question, and read its whole answer."""
+    question = {"id": str(new_id()), "parts": [{"type": "text", "text": QUESTION}]}
+    answered = await browser.post(
+        f"/api/conversations/{conversation_id}/turns", json={"message": question}
+    )
+    assert answered.status_code == 200
+
+
+async def test_a_title_is_on_its_way_from_the_first_answer_for_fifteen_seconds(
+    offer: Any, start_app: Any, settings: Settings, migrated: str, clock: Any
+) -> None:
+    """Not while the first answer is being written: no model was asked yet. From the
+    moment it completed until fifteen seconds later, and not a moment longer, whatever
+    became of the job: here no worker runs it. The conversation says so too."""
+    hold = asyncio.Event()
+    model, catalog = offer(TextDelta("Take the wheel off first."), hold, DONE, titles="standard")
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    conversation_id = new_id()
+    asking = asyncio.create_task(answered_once(browser, conversation_id))
+    try:
+        await held(model)
+        while_written = pending(await browser.get("/api/conversations"))
+    finally:
+        hold.set()
+        await asyncio.wait_for(asking, PATIENCE_S)
+
+    at_once = pending(await browser.get("/api/conversations"))
+    opened = (await browser.get(f"/api/conversations/{conversation_id}")).json()
+    clock.now += titles.ON_ITS_WAY_FOR - timedelta(microseconds=1)
+    just_before = pending(await browser.get("/api/conversations"))
+    clock.advance(microseconds=1)
+    at_fifteen = pending(await browser.get("/api/conversations"))
+
+    assert timedelta(seconds=15) == titles.ON_ITS_WAY_FOR  # the API's description says 15
+    assert while_written == [False]
+    assert (at_once, opened["title_pending"]) == ([True], True)
+    assert just_before == [True]
+    assert at_fifteen == [False]
+    assert await queued(migrated) == asked_for(conversation_id)  # still there, never run
+
+
+@pytest.mark.usefixtures("migrated")
+async def test_a_clock_that_was_set_back_doesnt_keep_a_title_on_its_way(
+    offer: Any, start_app: Any, settings: Settings, clock: Any
+) -> None:
+    """The model was asked at a time that is still to come, by the clock as it is now.
+    The title is on its way while that time is less than fifteen seconds off, as it is
+    the other way round, and not for as long as the clock was set back: a page would
+    look again every second for all of that."""
+    _, catalog = offer(TextDelta("Take the wheel off first."), DONE, titles="standard")
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    await answered_once(browser, new_id())
+
+    clock.now -= titles.ON_ITS_WAY_FOR - timedelta(microseconds=1)
+    just_within = pending(await browser.get("/api/conversations"))
+    clock.now -= timedelta(microseconds=1)
+    fifteen_back = pending(await browser.get("/api/conversations"))
+    clock.now -= timedelta(hours=1)
+    an_hour_back = pending(await browser.get("/api/conversations"))
+
+    assert (just_within, fifteen_back, an_hour_back) == ([True], [False], [False])
+
+
+async def test_no_title_is_on_its_way_where_no_model_is_named_for_titles(
+    offer: Any, start_app: Any, settings: Settings, migrated: str
+) -> None:
+    assert migrated
+    _, catalog = offer(TextDelta("Take the wheel off first."), DONE)
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+
+    await answered_once(browser, new_id())
+
+    assert pending(await browser.get("/api/conversations")) == [False]
+
+
+async def test_no_title_is_on_its_way_once_the_model_wrote_it(
+    offer: Any,
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    clock: Any,
+    work_through: Any,
+) -> None:
+    """At once, well within the fifteen seconds."""
+    assert migrated
+    _, catalog = offer(TextDelta("Fixing a flat tyre"), DONE, titles="standard")
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    await answered_once(browser, new_id())
+    before = pending(await browser.get("/api/conversations"))
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    listed = (await browser.get("/api/conversations")).json()["items"]
+    assert before == [True]
+    assert [(item["title"], item["title_pending"]) for item in listed] == [
+        ("Fixing a flat tyre", False)
+    ]
+
+
+async def test_no_title_is_on_its_way_once_a_person_named_the_conversation(
+    offer: Any, start_app: Any, settings: Settings, migrated: str
+) -> None:
+    """The rename's own answer says so, and the list after it."""
+    assert migrated
+    _, catalog = offer(TextDelta("Take the wheel off first."), DONE, titles="standard")
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    conversation_id = new_id()
+    await answered_once(browser, conversation_id)
+    before = pending(await browser.get("/api/conversations"))
+
+    renamed = await browser.patch(
+        f"/api/conversations/{conversation_id}", json={"title": "Flat tyres"}
+    )
+
+    assert before == [True]
+    assert renamed.status_code == 200
+    assert (renamed.json()["title"], renamed.json()["title_pending"]) == ("Flat tyres", False)
+    assert pending(await browser.get("/api/conversations")) == [False]

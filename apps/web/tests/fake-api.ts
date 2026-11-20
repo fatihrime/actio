@@ -386,7 +386,8 @@ export function answer(
   };
 }
 
-/** A conversation as the list has it. */
+/** A conversation as the list has it. Its title is on its way only when `changes`
+ * says so (`title_pending`). */
 export function summary(
   id: string,
   title: string | null,
@@ -395,6 +396,7 @@ export function summary(
   return {
     id,
     title,
+    title_pending: false,
     created_at: MOMENT,
     last_active_at: MOMENT,
     ...changes,
@@ -418,6 +420,7 @@ export function conversation(
   return {
     id,
     title: null,
+    title_pending: false,
     created_at: MOMENT,
     last_active_at: MOMENT,
     current_leaf_id: messages.at(-1)?.id ?? null,

@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, StringConstraints
 from actio.api.body import Body
 from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now, Runner
 from actio.api.problems import Problem
-from actio.chat import conversations, tree, turns
+from actio.chat import conversations, titles, tree, turns
 from actio.chat.conversations import TITLE_MAX, Cursor
 from actio.chat.models import Conversation, Message, Role, Turn, TurnStatus
 from actio.chat.parts import Part, from_stored
@@ -45,15 +45,20 @@ class ConversationSummary(BaseModel):
     id: uuid.UUID
     title: str | None
     """Empty until the conversation is named."""
+    title_pending: bool
+    """Whether a model was asked for the conversation's title a moment ago, and none has
+    come yet: the list is worth reading again shortly. False again after 15 seconds at
+    most, whatever became of the title (`actio.chat.titles.on_its_way`)."""
     created_at: datetime
     last_active_at: datetime
     """When a message was last added. The list is ordered by it."""
 
     @classmethod
-    def of(cls, conversation: Conversation) -> "ConversationSummary":
+    def of(cls, conversation: Conversation, *, now: datetime) -> "ConversationSummary":
         return cls(
             id=conversation.id,
             title=conversation.title,
+            title_pending=titles.on_its_way(conversation, now=now),
             created_at=conversation.created_at,
             last_active_at=conversation.last_active_at,
         )
@@ -180,10 +185,12 @@ OwnConversation = Annotated[Conversation, Depends(get_own_conversation)]
 async def list_conversations(
     principal: CurrentPrincipal,
     db: Database,
+    now: Now,
     limit: Annotated[int, Query(ge=1, le=PAGE_MAX)] = PAGE_DEFAULT,
     cursor: Annotated[str | None, Query(max_length=200)] = None,
 ) -> ConversationList:
-    """Your conversations, most recently active first, a page at a time."""
+    """Your conversations, most recently active first, a page at a time. While a
+    conversation's title is on its way, its `title_pending` says so."""
     page, more = await conversations.list_page(
         db,
         user_id=principal.user_id,
@@ -191,7 +198,7 @@ async def list_conversations(
         after=_read_cursor(cursor) if cursor is not None else None,
     )
     return ConversationList(
-        items=[ConversationSummary.of(conversation) for conversation in page],
+        items=[ConversationSummary.of(conversation, now=now) for conversation in page],
         next_cursor=_write_cursor(more) if more is not None else None,
     )
 
@@ -206,12 +213,12 @@ async def get_conversation(
 
 @router.patch("/{conversation_id}", responses=NOT_YOURS)
 async def rename_conversation(
-    body: Rename, conversation: OwnConversation, db: Database
+    body: Rename, conversation: OwnConversation, db: Database, now: Now
 ) -> ConversationSummary:
     """Give the conversation a title. Its place in the list doesn't change."""
     conversations.rename(conversation, body.title)
     await db.commit()
-    return ConversationSummary.of(conversation)
+    return ConversationSummary.of(conversation, now=now)
 
 
 @router.put("/{conversation_id}/branch", responses=NO_SUCH)
@@ -263,6 +270,7 @@ async def _with_messages(
     return ConversationOut(
         id=conversation.id,
         title=conversation.title,
+        title_pending=titles.on_its_way(conversation, now=now),
         created_at=conversation.created_at,
         last_active_at=conversation.last_active_at,
         current_leaf_id=conversation.current_leaf_id,

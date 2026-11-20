@@ -196,12 +196,14 @@ async def test_the_list_shows_your_conversations_most_recently_active_first(
             {
                 "id": str(newer.id),
                 "title": None,
+                "title_pending": False,
                 "created_at": "2026-11-10T12:02:00Z",
                 "last_active_at": "2026-11-10T12:02:00Z",
             },
             {
                 "id": str(older.id),
                 "title": "Flat tyre",
+                "title_pending": False,
                 "created_at": "2026-11-10T12:01:00Z",
                 "last_active_at": "2026-11-10T12:01:00Z",
             },
@@ -285,6 +287,7 @@ async def test_a_conversation_comes_with_the_branch_that_is_shown(
     assert response.json() == {
         "id": str(c.id),
         "title": "Sky",
+        "title_pending": False,
         "created_at": "2026-11-10T12:00:00Z",
         "last_active_at": "2026-11-10T12:02:00Z",
         "current_leaf_id": str(answer.id),
@@ -355,6 +358,7 @@ async def test_renaming_a_conversation(api: httpx.AsyncClient, db: AsyncSession)
     assert response.json() == {
         "id": str(older.id),
         "title": "Flat tyre",
+        "title_pending": False,
         "created_at": "2026-11-10T12:01:00Z",
         "last_active_at": "2026-11-10T12:01:00Z",
     }

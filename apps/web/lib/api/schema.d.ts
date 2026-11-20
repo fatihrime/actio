@@ -199,7 +199,8 @@ export interface paths {
         };
         /**
          * List Conversations
-         * @description Your conversations, most recently active first, a page at a time.
+         * @description Your conversations, most recently active first, a page at a time. While a
+         *     conversation's title is on its way, its `title_pending` says so.
          */
         get: operations["list_conversations"];
         put?: never;
@@ -398,6 +399,8 @@ export interface components {
             id: string;
             /** Title */
             title: string | null;
+            /** Title Pending */
+            title_pending: boolean;
             /**
              * Created At
              * Format: date-time
@@ -423,6 +426,8 @@ export interface components {
             id: string;
             /** Title */
             title: string | null;
+            /** Title Pending */
+            title_pending: boolean;
             /**
              * Created At
              * Format: date-time
