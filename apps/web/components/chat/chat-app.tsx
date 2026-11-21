@@ -31,10 +31,22 @@ import { useUsage } from "@/lib/usage";
 import type { UsageLimits } from "@/lib/usage";
 
 import { Chat } from "./chat";
+import { fetchRenderer, useRenderer } from "./message";
 
 /** How often to ask again while the model can't answer, to notice when it can. */
 const UNREADY_POLL_MS = 5000;
 const LIST_HIDDEN_KEY = "actio.conversations.hidden";
+
+/** How long a conversation that has been read waits for the code that shows its
+ * answers as markdown, before it is shown as written, to become markdown once the code
+ * is here (ADR 0016, revision of 2026-11-21). On a slow connection (1.6 Mbit/s) the
+ * code takes 1.7 to 2.4 seconds: a shorter wait would show the marks there. A download
+ * that stalls must not hide a conversation the page already has. */
+export const RENDERER_WAIT_MS = 3000;
+
+/** How often, at the most, a wait goes without looking at the clock. A test moves the
+ * clock (tests/clock.ts), and the page notices when it next looks. */
+const CLOCK_LOOK_MS = 1000;
 
 const HEADER_BUTTON =
   "flex items-center gap-1.5 rounded-lg border border-input px-2.5 py-1.5 text-sm font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
@@ -93,6 +105,17 @@ export function ChatApp() {
   useEffect(() => {
     document.title = TITLES[place.kind];
   }, [place.kind]);
+
+  // The code that shows answers as markdown is fetched ahead, so that an answer is
+  // never shown first as the marks it was written in. Not before the page knows whose
+  // session it has: the first paint, and the request for the session, don't wait
+  // behind it.
+  const known = me !== undefined;
+  useEffect(() => {
+    if (known) {
+      fetchRenderer();
+    }
+  }, [known]);
 
   // In a wide window the list stands beside the chat, unless it was put away. In a
   // narrow one it lies over the chat while it is wanted, and is away otherwise.
@@ -383,8 +406,16 @@ function StoredChat({
   onStartOver: () => void;
 }) {
   const loaded = useStored(id);
+  // Its answers wait for the code that shows them as markdown, which is on its way by
+  // now. Shown as written first, they would be swapped for markdown a moment later, and
+  // the page would jump. But not for long: past the wait, they are shown as written.
+  const renderer = useRenderer();
+  const held =
+    loaded.state === "ready" &&
+    (renderer === null || renderer.state === "fetching");
+  const heldTooLong = useWaitedOut(held, RENDERER_WAIT_MS);
 
-  if (loaded.state === "loading") {
+  if (loaded.state === "loading" || (held && !heldTooLong)) {
     return (
       <p
         className="px-4 py-10 text-center text-sm text-muted-foreground"
@@ -476,6 +507,32 @@ function useStored(id: string): Stored {
       setAttempt(attempt + 1);
     },
   };
+}
+
+/** Whether `waiting` has been true for `ms` milliseconds, by the clock. Once it has,
+ * this stays true. */
+function useWaitedOut(waiting: boolean, ms: number): boolean {
+  const [over, setOver] = useState(false);
+  useEffect(() => {
+    if (!waiting) {
+      return;
+    }
+    const until = Date.now() + ms;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    function look() {
+      const left = until - Date.now();
+      if (left <= 0) {
+        setOver(true);
+      } else {
+        timer = setTimeout(look, Math.min(left, CLOCK_LOOK_MS));
+      }
+    }
+    timer = setTimeout(look, Math.min(ms, CLOCK_LOOK_MS));
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [waiting, ms]);
+  return over;
 }
 
 /** The models on offer, with whether each can answer right now. Nothing until the API

@@ -1,13 +1,68 @@
-import { lazy, Suspense } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 import type { ChatMessage } from "@/lib/chat/messages";
 
-// What turns markdown into headings, tables, code and formulas is large. It is fetched
-// when the first answer is shown. Until it is there, and if it can't be fetched (the
-// installation was upgraded under an open page), an answer is shown as it was written.
-const Markdown = lazy(() =>
-  import("./markdown").catch(() => ({ default: AsWritten })),
-);
+// Its type alone: the code comes apart from the page, below.
+import type Markdown from "./markdown";
+
+// What turns markdown into headings, tables, code and formulas is large, so it is a
+// piece apart from the page: the renderer. A page fetches it once, as soon as it knows
+// whose session it has (`fetchRenderer`, called by ChatApp), or when an answer is shown
+// before that. Once it is here, an answer is shown as markdown from its first render.
+// Until then, and for good if it can't be fetched (the installation was upgraded under
+// an open page), an answer is shown as it was written (ADR 0016, revision of
+// 2026-11-21).
+
+/** Where this page's renderer stands: on its way, here, or not to be had. Nothing
+ * while nobody has asked for it, and on the server. */
+type Renderer =
+  | { state: "fetching" }
+  | { state: "here"; Markdown: typeof Markdown }
+  | { state: "gone" };
+
+let fetched: Renderer | null = null;
+const listeners = new Set<() => void>();
+
+function become(now: Renderer): void {
+  fetched = now;
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+/** Ask for the renderer, unless this page has already: whatever asks first fetches
+ * it, and nothing asks twice. */
+export function fetchRenderer(): void {
+  if (fetched !== null) {
+    return;
+  }
+  become({ state: "fetching" });
+  void import("./markdown").then(
+    (module) => {
+      become({ state: "here", Markdown: module.default });
+    },
+    () => {
+      become({ state: "gone" });
+    },
+  );
+}
+
+function listen(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/** The renderer as it stands, asked for if nobody has yet. */
+export function useRenderer(): Renderer | null {
+  useEffect(fetchRenderer, []);
+  return useSyncExternalStore(
+    listen,
+    () => fetched,
+    () => null,
+  );
+}
 
 /** One message of a conversation: a question, or a model's answer. */
 export function Message({
@@ -49,7 +104,7 @@ export function Message({
   );
 }
 
-/** A model's words, as markdown. */
+/** A model's words, as markdown once the renderer is here, and as written until then. */
 function Words({
   text,
   writing,
@@ -59,10 +114,11 @@ function Words({
   writing: boolean;
   className?: string;
 }) {
-  return (
-    <Suspense fallback={<AsWritten text={text} className={className} />}>
-      <Markdown text={text} writing={writing} className={className} />
-    </Suspense>
+  const renderer = useRenderer();
+  return renderer?.state === "here" ? (
+    <renderer.Markdown text={text} writing={writing} className={className} />
+  ) : (
+    <AsWritten text={text} className={className} />
   );
 }
 
