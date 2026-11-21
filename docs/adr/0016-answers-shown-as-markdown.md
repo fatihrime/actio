@@ -206,3 +206,102 @@ The second, with a stored conversation held until the renderer has come, and not
 - **The page's first paint is where it was,** which fetching at the moment the page mounts had not managed. The renderer is run when it arrives, so the page is busy with it once, right after its start, and no longer in the middle of the first answer, whose longest stretch on that visit went from 126 ms to 83 ms.
 - **On the slow connection, with nothing in the browser's cache,** a stored conversation opened by its address is on the page 4.1 s after the address was opened, as markdown. Before, its raw text was there after 2.25 s, and was swapped at 4.07 s. So there the reader waits about 1.8 s longer for something to read, and sees no swap. Asking for the renderer at once when the address names a conversation was tried too: 3.9 s, not worth a second rule. A browser that has the renderer in its cache doesn't wait.
 - **A long conversation opened by its address is now drawn in one piece,** as one opened from the list always was: 300 exchanges keep the page busy for 0.33 s at a stretch, where showing them as written first had kept it under 0.1 s (1.4 s and 0.3 s at a quarter of the CPU's speed). What remains of the layout shift when the page loads, 0.19, is the header and the list arriving with the session. Neither is this revision's subject: both are steps of their own.
+
+### 2026-11-21: code is coloured in a worker
+
+#### Context
+
+`components/chat/markdown.tsx` gave Streamdown the code plugin of `@streamdown/code` 2.0.0. That plugin runs Shiki on the page's own thread, with Shiki's regular-expression engine written in JavaScript (`createJavaScriptRegexEngine({ forgiving: true })`), and has no option to do otherwise. The first block of a language after a page load makes the page stand still, while that grammar's patterns are turned into the browser's regular expressions and first used.
+
+Measured on 2026-11-21, on production builds of the code before this revision, in Playwright's builds of Chromium 158, Firefox 159 and WebKit 27.2:
+
+- **A first block of TypeScript, alone on a page** (30 lines): the page stood still 1.48 s in WebKit, 0.12 s in Chromium and 0.20 s in Firefox. Of WebKit's 1.46 s, 0.6 s was making 208 patterns, and the rest was matching with them. JavaScript, JSX and TSX are the same in WebKit (1.5 s), CSS takes 0.46 s and C++ 0.41 s. The fourteen other languages tried stay under 0.14 s.
+- **In the app, an answer streamed at 150 words a second:** the first block of TypeScript gave WebKit frames of 786 and 631 ms, and its colours came 1.4 s after its code. The first block of C++ gave one frame of 433 ms in Chromium, frames of 576 and 283 ms in Firefox, and one of 329 ms in WebKit. CSS: 289 ms in WebKit.
+- **A stored conversation with code in eight languages, opened by its address:** a longest frame of 633 to 700 ms in Chromium, 921 ms in Firefox, and 2,196 to 2,650 ms in WebKit. All of it was coloured after 1.5 s, 1.9 s and 3.25 s.
+
+#### Options considered
+
+Each was measured on a page of its own, then in a throwaway build of the app, in the three browsers:
+
+1. **Shiki's WebAssembly engine (Oniguruma), on the page's thread.**
+    - Pro: a first block of TypeScript stops the page 0.15 s in WebKit, ten times less than before, 0.12 s in Chromium and 0.16 s in Firefox.
+    - Con: it still stops the page, and about four times as long on a slow phone.
+2. **Today's engine, written in JavaScript, in a Web Worker.**
+    - Pro: the page never stops.
+    - Con: in WebKit the colours come 1.5 s after the code.
+3. **The WebAssembly engine in a Web Worker.**
+    - Pro: the page never stops, in any of the three. The colours come 0.18 to 0.22 s after the code for the first block of a page, and within a frame after that.
+    - Con: a worker to start, and a plugin of the project's own to ask it.
+4. **Grammars compiled beforehand, with Shiki's raw engine.** Not built.
+    - Pro: none of the 0.6 s of making patterns.
+    - Con: that is all it saves: WebKit's 0.85 s of matching stays. And it is a new dependency.
+
+#### Decision
+
+The third.
+
+- **Dependencies.** `@streamdown/code` is gone. `shiki` is a direct dependency, pinned to exactly 4.6.0, the version the lock file already had (MIT). No package's version changed in the lock file.
+- **One module runs Shiki, and only in the worker:** `lib/chat/colouring.ts`. It has one highlighter for the worker's life, with the WebAssembly engine (`createOnigurumaEngine(import("shiki/wasm"))`), the two themes Streamdown asks for, and each language loaded the first time it is asked for. A load that fails, the engine's or a language's, is forgotten, so the next block that needs it asks again, three times in all: what the network dropped once may be there the next time, and a file that is gone, as one of an older version of the app under a page that stayed open, is not asked for at every piece of code that arrives. A language is found by its name or one of its aliases. One that Shiki doesn't know is coloured as plain text, never an error.
+    - **Code that is arriving is coloured line by line,** not from its start each time. For the last four pieces of code in each language, the module keeps the rows of their whole lines and the grammar's state after them, and goes on from there when the next piece begins with that text.
+    - **Only the rows the page doesn't have are sent.** The question says how much of the code, from its start, the page has rows for. The answer says how many rows to keep, those of the whole lines in that much, and carries the rows after them. Sending every row each time cost 19% more of the page thread's script time for a block of 300 lines (5.83 s against 4.89 s), and more for a longer one.
+- **The worker** (`lib/chat/colouring.worker.ts`) takes a question with an id, and answers with that id and the rows, or with that id and an error.
+- **The plugin the page gives Streamdown** (`lib/chat/code-colours.ts`) imports nothing of Shiki, only Streamdown's types. It starts the worker at its first call, so a page that shows no code starts none. It does so with `new Worker(new URL("./colouring.worker.ts", import.meta.url), { type: "module" })`, the form that Next.js 16.4.5's Turbopack bundles, in the production image and under `next dev`. A complete block's result is remembered, 2,000 rows in all, the one used longest ago going first, and given back at once when the same code is asked about again in the same language and themes.
+- **`components/chat/markdown.tsx` gives Streamdown that plugin,** in place of `@streamdown/code`'s.
+- **A static check holds the split** (`apps/web/eslint.config.mjs`): ESLint's `no-restricted-imports` forbids importing `shiki` anywhere in the web app but in `lib/chat/colouring.ts` and its test, and `no-restricted-syntax` forbids `import("shiki")` there too, which the first rule doesn't look at. One import of Shiki from a file of the page would bring the stall back, and no test would fail.
+
+**How Streamdown takes an answer that comes later** (read in its source, version 2.7.1): a block of code calls the plugin's `highlight` at each change of its code. It shows what the call gives back at once. When that is nothing, what it showed stays, until the call's callback is called, and a callback does nothing once the block's code has changed again. So giving back nothing hands the block's text to an answer, which may come late, or never. Two consequences, both measured:
+
+- **A plugin that answers later lets the text wait.** While a block has no answer, it shows its code as it was when the block appeared: with a worker that was still loading, the code stood still for 0.16 to 0.22 s at a page's first block.
+- **Code that changes faster than the answers come is never coloured,** since each answer belongs to a call that is no longer the newest. Seen in WebKit: a whole answer stayed plain for a second.
+
+What handles both is one rule. **A call gives back nothing only for code that is still arriving, when the page has colours for it and the worker has answered everything it was asked in that language and themes.** A complete block's call never gives back nothing: a block is asked about once more when it is complete and never again, so an answer that didn't come would leave its last text away. "Has colours" is a result of the worker, for code that this code begins with, in its language and themes, and not one for no code at all, as when a block has just opened. Then the answer comes in a moment, and what is shown stays until then, where plain code in its place would flicker at each piece that arrives. **Otherwise the call gives its code back at once, with the colours the page has:** the rows of that result's whole lines; then the line that was arriving, as that result's row followed by a plain piece for what the line has gained since; then each further line plain. With no such result, all of it is plain, in the shape Streamdown uses for its own. So the whole text is always there, and at most its newest characters have no colours yet. A block whose answers come late is coloured by its next call, from the answers that came, and its last call's own answer is always taken.
+
+**An answer goes to its own call alone.** It updates the result the page holds for its language and themes, and a complete block's is remembered. Handing an answer about code that was arriving to the newest call as well was built first: on a page's first block, the code on the page then lost text for a frame when the first colours came, 7 characters in WebKit, 26 in Chromium and 94 in Firefox, since the answer was about less code than the block had been given plain. And a call that had given back nothing kept its block's older text for good if the worker stopped answering without an error.
+
+**Without a worker, code stays readable.** In a browser without workers, such as the simulated one of the component tests, when the worker can't be started, when it reports an error, and when it has left 10,000 questions unanswered (`QUESTIONS_OUT_AT_MOST`), every call from then on gets its code back plain, and every call that waited is given its code plain, so that no block is left showing older text. There is no clock: a page asks about each block of code it shows before the worker can answer any, and a long conversation can show a thousand, while code that arrives asks a few dozen times ahead at the most. An answer that is an error does the same for its own call. Nothing reaches Streamdown as an exception, and the console is told once, not once a block. The plugin's two other methods, which Streamdown never calls, say yes to every language and list none: answering them truly would bring Shiki's list of languages to the page.
+
+**Tests:**
+
+- the worker's side, with the real Shiki and its WebAssembly engine (`lib/chat/colouring.test.ts`, which runs in Node: the simulated page's `Blob` can't unpack the engine):
+    - TypeScript is coloured for both themes; a language by its alias as by its name, and one Shiki doesn't know as plain text;
+    - code asked about piece by piece, cut at every line break, in the middle of every line, and with lines that end in `\r\n`, is coloured exactly as the whole is; an answer leaves out exactly the rows the page has;
+    - with Shiki wrapped: the highlighter's engine is the WebAssembly one; code that arrives is coloured from where it had got, each whole line once; only the last four pieces of a language are kept; a language, or the highlighter, that couldn't be loaded once is loaded for the next block; and one that keeps failing is asked for three times in all;
+- the worker's entry, with a stand-in for its scope (`lib/chat/colouring.worker.test.ts`): each question is answered under its own id, with the colours or with what went wrong;
+- the page's side, with a stand-in for the worker that each test answers by hand (`lib/chat/code-colours.test.ts`): each rule above, with the plain rows' shape asserted as an object. Among them, a page's first block asked about seven times while the answers come late and then in a burst: whatever a call is given, at once or later, holds the whole of its code. And two thousand blocks asked about in one go, as a long conversation does, leave the worker at work;
+- through the page, in the simulated browser (`components/chat/markdown.test.tsx`): code that arrives in pieces shows each piece as it comes;
+- end to end, in a real browser (`e2e/code.spec.ts`): no worker until the first block of code, then one, also after a block in a second language; and a stored conversation with code in TypeScript, CSS, C++ and Python is coloured after a reload, by one worker.
+
+No test asserts how long anything takes. What holds "the page's thread doesn't run Shiki" is the worker in the end-to-end tests, the ESLint rule, and the tests of the page's side.
+
+#### Measured
+
+After, on a production build of this change, in the same three browsers:
+
+- **No frame over 35 ms** while a first block of Python, TypeScript, CSS, C++ or JSX arrives, in any of them.
+- **The code on the page grows with every frame,** also while the worker is still loading for a page's first block, and never loses text again. Its colours come 0.12 to 0.18 s after it for the first block of a page, 0.02 to 0.08 s for the first block of a further language, and within a frame after that.
+- **The stored conversation in eight languages** opens with a longest frame of 33 ms in Chromium, 33 to 60 ms in Firefox and 63 to 67 ms in WebKit, which is the page drawing the conversation, not colouring it. All of it is coloured after 1.0 to 1.2 s.
+- **A block of 300 lines streams at the cost it had:** 4.51 s of script time on the page's thread, against 4.89 s, and no frame over 35 ms.
+- **Blocks of code look as they did:** pictures of three blocks, in the light theme and the dark, are the same before and after, pixel for pixel.
+- **It works under `next dev` too.**
+- **When the worker's script can't be fetched,** code is shown whole and plain, the console is warned once, and the page reports no error.
+- **When a language's file can't be fetched:** Turbopack's own loader asks for a file twice, so one refusal is never noticed. Refused twice, that block is plain, with one warning, and the next block in the language asks again and is coloured. Refused every time, the requests end with the third try. Seen in Chromium and WebKit.
+
+#### Consequences
+
+- **What is fetched,** over the wire, in Chromium, on a production build: the page, with the markdown code fetched ahead, 478 kB of script where it was 537 kB, since Shiki has left it (the markdown code alone is 241 kB where it was 300 kB); the first block of code 236 kB where it was 23 kB, of which the WebAssembly engine is 156 kB, once per browser cache.
+- **The first block of a page gets its colours 0.12 to 0.18 s after its code.** Where the engine written in JavaScript didn't stall, that was 0.02 to 0.13 s. The code is plain and readable meanwhile, and nothing moves when the colours come.
+- **A worker that stops answering without an error leaves one call's text waiting, until the block's next call:** the page can't tell that the question it gave back nothing for will never be answered. The next call shows the whole code, with the colours there are, and a block's last call, the one of the complete block, never gives back nothing. So no text stays away; the colours do, until the worker is done without, at 10,000 questions out.
+- **The page holds one result for each language.** When a block of a language is coloured while another block of that language is still arriving, the arriving one can be plain for a moment. It never lacks text.
+- **A Content-Security-Policy, once there is one** (see "Not done yet"), has to allow the worker (`worker-src 'self'`) and WebAssembly (`'wasm-unsafe-eval'` in `script-src`).
+- **`shiki` is pinned to an exact version, as `ai` is:** its rows are what Streamdown draws, so an upgrade is a change to check with the tests of the worker's side, not to drift into.
+- **An upgrade of Streamdown is a check of its own.** With `@streamdown/code` went the one place where Streamdown's own code plugin would have followed its upgrades. The shape of the plain rows, and the two calls the plugin answers, are Streamdown's, read from its source. What would notice a change:
+    - the test through the page (code that arrives in pieces), if Streamdown stopped asking at each change of the code, or showing at once what it is given;
+    - the end-to-end tests, `e2e/code.spec.ts` and the coloured code of `e2e/answers.spec.ts`, if it stopped asking the plugin, or drawing the rows it is given.
+
+    The page's side's test holds the plain rows' shape as it was copied, not as Streamdown has it: whether the two still agree is read in Streamdown's source at an upgrade.
+
+**What no longer holds:** under "Consequences", "only `components/chat/markdown.tsx` knows the library": the plugin in `lib/chat/code-colours.ts` knows Streamdown's types, and how it shows code. A block of code still fetches its language, into the worker now, and the first one fetches the worker and its engine too, which the table under "Measured" of 2026-11-14 doesn't count.
+
+#### Why now, and not at the start
+
+At the start, on 2026-11-14, the answers were measured in a headless Chromium alone, with a block of Python, and the library's own plugin was the one to take. In Chromium the stall is short: 0.12 s for a first block of TypeScript. It is WebKit's, ten times as long there, and longest at the languages with the largest grammars. The performance runs of 2026-11-20 were the first in all three browsers, and found it.
