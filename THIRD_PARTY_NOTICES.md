@@ -2,7 +2,7 @@
 
 Actio's own code is [MIT-licensed](LICENSE). Its dependencies are declared in the `pyproject.toml` files and `uv.lock` (Python), and in the `package.json` files and `pnpm-lock.yaml` (JavaScript). They are installed from the package registries: none of their code is copied into this repository.
 
-This file records what Actio's three container images ship: the API's, the web app's, and the proxy's. The API image was checked on 2026-11-11, on 2026-11-14 for the one package it gained since (`tzdata`), and on 2026-11-18 for the seven that came with the job queue; the web image on 2026-11-14; the proxy image on 2026-11-18. Each check read the installed packages' own metadata, inside the built image.
+This file records what Actio's three container images ship: the API's, the web app's, and the proxy's. The API image was checked on 2026-11-11, on 2026-11-14 for the one package it gained since (`tzdata`), and on 2026-11-18 for the seven that came with the job queue; the web image on 2026-11-14, and on 2026-11-21 for the one package it lost (`@streamdown/code`, whose work a plugin written here does, with Shiki, which the image had already); the proxy image on 2026-11-18. Each check read the installed packages' own metadata, inside the built image.
 
 ## Components under the LGPL
 
@@ -43,7 +43,7 @@ Actio allows LGPL libraries that are used unmodified, as separate libraries ([AD
 |---|---|
 | MIT | 260, including Next.js, React, Shiki, KaTeX and Mermaid |
 | ISC | 41, most of them D3's |
-| Apache-2.0 | 19, including the AI SDK (`ai`, `@ai-sdk/react`) and Streamdown |
+| Apache-2.0 | 18, including the AI SDK (`ai`, `@ai-sdk/react`) and Streamdown |
 | BSD-3-Clause | 7 |
 | BSD-2-Clause | `entities` |
 | 0BSD | `tslib` |
