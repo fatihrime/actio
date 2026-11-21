@@ -88,6 +88,39 @@ function conversation(height: number) {
   };
 }
 
+test("the page is laid out before its sizes are watched", () => {
+  // Safari's engine reports an error of the page at every page load otherwise: it
+  // tells a new observer the sizes from before the layout, and then finds them changed
+  // (ADR 0015). The simulated page lays nothing out, so this holds the order alone;
+  // what the browser makes of it is measured in that engine.
+  const order: string[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe(watched: Element) {
+        order.push(`watch ${watched.getAttribute("data-testid") ?? "content"}`);
+      }
+      disconnect() {
+        // Nothing to let go of.
+      }
+    },
+  );
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+    function (this: HTMLElement) {
+      order.push(`lay out ${this.getAttribute("data-testid") ?? "content"}`);
+      return new DOMRect();
+    },
+  );
+
+  render(<Page />);
+
+  expect(order).toEqual([
+    "lay out scroller",
+    "watch content",
+    "watch scroller",
+  ]);
+});
+
 test("the end stays in view while an answer grows", () => {
   const page = conversation(400);
 

@@ -75,6 +75,14 @@ export function useFollow(): {
 
     scrolling.addEventListener("scroll", scrolled, { passive: true });
     const sizes = new ResizeObserver(resized);
+    // The page is laid out before its sizes are watched. Safari's engine tells a new
+    // observer first what size each element had before it was laid out, nothing by
+    // nothing, when the elements came onto the page in that same frame, as they do when
+    // the page starts. It then lays them out, finds the scroller changed after it was
+    // told of it, and reports "ResizeObserver loop completed with undelivered
+    // notifications" as an error of the page: at every page load (ADR 0015, revision
+    // "the page is laid out before its sizes are watched").
+    scrolling.getBoundingClientRect();
     // What is shown grows; the room for it shrinks when the box to write in grows.
     sizes.observe(growing);
     sizes.observe(scrolling);
