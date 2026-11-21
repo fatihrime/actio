@@ -1,4 +1,4 @@
-import { Component, useEffect, useSyncExternalStore } from "react";
+import { Component, memo, useEffect, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 
 import type { ChatMessage } from "@/lib/chat/messages";
@@ -66,8 +66,13 @@ export function useRenderer(): Renderer | null {
   );
 }
 
-/** One message of a conversation: a question, or a model's answer. */
-export function Message({
+/** One message of a conversation: a question, or a model's answer.
+ *
+ * Drawn again only when its message or `writing` changed (`memo`): not at each step of
+ * a long conversation coming onto the page, each key pressed in the box, or each piece
+ * of an answer arriving below it. So nothing that is made anew at every render may be
+ * passed to it. */
+export const Message = memo(function Message({
   message,
   writing = false,
 }: {
@@ -104,7 +109,7 @@ export function Message({
       {writing && shown.length === 0 && <Waiting />}
     </article>
   );
-}
+});
 
 /** A model's words, as markdown once the renderer is here, and as written until then,
  * or when they can't be drawn. */

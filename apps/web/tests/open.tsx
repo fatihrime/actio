@@ -3,7 +3,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { UserEvent } from "@testing-library/user-event";
-import { StrictMode } from "react";
+import { StrictMode, Suspense } from "react";
 import type { ReactElement } from "react";
 import { SWRConfig } from "swr";
 import { vi } from "vitest";
@@ -20,15 +20,32 @@ export function app(): ReactElement {
   );
 }
 
+/** What stands in the page's place when something on it waits outside a transition,
+ * under `open(path, { suspense: true })`. */
+export const SUSPENDED = "The page is waiting.";
+
 /** Open the app at `path`, and hand back the person who uses it. Set up the fake API
  * first (./fake-api.ts): the page asks it at once.
  *
  * `strict` renders it in React's StrictMode, as Next.js does in development
  * (`make dev`): each component's effects are run, undone and run again when it
- * appears. */
-export function open(path = "/", { strict = false } = {}): UserEvent {
+ * appears.
+ *
+ * `suspense` renders it inside a Suspense boundary. When something on the page waits
+ * for a promise (`use`), the boundary puts `SUSPENDED` in the page's place, unless the
+ * update that drew it was a transition: React then leaves the page as it was until
+ * the promise is kept. Without a boundary, it leaves the page as it was either way. */
+export function open(
+  path = "/",
+  { strict = false, suspense = false } = {},
+): UserEvent {
   window.history.replaceState(null, "", path);
-  render(strict ? <StrictMode>{app()}</StrictMode> : app());
+  const page = suspense ? (
+    <Suspense fallback={<p>{SUSPENDED}</p>}>{app()}</Suspense>
+  ) : (
+    app()
+  );
+  render(strict ? <StrictMode>{page}</StrictMode> : page);
   return userEvent.setup();
 }
 

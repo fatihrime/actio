@@ -2,6 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import {
+  startTransition,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -9,6 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 
 import { Notice, NoticeButton } from "@/components/notice";
 import { LimitReached, UsagePassed } from "@/components/usage/limit";
@@ -39,6 +41,31 @@ const THINKING_KEY = "actio.thinking";
 /** How often to look whether an answer that is being written, and that this page
  * couldn't read along with, is done. */
 const ELSEWHERE_MS = 1500;
+
+// A stored conversation is drawn newest first: this many of its newest messages at
+// once, and then its older ones out of sight, this many at a step, the newest of them
+// first, to be shown a step at a time while the reader is still (ADR 0015, revision
+// "a long conversation opens newest first"). Measured on 2026-11-21 in Chromium,
+// Firefox and WebKit, with conversations of 100 and 300 exchanges: steps of 10, each a
+// transition, made no frame shorter than steps of 20 and took as long in all. Plain
+// steps, in Chromium at a quarter of the CPU's speed and 300 exchanges, left frames
+// over 50 ms where transitions left none: 4 for steps of 10, 24 for steps of 20, and
+// 15 over 100 ms for steps of 40. And 20 fills a screen even with messages of one
+// line, which 10 may not.
+const DRAWN_FIRST = 20;
+const DRAWN_EACH_STEP = 20;
+
+/** Where each step of a stored conversation of `count` messages begins, oldest first:
+ * its newest `DRAWN_FIRST`, then each `DRAWN_EACH_STEP` before them. */
+function stepsOf(count: number): number[] {
+  let start = Math.max(0, count - DRAWN_FIRST);
+  const starts = [start];
+  while (start > 0) {
+    start = Math.max(0, start - DRAWN_EACH_STEP);
+    starts.unshift(start);
+  }
+  return starts;
+}
 
 /** A turn that is being written, and that this page isn't reading: it tries once to
  * read along with it. */
@@ -126,6 +153,20 @@ export function Chat({
   const [initial] = useState(() =>
     stored === null ? [] : fromStored(stored.messages),
   );
+  // A long conversation comes onto the page newest first, and its older messages
+  // behind (below), in the steps it came in (`steps`). Only what it had when it came
+  // is held back. Whatever comes after, a question, an answer, what the server has
+  // beyond that when the conversation is read again, is drawn and shown as it comes.
+  // Only the drawing and the showing start later: everything else reads all the
+  // messages.
+  const steps = useMemo(() => stepsOf(initial.length), [initial]);
+  // How many of the conversation's oldest messages aren't drawn yet.
+  const [held, setHeld] = useState(() =>
+    Math.max(0, initial.length - DRAWN_FIRST),
+  );
+  // The first message that is shown: those from `held` up to it are drawn, out of
+  // sight.
+  const [shown, setShown] = useState(held);
   // When the conversation ends with a question: the last turn that tried to answer
   // it, as the server reports it. Nothing once the library has read an answer: what
   // it read says how its turn stands, until the server is asked again.
@@ -159,8 +200,55 @@ export function Chat({
   // What the library's last error put on the page, until the reading it ended is
   // over (`onFinish`).
   const reported = useRef<unknown>(null);
-  const { scroller, content, away, follow } = useFollow();
+  const { scroller, content, away, follow, untilStill, standing, addedAbove } =
+    useFollow();
   const box = useRef<HTMLTextAreaElement>(null);
+
+  // The older messages are drawn in steps, each once the one before it is on the
+  // page, out of sight. A step is a transition: React draws it in slices, between which
+  // the page takes the reader's input and draws its frames. What is out of sight
+  // changes nothing the reader sees or scrolls, so drawing doesn't wait for them. The
+  // next count is worked out from the one on the page, so that React running this
+  // twice on purpose (StrictMode) takes one step, not two.
+  useEffect(() => {
+    if (held === 0) {
+      return;
+    }
+    startTransition(() => {
+      setHeld(Math.max(0, held - DRAWN_EACH_STEP));
+    });
+  }, [held]);
+
+  // What is drawn is shown a step at a time, the newest first, each in a task of its
+  // own, and only while the reader is still. A browser scrolls on a thread of its own,
+  // and in Firefox and WebKit a change above the reader overrides a scroll that is
+  // under way. Waiting, then asking where the reader stands, showing the step and
+  // putting them back where they were are one task, so that nothing of the reader's
+  // comes in between.
+  useEffect(() => {
+    if (shown <= held) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const show = () => {
+      const wait = untilStill();
+      if (wait > 0) {
+        timer = setTimeout(show, wait);
+        return;
+      }
+      const before = standing();
+      flushSync(() => {
+        setShown(Math.max(held, shown - DRAWN_EACH_STEP));
+      });
+      if (before !== null) {
+        addedAbove(before);
+      }
+    };
+    timer = setTimeout(show, 0);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [shown, held, untilStill, standing, addedAbove]);
 
   const transport = useMemo(() => turnTransport(id), [id]);
   const {
@@ -296,6 +384,13 @@ export function Chat({
       setMessages(
         conversation === null ? [] : fromStored(conversation.messages),
       );
+      if (conversation === null) {
+        // The conversation is gone, and with it whatever of it was still to be drawn
+        // or shown. A question asked now is the first message of a new one, at the
+        // place in the list where a step was held back: it must be shown as it comes.
+        setHeld(0);
+        setShown(0);
+      }
       const unanswered = conversation?.unanswered ?? null;
       setOpen(unanswered);
       setJoin((tried) => joinFor(unanswered, tried));
@@ -476,6 +571,9 @@ export function Chat({
             role="log"
             aria-label="Conversation"
             aria-busy={answering || joining}
+            // A log is a live region: a screen reader says what is added to it. Older
+            // messages shown behind the newest are no news.
+            aria-live={shown > 0 ? "off" : undefined}
             className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6"
           >
             {messages.length === 0 && (
@@ -491,11 +589,41 @@ export function Chat({
                 )}
               </div>
             )}
-            {messages.map((message, index) => (
+            {steps.map((start, step) => {
+              const drawn = messages.slice(
+                start,
+                steps[step + 1] ?? initial.length,
+              );
+              // Each step's messages have an element of their own, theirs for good:
+              // a message given another parent would be drawn anew. It lays them out
+              // as the log lays out its own, and has a box, whose place says how much
+              // was shown above the reader (`standing`). A step not drawn yet, or of
+              // which nothing is left, has none.
+              return start < held || drawn.length === 0 ? null : (
+                <div
+                  key={start}
+                  hidden={start < shown}
+                  className="flex flex-col gap-6"
+                >
+                  {drawn.map((message, index) => (
+                    <Message
+                      key={message.id}
+                      message={message}
+                      writing={
+                        answering && start + index === messages.length - 1
+                      }
+                    />
+                  ))}
+                </div>
+              );
+            })}
+            {messages.slice(initial.length).map((message, index) => (
               <Message
                 key={message.id}
                 message={message}
-                writing={answering && index === messages.length - 1}
+                writing={
+                  answering && initial.length + index === messages.length - 1
+                }
               />
             ))}
             {(answering || joining) && last?.role === "user" && <Waiting />}
