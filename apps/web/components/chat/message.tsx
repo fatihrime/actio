@@ -1,4 +1,5 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { Component, useEffect, useSyncExternalStore } from "react";
+import type { ReactNode } from "react";
 
 import type { ChatMessage } from "@/lib/chat/messages";
 
@@ -11,7 +12,8 @@ import type Markdown from "./markdown";
 // before that. Once it is here, an answer is shown as markdown from its first render.
 // Until then, and for good if it can't be fetched (the installation was upgraded under
 // an open page), an answer is shown as it was written (ADR 0016, revision of
-// 2026-11-21).
+// 2026-11-21). So is a piece of an answer whose markdown can't be drawn once it is
+// here (`AsWrittenOnError`).
 
 /** Where this page's renderer stands: on its way, here, or not to be had. Nothing
  * while nobody has asked for it, and on the server. */
@@ -104,7 +106,8 @@ export function Message({
   );
 }
 
-/** A model's words, as markdown once the renderer is here, and as written until then. */
+/** A model's words, as markdown once the renderer is here, and as written until then,
+ * or when they can't be drawn. */
 function Words({
   text,
   writing,
@@ -116,10 +119,73 @@ function Words({
 }) {
   const renderer = useRenderer();
   return renderer?.state === "here" ? (
-    <renderer.Markdown text={text} writing={writing} className={className} />
+    <AsWrittenOnError text={text} writing={writing} className={className}>
+      <renderer.Markdown text={text} writing={writing} className={className} />
+    </AsWrittenOnError>
   ) : (
     <AsWritten text={text} className={className} />
   );
+}
+
+/** What drawing a piece of a model's words as markdown came to. */
+interface Drawing {
+  /** It threw while the words were arriving. */
+  failedArriving: boolean;
+  /** It threw once they were complete. */
+  failedComplete: boolean;
+  /** It has just thrown, and isn't noted yet as one of the two. */
+  caught: boolean;
+}
+
+/** A piece of a model's words drawn as markdown (`children`), or shown as written in
+ * its place when drawing it throws: a part of the library that couldn't be fetched, or
+ * a mistake of the library or of a plugin on some text a model wrote. Then that piece
+ * alone is as written, and the rest of the page goes on (ADR 0016, revision "an answer
+ * that can't be drawn is shown as written").
+ *
+ * While the words arrive, each piece of them is shown as written, and drawing them is
+ * not tried again at each piece: a part that couldn't be fetched fails again each
+ * time, and React writes each error it catches to the console. Once they are complete
+ * it is tried once more, since what threw on half of something may draw whole. Words
+ * that never arrive, a stored answer's, are tried once. Nothing else is said of it:
+ * React reports the error to the console itself. */
+class AsWrittenOnError extends Component<
+  { text: string; writing: boolean; className?: string; children: ReactNode },
+  Drawing
+> {
+  override state: Drawing = {
+    failedArriving: false,
+    failedComplete: false,
+    caught: false,
+  };
+
+  static getDerivedStateFromError(): Partial<Drawing> {
+    return { caught: true };
+  }
+
+  // React calls this before every render, the one that follows a caught error too,
+  // with the props the error was thrown at: they say whether the words were arriving.
+  static getDerivedStateFromProps(
+    { writing }: { writing: boolean },
+    { caught }: Drawing,
+  ): Partial<Drawing> | null {
+    if (!caught) {
+      return null;
+    }
+    return writing
+      ? { caught: false, failedArriving: true }
+      : { caught: false, failedComplete: true };
+  }
+
+  override render(): ReactNode {
+    const { text, writing, className, children } = this.props;
+    const { failedArriving, failedComplete } = this.state;
+    return failedComplete || (failedArriving && writing) ? (
+      <AsWritten text={text} className={className} />
+    ) : (
+      children
+    );
+  }
 }
 
 /** A model's words, exactly as they were written. */
