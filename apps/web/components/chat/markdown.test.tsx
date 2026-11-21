@@ -4,10 +4,19 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
+import { code } from "@/lib/chat/code-colours";
+
 import Markdown from "./markdown";
 
 function show(text: string, { writing = false } = {}) {
   return render(<Markdown text={text} writing={writing} />);
+}
+
+/** The lines of the block of code on the page, as they are shown. */
+function linesShown(container: HTMLElement): (string | null)[] {
+  return [...container.querySelectorAll("pre code > span")].map(
+    (line) => line.textContent,
+  );
 }
 
 /** The formulas on the page, as the LaTeX they were written in. */
@@ -316,6 +325,30 @@ describe("while an answer arrives", () => {
 
     expect(container.querySelector("pre")).toHaveTextContent("print('sad");
     expect(container).not.toHaveTextContent("```");
+  });
+
+  test("code that arrives in pieces shows each piece as it comes", async () => {
+    // Code is coloured in a worker, which the simulated page can't start: the code is
+    // shown as it is, and never waits for colours that won't come.
+    const asked = vi.spyOn(code, "highlight");
+    const pieces = [
+      "const wheels",
+      "const wheels = 2;\n// a",
+      "const wheels = 2;\n// a bike",
+    ];
+    const { container, rerender } = show(`\`\`\`ts\n${pieces[0] ?? ""}`, {
+      writing: true,
+    });
+    // The part of the library that asks for colours comes a moment after the block.
+    await waitFor(() => {
+      expect(asked).toHaveBeenCalled();
+    });
+
+    for (const piece of pieces) {
+      rerender(<Markdown text={`\`\`\`ts\n${piece}`} writing />);
+
+      expect(linesShown(container)).toEqual(piece.split("\n"));
+    }
   });
 
   test("an answer that was stopped half-way through a word in bold", () => {

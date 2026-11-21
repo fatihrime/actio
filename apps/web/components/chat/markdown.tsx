@@ -1,6 +1,5 @@
 "use client";
 
-import { code } from "@streamdown/code";
 import { createMathPlugin } from "@streamdown/math";
 import { useMemo } from "react";
 import { harden } from "rehype-harden";
@@ -15,6 +14,7 @@ import type {
   StreamdownProps,
 } from "streamdown";
 
+import { code } from "@/lib/chat/code-colours";
 import {
   dollars,
   htmlAsWritten,

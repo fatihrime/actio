@@ -14,27 +14,35 @@ import { LIST_AWAY_MARK } from "@/lib/frame";
 // longer for this.
 configure({ asyncUtilTimeout: 3000 });
 
+// A test file that runs in Node instead of the simulated page (`@vitest-environment
+// node`, as lib/chat/colouring.test.ts does) has no page to set up.
+const onPage = typeof window !== "undefined";
+
 // The simulated page lays nothing out, so nothing on it ever changes size, and it has
 // nothing to tell so. The chat asks to be told (components/chat/follow.ts).
-window.ResizeObserver = class {
-  observe() {
-    // Nothing will be resized.
-  }
-  unobserve() {
-    // Nothing was observed.
-  }
-  disconnect() {
-    // Nothing was observed.
-  }
-};
+if (onPage) {
+  window.ResizeObserver = class {
+    observe() {
+      // Nothing will be resized.
+    }
+    unobserve() {
+      // Nothing was observed.
+    }
+    disconnect() {
+      // Nothing was observed.
+    }
+  };
+}
 
 // Take each test's components off the page, so the next test starts with an empty one.
 afterEach(() => {
-  cleanup();
-  window.localStorage.clear();
-  window.history.replaceState(null, "", "/");
-  // The mark of a list put away is on the page's root element (lib/frame.ts), which
-  // outlives a test's components.
-  document.documentElement.removeAttribute(LIST_AWAY_MARK);
+  if (onPage) {
+    cleanup();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/");
+    // The mark of a list put away is on the page's root element (lib/frame.ts), which
+    // outlives a test's components.
+    document.documentElement.removeAttribute(LIST_AWAY_MARK);
+  }
   vi.useRealTimers(); // a test may have set the clock (./clock.ts)
 });
