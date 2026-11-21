@@ -255,3 +255,41 @@ After, on 2026-11-21, on a production build of this change, in the same three br
 - **Not done:** "Sign up", "Log in" and the link to an account have no places before the session. They appear at the header's right, beside "New chat", and move nothing that was visible.
 
 **Why now, and not at the start:** the page began as a header and the chat, and the parts that depend on the session came in later steps: the list ([ADR 0018](0018-the-list-of-conversations-is-the-servers.md)) and what the header says of the session ([ADR 0019](0019-accounts-in-the-one-screen.md)). The shift they cause was first measured in the performance runs of 2026-11-20.
+
+### 2026-11-21: the page is laid out before its sizes are watched
+
+#### Context
+
+The page keeps the end of a growing answer in view by watching the size of what is shown (`components/chat/follow.ts`; the revision of 2026-11-14 above): a `ResizeObserver` on the conversation and on the element that scrolls it.
+
+In WebKit, Safari's engine, every page load reported "ResizeObserver loop completed with undelivered notifications" as an error of the page. Measured on 2026-11-21, on a production build of `9e7dfbf`, in WebKit 27.2: at 15 of 15 visits when the page loads at `/`, and at 6 of 6 under `next dev`. Never at a new chat, a conversation opened from the list, or a reload at a conversation, and never in Chromium 158 or Firefox 159.
+
+Nothing on the page goes wrong by it: the observer is told again at the next frame. But it is an error in the console of every visit in Safari, and it would fail any test that takes an error of the page's scripts for a failure, as the end-to-end tests do.
+
+**The cause,** read from what the observer was told, in a build that logs it: WebKit's first word to the new observer was 0×0 for both elements, their sizes from before they were laid out, since they had come onto the page in that same frame, when the session arrived. It then laid the page out, found both changed, told the observer of the conversation again, and could not tell it of the scroller, the outer of the two, in the same pass: which is what the error says. Chromium's first word already has the sizes as laid out.
+
+#### Options considered
+
+The first three were built, and each loaded 15 times in WebKit:
+
+1. **Lay the page out before the sizes are watched:** one read of the scroller's box, before `observe`. The error at 0 of 15 loads.
+2. **See to what is on the page at once, and start watching with the next frame.** 0 of 15.
+    - Con: a frame in which nothing is watched, and the first move to the end becomes a call of its own.
+3. **Start watching in a layout effect** instead of an effect. 14 of 15: no help.
+4. **Go to the end a frame after a change of size,** which was first taken for the remedy. Not counted over 15 loads.
+    - Con: the error has nothing to do with scrolling, as what the observer was told showed, and the end would fall a frame behind what is written.
+
+#### Decision
+
+The first.
+
+#### Measured
+
+After, on a production build of this change: the error at 0 of 15 page loads in WebKit, and at 0 of 6 under `next dev`; none in Chromium and Firefox, as before. The end of a growing answer stays in view as it did: below the screen in none, one or two of an answer's painted frames, 211 to 759 of them, in the three browsers, before and after, for prose, for 120 lines of code, and for both in one answer.
+
+#### Consequences
+
+- **One layout is forced when a conversation appears on the page,** which the browser does in that frame anyway.
+- **The end-to-end tests can't see this error:** they run Chromium, which never had it ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md)). A component test holds the order of the two calls (`components/chat/follow.test.tsx`); what WebKit makes of it was measured by hand, and would have to be again after a change to how the hook starts.
+
+**Why now, and not at the start:** the page was first run in WebKit in the performance runs of 2026-11-20.
