@@ -305,3 +305,63 @@ After, on a production build of this change, in the same three browsers:
 #### Why now, and not at the start
 
 At the start, on 2026-11-14, the answers were measured in a headless Chromium alone, with a block of Python, and the library's own plugin was the one to take. In Chromium the stall is short: 0.12 s for a first block of TypeScript. It is WebKit's, ten times as long there, and longest at the languages with the largest grammars. The performance runs of 2026-11-20 were the first in all three browsers, and found it.
+
+### 2026-11-21: an answer that can't be drawn is shown as written
+
+#### Context
+
+An error thrown while an answer was drawn as markdown took the whole page down: the conversation, the list and the box to write in were replaced by Next.js's error page ("This page couldn't load"), until a reload. Seen on 2026-11-21, on a production build of `9e7dfbf`, in Chromium 158, Firefox 159 and WebKit 27.2 alike: with the page open and the renderer already fetched, every script under `/_next/static/` was refused, and a question was asked whose answer holds a block of code.
+
+- **The library fetches parts of its own while it draws.** Streamdown (2.7.1) fetches the part that draws a block of code when the first block is drawn, and the part that draws a diagram with the first diagram: each is a `React.lazy` inside a `Suspense`. `React.lazy` throws an import that failed while it renders, and React keeps a failed `lazy` failed. Nothing in the app caught an error of rendering below the page's root. Turbopack's own loader asks for a file twice before it gives up, so one refusal isn't enough to see it.
+- **A file that can't be fetched is one cause,** as when the installation was upgraded under a page that stayed open. Any error of the library or of one of its plugins, on some text a model wrote, would do the same, and a model's words are not to be trusted.
+- **The app already did the right thing for its own piece:** `components/chat/message.tsx` fetches the renderer itself (`fetchRenderer`), and shows an answer as it was written (`AsWritten`) until it is here, and for good when it can't be fetched.
+
+#### Options considered
+
+1. **An error boundary around each piece of an answer's text,** where `message.tsx` gives it to the renderer: the answer's words, and its reasoning.
+    - Pro: a piece that fails takes nothing else along, and is shown as the reader saw it while the renderer was on its way.
+    - Con: the whole piece is shown as written, also what of it could have been drawn.
+2. **A boundary around the whole conversation.**
+    - Con: every answer would be lost to one that fails.
+3. **A boundary around each block inside an answer,** through Streamdown's `components`.
+    - Pro: the rest of an answer keeps its formatting.
+    - Con: it catches only what goes wrong in the blocks that are wrapped, and ties the app to more of Streamdown's inside.
+4. **Leave it to Next.js's error page,** as it was.
+    - Con: one answer takes the whole page down, until a reload.
+
+#### Decision
+
+The first. **An answer whose markdown can't be drawn is shown as it was written, and nothing else on the page is touched by it.**
+
+- **`AsWrittenOnError` in `message.tsx`,** a class component, since React has no other form for an error boundary, stands around the renderer's component where `Words` renders it. When drawing a piece of text throws, it shows `AsWritten` in its place, with the same text and class. There is one for each piece of text an answer shows, so the reasoning and the words fail apart.
+- **While an answer arrives, its text keeps coming:** each piece is shown as written. Drawing it is not tried again at each piece: a `lazy` that failed fails again each time, and React writes each error it catches to the console.
+- **It is tried once more when the answer is complete,** when its `writing` goes from true to false: an error that came from half of something may be gone with the whole. If it throws again, the answer stays as written. A stored answer, which never arrives, is tried once.
+- **The reader is told nothing, and the app logs nothing of its own.** React reports an error a boundary caught to the console by itself; in a production build Next.js does, with the error alone. The text as written is what the reader saw before, while the renderer was on its way.
+- **Nothing else changed:** `fetchRenderer`, `useRenderer`, `RENDERER_WAIT_MS`, `markdown.tsx`, the code plugin and its worker. A model's words still reach the page through `markdown.tsx` or as plain text, never as HTML.
+
+**Tests:**
+
+- in the page's component tests (`components/chat/as-written.test.tsx`), with a stand-in for the renderer that throws for the text each test chooses, and what React writes to the console kept and asserted:
+    - an answer whose markdown throws is shown with exactly its text, as written; the box takes the next question, whose answer is drawn;
+    - while such an answer arrives, each piece of its text is on the page as it comes, and none after the first that threw is given to the renderer;
+    - once it is complete it is tried once more: drawn when only its half-arrived text threw, and left as written, with one report more, when the whole throws too;
+    - a stored answer whose markdown throws is shown as written beside the rest, and tried once;
+    - an answer's reasoning that throws leaves its words drawn, and the other way round;
+- end to end, in a real browser (`e2e/as-written.spec.ts`): after a first answer drawn as markdown, every further script under `/_next/static/` is refused, and an answer with a block of code is shown as written, its fence marks included, while the first answer stays drawn and the box stays; with the scripts let through again, a next question is answered as markdown. No error is left uncaught by the page's scripts meanwhile, which every end-to-end test checks.
+
+#### Measured
+
+With every script refused once the renderer was here, and an answer with a block of code asked for, in the three browsers:
+
+- **before:** the page was gone in each of them, Next.js's error page in its place, and the page's scripts had left an error uncaught ("Failed to load chunk");
+- **after:** in each of them the answer is on the page as it was written, the answer before it is still drawn as markdown, the box to write in is there, and the page's scripts left no error uncaught.
+
+#### Consequences
+
+- **An answer with a block of code whose part of the library couldn't be fetched is shown whole as written,** and so is every later one with code until the page is reloaded, since React keeps a failed `lazy` failed. The same goes for a diagram.
+- **The reader is told nothing.** The answer reads as it did while the renderer was on its way, and a reload brings its formatting back, once the file can be had.
+- **What a boundary can't catch stays as it was:** an error in an event handler or in a timer, which doesn't happen while rendering.
+
+#### Why now, and not at the start
+
+At the start, the one fetch that was thought of was the renderer's own, and its failure was caught where it was asked for: on the import, and since the revision "the renderer is fetched ahead" in `fetchRenderer`. That the library fetches parts of its own while it draws, where nothing the app catches on an import can reach, was found on 2026-11-21, when a production build was tried with its scripts refused.
