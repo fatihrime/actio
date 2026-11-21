@@ -180,3 +180,78 @@ An answer is now written at the server in a task of its own, whether or not a pa
 - **The look every second and a half is the fallback,** for a turn whose stream can't be read: gone, refused, or lost on the way. The page tries once for each turn, and doesn't try that turn again while its conversation is on the page.
 - **The rule above still holds:** a joined stream that ends in an error is no clean end, and the page reads the conversation.
 - **One notice no longer stays until it is dismissed:** the one that said the server can't be reached when the page's own answer broke off. The page then reads along with that answer again, and the notice goes once the page reads along with an answer: that one, or a later one. Every other notice stays as before.
+
+### 2026-11-21: the page's frame is there before the session
+
+#### Context
+
+The server renders the frame of the page, as decided above, and the browser paints that HTML before any of the app's scripts have run. So the server's guess is what people see first. It knows neither the window's width nor whether this browser put the list of conversations away, which the browser's own storage holds.
+
+The page first painted a header with "Actio", and "Starting…" where the chat would be. When the session arrived (`me` known, in `components/chat/chat-app.tsx`), three things moved what was already on the page:
+
+- **the list's button appeared before the title,** which moved from x=12 to x=62;
+- **the buttons are taller than the title:** the header grew from 45 to 51 px, and everything below it moved 6 px;
+- **in a wide window the list appeared,** 288 px wide, and pushed the chat from x=0 to x=288.
+
+Measured on 2026-11-21 on a production build of `34db4ad`, in Chromium 158, Firefox 159 and WebKit 27.2. In a narrow window the title and the header moved the same way in all three. Chromium's layout-shift score, where over 0.1 is no longer good and over 0.25 is poor:
+
+| Window | Layout shift |
+|---|---|
+| 1440×900, at `/` and at `/c/<id>` | 0.1904 |
+| 1280×720, the end-to-end tests' window | 0.2115 |
+| 1440×900, the list put away: the header alone | 0.033 |
+| 390×844 | 0.0565 |
+
+And `/favicon.ico` answered 404 at every load: the app had no icon.
+
+#### Options considered
+
+**For someone who put the list away,** which only the browser knows:
+
+1. **A script in the page's head marks `<html>` before the first paint,** and CSS decides whether the list has a place.
+    - Pro: right from the first paint, for everyone.
+    - Con: a script written into the page, the one the app writes there itself, which a Content-Security-Policy will have to allow.
+2. **Read the switch once the page's scripts run,** and accept one moment in which the list's place shows and goes.
+    - Con: a shift as large as the one being removed, for exactly those people.
+3. **Keep no place for the list,** and put only the header right.
+    - Con: leaves most of the shift in a wide window: 0.19, less the header's 0.033.
+4. **Keep the switch in a cookie that the server reads.**
+    - Con: every page would be rendered for each request, and the Next.js server would have a part in the session, against the first decision above.
+
+**For the header:**
+
+1. **Placeholders of the buttons' size.**
+    - Con: they drift from the buttons when those change.
+2. **The buttons themselves,** there before the session, and hidden until it comes.
+
+#### Decision
+
+**What arrives with the session fills places that were already there. Nothing that is on the page before the session moves when it arrives.**
+
+- **The header's two buttons are always in the page,** "Conversations" and "New chat": the same elements before the session and after, so their size can't differ. Until the session comes they are disabled, `aria-hidden`, and invisible (`visibility: hidden`, which keeps their box). Until then the list's button says nothing of whether the list is shown: no `aria-expanded`, no `title`.
+- **The list has a place before the session:** while nobody has a session, an empty `div` of the list's width, edge and colour stands where the list will be, `aria-hidden`. Not an `aside`: a landmark with nothing in it would be announced. CSS alone shows it, in a wide window only (`hidden md:block`), since the page's own reading of the width says "wide" on the server. It stays for as long as nobody has a session, also when none could be started. Its width, edge and colour and the list's come from one constant.
+- **Someone who put the list away has no place for it, from the first paint.** One script in the page's head (`app/layout.tsx`) runs while the HTML is read, and sets `data-list-away` on `<html>` when the browser's storage says the list was put away. It never throws: storage can be off limits. `<html>` has `suppressHydrationWarning`, since React doesn't know that attribute: without it, React's development build says at every load that the page it takes over doesn't match, for whoever put the list away. A variant of the styles, `list-away:` (`html[data-list-away] &`), hides the place, and outweighs `md:block` by its selector, whatever the order of the built stylesheet.
+- **The page keeps the mark in step with the switch** from then on, at its start and at every change. After a log-out the place is shown again with no page loaded in between, and must say what the switch says now. Next.js's guide also warns that React's StrictMode, in development, clears an attribute of `<html>` that React doesn't manage. Under `next dev` of this version it didn't: the mark stayed with this upkeep taken out. The log-out is the reason.
+- **What the server sent is what the browser's first render makes.** The remembered switch is read in that first render, and React doesn't repair an attribute that differs from the HTML it takes over. The window's width is read otherwise, with the server's answer first and the browser's right after: it can't differ, but what hangs on it would change in front of the reader, a moment after the first paint. So nothing rendered before the session depends on the switch, the window's width, or whether the list lies over the chat: CSS and the mark decide.
+- **One module holds what the script and the page must agree on,** `lib/frame.ts`: the name the switch is stored under, the attribute, the script's text built from both, and the function the page sets the mark with. The layout, which only the server renders, imports it.
+- **This is the one script the app itself writes into a page,** and its one use of `dangerouslySetInnerHTML`. Next.js writes scripts of its own into every page. The rule against that (`AGENTS.md`, [ADR 0016](0016-answers-shown-as-markdown.md)) is about a model's words reaching the page; this is a constant written here.
+- **The app has an icon:** `app/icon.svg`, and `app/favicon.ico` with the same drawing at 16, 32 and 48 px, for whatever asks for the default address. Next.js's convention for those files turns them into two links in the head.
+
+**Tests:**
+
+- in the page's component tests: the HTML the server sends holds both buttons, out of reach, and the list's place (`app/page.test.tsx`); the layout sends the script, and tells React to let its mark be (`app/layout.test.tsx`); the very text it sends, run in the simulated page, marks `<html>` only when the switch is on, and throws nothing when storage is off limits (`lib/frame.test.ts`); the server's HTML is hydrated as three visitors, with nothing remembered, with the list put away and in a narrow window, and none may cause a recoverable error or an error in the console, which a control shows the test would see (`components/chat/frame.test.tsx`); the buttons are there and out of reach until the session comes (`components/chat/chat-app.test.tsx`); the mark follows the switch, also in StrictMode (`components/sidebar/sidebar.test.tsx`);
+- end to end, in a real browser (`e2e/frame.spec.ts`), with the session's answer held back until the test lets it go: the header, the title and the chat have the same boxes before the session and after, and the layout shifts that Chromium measures from before the page's first script add up to less than 0.01: in a wide window and in a narrow one, at `/` and at `/c/<id>`, and in a wide one with the list put away, at `/`. Before the session the buttons can't be seen or used. The icon's addresses answer, the default one and those of the two links (`e2e/icon.spec.ts`). The narrow window is only narrow: with a phone's profile, touch emulated, Chromium marks each shift as one that followed a person's input, and leaves it out of the sum. The boxes are compared for that reason too.
+
+#### Measured
+
+After, on 2026-11-21, on a production build of this change, in the same three browsers: at `/` and at `/c/<id>`, in a wide window, a wide one with the list put away and a narrow one, the title, the header and the chat keep their places. Chromium's layout shift is 0.0007 in a wide window and 0 in a narrow one: what is left is the group of links at the header's right, which grows leftwards when "Sign up" and "Log in" arrive. No hydration error in any of them, and under the development server (`next dev`) none of the three says anything about the page it takes over; with `suppressHydrationWarning` taken off `<html>`, each of them does, for whoever put the list away.
+
+#### Consequences
+
+- **A Content-Security-Policy, when there is one, has this script to allow beside Next.js's own.** Next.js writes inline scripts of its own into every page, so the policy needs an answer for those anyway. Its guide gives two: nonces, which are impossible for a page that is rendered before anyone asks for it, or a policy that allows inline scripts. This one falls under whichever is chosen, and being a constant, it could also be allowed by its hash.
+- **The list's place and the list share their width, edge and colour through one constant,** so a change to one is a change to both.
+- **The header's buttons exist before the session.** Anything that looks for them has to look as a person does, by their role, which skips them while they are hidden.
+- **The icon is a placeholder drawn for this project,** which the maintainer may replace.
+- **Not done:** "Sign up", "Log in" and the link to an account have no places before the session. They appear at the header's right, beside "New chat", and move nothing that was visible.
+
+**Why now, and not at the start:** the page began as a header and the chat, and the parts that depend on the session came in later steps: the list ([ADR 0018](0018-the-list-of-conversations-is-the-servers.md)) and what the header says of the session ([ADR 0019](0019-accounts-in-the-one-screen.md)). The shift they cause was first measured in the performance runs of 2026-11-20.
