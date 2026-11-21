@@ -93,7 +93,7 @@ Models answer in markdown: headings, lists, tables, code, formulas in LaTeX, and
 - a diagram is drawn once it is whole;
 - an answer that was stopped is stored as far as it got ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md)), and is shown the same way.
 
-**The libraries are fetched when an answer needs them.** The first answer fetches the renderer, a block of code its language, a formula its fonts, a diagram Mermaid. Until the renderer is there, and if it can't be fetched, an answer shows as it was written.
+**The libraries are fetched when an answer needs them.** The first answer fetches the renderer, a block of code its language, a formula its fonts, a diagram Mermaid. Until the renderer is there, and if it can't be fetched, an answer shows as it was written. (The renderer is fetched ahead now, and a stored answer waits for it: see the revision of 2026-11-21.)
 
 **Colours have names by role** (`app/globals.css`): `muted`, `border`, `primary` and so on, each a light and a dark colour that the browser picks between. Streamdown expects these names, and the app's own components can use them.
 
@@ -140,3 +140,69 @@ In a headless Chromium against `make up`, on 2026-11-14. Sizes are what was sent
 ### 2026-11-14: tested in a real browser
 
 The last item under "Not done yet" is done ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md)). Scrolling is tested in a real browser, and so is what an answer can't do: an end-to-end test shows an answer with HTML, a picture and a link in it. Every end-to-end test, whatever it is about, fails if the page asks anything of another site.
+
+### 2026-11-21: the renderer is fetched ahead, and a stored answer waits for it
+
+#### Context
+
+`apps/web/components/chat/message.tsx` loaded `./markdown` (Streamdown and its plugins, 295 kB over the wire) with `React.lazy`, the first time an answer was rendered, and showed the answer "as written" (`AsWritten`) inside a `Suspense` fallback until it was there. Two visible defects followed, measured on 2026-11-20, on a production build, in real browsers:
+
+1. **Opening a stored conversation by its address** (a reload, a bookmark, a link) shows every answer as raw markdown first (` ```python `, `## heading`, `**bold**`), then swaps to the rendered form about 0.1 to 0.3 s later, and the whole page jumps. Layout-shift score of that swap: 0.42 to 0.46 at 1440×900 and 0.75 at 390×844 (Chromium 158); over 0.25 counts as poor. On a slow connection (1.6 Mbit/s, 150 ms latency), with nothing in the browser's cache, the raw text stays for about 1.8 s.
+2. **The first answer of a visit** starts as raw text and swaps mid-answer, because the fetch only begins when its first words are rendered: 0.2 s on a fast machine, 2.4 s on the slow connection.
+
+A throwaway prototype of the remedy took the swap's shift to 0 to 0.016, and showed the first answer as markdown after 0.3 s instead of 2.4 s on the slow connection. It also showed that fetching the renderer the moment the page mounts cost about 0.1 s of largest paint, and 85 ms of blocking on a slow phone's profile: it competed with the request for the session.
+
+#### Options considered
+
+1. **Fetch it with the page,** as a part of what the page needs to start.
+    - Pro: an answer is never shown as written, and no conversation waits for the renderer.
+    - Con: the page's first load, about 242 kB of script, grows by 295 kB, and its first paint and the request for the session wait behind it.
+2. **Fetch it ahead, once the page knows whose session it has.**
+    - Pro: the first paint and the session's request come first. By the time an answer arrives, the renderer is almost always there.
+    - Con: a visitor who never asks fetches it all the same. A stored conversation opened by its address still has to wait for it.
+3. **Keep fetching it at the first answer, and only hold a stored conversation until it is there.**
+    - Pro: nothing is fetched for a visitor who never asks.
+    - Con: the first answer of a visit still starts as written, and swaps mid-answer: the second defect stays.
+
+#### Decision
+
+The second, with a stored conversation held until the renderer has come, and not for long.
+
+- **Still a piece apart from the page.** `./markdown` stays a dynamic `import()`, so it is no part of what the page needs to start. Nothing but `markdown.tsx` imports Streamdown or its plugins.
+- **Fetched ahead, once the session is known.** `ChatApp` asks for the renderer as soon as the page knows whose session it has, and not before: the first paint and the session's request are never behind it. It is asked for once a page, by whatever asks first (`fetchRenderer` in `message.tsx`). An answer rendered before that, which can't happen today, asks too, as it did.
+- **An answer is markdown from its first render whenever the renderer is there.** Not one render as written, then swapped: `React.lazy` suspends on its first render even when its module has been loaded, and a `Suspense` fallback that is committed is the flash. So there is no `lazy` and no `Suspense` here any more. A small state of the fetch, kept by `message.tsx` for as long as the page is open (on its way, here, or not to be had), is read by each answer through `useSyncExternalStore`, and is nothing on the server.
+- **A stored conversation is shown once the renderer has come.** `StoredChat` keeps saying "Loading the conversation…" until the API has answered and the fetch is over, well or not. The two run side by side, and neither waits for the other to start. When the renderer can't be had, as when the installation was upgraded under an open page and the import fails, the conversation is shown as written at once.
+- **But not for long.** When the API has answered and the renderer is still on its way three seconds later (`RENDERER_WAIT_MS`), the conversation is shown as written, and becomes markdown when the renderer arrives: what the page did before, as the last resort. A download that stalls must not hide a conversation the page already has. On the slow connection the renderer took 1.7 to 2.4 s, so the wait is no shorter. It goes by the clock, which a test can move.
+- **An answer that arrives while the renderer is on its way** (asked in the first moments, on a slow connection) is shown as written, and becomes markdown when the renderer is here. Words are worth more than a blank. This is what the page did before, kept.
+- **A renderer that can't be fetched** leaves every answer and every thought as written, for good, and the page says nothing of it, as before.
+
+**Why:** the first option more than doubles the page's first load, which every visitor pays. The third leaves the second defect as it was. The second costs a download nobody waits for, after the page has started. Fetching at the moment the page mounts would have been simpler, and was measured to slow the first paint.
+
+**Tests:**
+
+- in the page's component tests (`components/chat/renderer.test.tsx`), each opened from modules loaded anew, so that the renderer isn't there until the test lets it arrive: it is fetched once the session is known and not before; a stored conversation waits for it and is never shown as written first; past the wait it is shown as written, then as markdown; it is shown as written at once when the renderer can't be had; and an answer is markdown from its first render, recorded at every change of the page;
+- end to end, in a real browser (`e2e/renderer.spec.ts`), every change of the page recorded from before its first script runs: a stored answer after a reload, and the first answer of a visit, are never shown with their marks. Both tests failed on the code before this revision.
+
+**What it costs:**
+
+- **295 kB fetched by a visitor who never asks;**
+- **a stored conversation waits for the renderer,** at most three seconds after the API has answered;
+- **a component test that opens a stored conversation before its file's renderer has been loaded waits for it:** about half a second in the full run of the page's tests, and 0.8 to 1.0 s with every core of the machine busy. The tests' longest wait for something to appear is three seconds for that reason, where the library's own is one (`tests/setup.ts`).
+
+**What no longer holds:** under "Decision", "The first answer fetches the renderer" and, for a stored answer, "Until the renderer is there … an answer shows as it was written". A block of code still fetches its language, a formula its fonts, and a diagram Mermaid, when an answer needs them. The table under "Measured" is of 2026-11-14: an empty chat now fetches the renderer too, once its session is known.
+
+**Measured after:** on 2026-11-21, on a production build with the fake model, in Playwright's builds of three browsers (Chromium 158, Firefox 159, WebKit 27.2), every change of the page recorded from before its first script.
+
+| | Before | After |
+|---|---|---|
+| A stored conversation of twelve exchanges, opened by its address three times in each browser | its marks on the page each time, in all three; in Chromium from 0.1 s to 0.25 s after the address was opened | never, in any of the three |
+| The first answer of a visit, in each browser | begins as written, in all three | never as written |
+| Layout shift once the conversation is on the page (100 and 300 exchanges, Chromium) | 0.42 to 0.46 | 0 |
+| The first answer shown as markdown, after it was asked | 0.21 s; 2.36 s on the slow connection | 0.09 s; 0.31 s |
+| A first visit on the slow connection, at a quarter of the CPU's speed: the largest paint | 2.03 s | 2.03 s |
+| The same visit: time the page's scripts kept it busy beyond 50 ms at a stretch | 29 ms | 112 ms |
+| Scripts an empty chat fetches, compressed | 242 kB | 537 kB, the renderer's 295 kB after the session is known |
+
+- **The page's first paint is where it was,** which fetching at the moment the page mounts had not managed. The renderer is run when it arrives, so the page is busy with it once, right after its start, and no longer in the middle of the first answer, whose longest stretch on that visit went from 126 ms to 83 ms.
+- **On the slow connection, with nothing in the browser's cache,** a stored conversation opened by its address is on the page 4.1 s after the address was opened, as markdown. Before, its raw text was there after 2.25 s, and was swapped at 4.07 s. So there the reader waits about 1.8 s longer for something to read, and sees no swap. Asking for the renderer at once when the address names a conversation was tried too: 3.9 s, not worth a second rule. A browser that has the renderer in its cache doesn't wait.
+- **A long conversation opened by its address is now drawn in one piece,** as one opened from the list always was: 300 exchanges keep the page busy for 0.33 s at a stretch, where showing them as written first had kept it under 0.1 s (1.4 s and 0.3 s at a quarter of the CPU's speed). What remains of the layout shift when the page loads, 0.19, is the header and the list arriving with the session. Neither is this revision's subject: both are steps of their own.
