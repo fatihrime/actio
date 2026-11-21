@@ -7,6 +7,12 @@
 @source "../node_modules/@streamdown/math/dist/*.js";
 @source "../node_modules/@streamdown/mermaid/dist/*.js";
 
+/* `list-away:…`: while this browser has put the list of conversations away. The page's
+   root element says so from before the first paint (lib/frame.ts), so the list's place
+   is decided before any of the app's scripts run. The root element's selector makes
+   `list-away:hidden` outweigh `md:block`, wherever each is written in the styles. */
+@custom-variant list-away (html[data-list-away] &);
+
 /* Follow the operating system's light or dark setting. */
 :root {
   color-scheme: light dark;

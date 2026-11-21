@@ -103,6 +103,48 @@ describe("a first visit", () => {
     expect(screen.getByText(/Answered by Qwen 3.5 4B/)).toBeInTheDocument();
   });
 
+  it("keeps the header's buttons in their places, out of reach, until the session is known", async () => {
+    let start: (response: Response) => void = () => undefined;
+    const api = fakeApi().on(
+      "POST /api/session/guest",
+      () =>
+        new Promise<Response>((resolve) => {
+          start = resolve;
+        }),
+    );
+
+    open();
+
+    await waitFor(() => {
+      expect(api.to("POST /api/session/guest")).toHaveLength(1);
+    });
+    expect(screen.getByText("Starting…")).toBeInTheDocument();
+    // There, so that nothing moves when they can be used. Not found by their role:
+    // a person neither sees them nor reaches them.
+    const list = screen.getByLabelText("Conversations", { selector: "button" });
+    const newChat = screen.getByText("New chat", { selector: "button" });
+    for (const button of [list, newChat]) {
+      expect(button).toBeDisabled();
+    }
+    expect(
+      screen.queryByRole("button", { name: "Conversations" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "New chat" }),
+    ).not.toBeInTheDocument();
+
+    start(json(201, GUEST));
+
+    // The same buttons, which kept their size.
+    expect(await screen.findByRole("button", { name: "Conversations" })).toBe(
+      list,
+    );
+    expect(screen.getByRole("button", { name: "New chat" })).toBe(newChat);
+    for (const button of [list, newChat]) {
+      expect(button).toBeEnabled();
+    }
+  });
+
   it("says how long to wait when the network has started too many guests", async () => {
     const api = fakeApi().on(
       "POST /api/session/guest",

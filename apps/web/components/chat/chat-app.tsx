@@ -13,6 +13,7 @@ import { ApiProblem, getConversation, listModels } from "@/lib/api/client";
 import type { Conversation, Me, Model, ModelList } from "@/lib/api/client";
 import { useConversations } from "@/lib/chat/list";
 import { explain } from "@/lib/chat/outcomes";
+import { LIST_HIDDEN_KEY, markListAway } from "@/lib/frame";
 import { newId } from "@/lib/ids";
 import {
   ACCOUNT,
@@ -35,7 +36,6 @@ import { fetchRenderer, useRenderer } from "./message";
 
 /** How often to ask again while the model can't answer, to notice when it can. */
 const UNREADY_POLL_MS = 5000;
-const LIST_HIDDEN_KEY = "actio.conversations.hidden";
 
 /** How long a conversation that has been read waits for the code that shows its
  * answers as markdown, before it is shown as written, to become markdown once the code
@@ -50,6 +50,10 @@ const CLOCK_LOOK_MS = 1000;
 
 const HEADER_BUTTON =
   "flex items-center gap-1.5 rounded-lg border border-input px-2.5 py-1.5 text-sm font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
+
+/** The width, edge and colour of the list of conversations beside the chat, which its
+ * place has too while nobody has a session yet: one changes with the other. */
+const LIST_PLACE = "w-72 shrink-0 border-r border-border bg-sidebar";
 
 /** What the browser's tab says at each place. */
 const TITLES: Record<Place["kind"], string> = {
@@ -99,6 +103,10 @@ export function ChatApp() {
 
   const session = useSession();
   const { me } = session;
+  // Whether the page knows whose session it has. What arrives with the session fills
+  // places that the page's frame held for it until then (ADR 0015, revision of
+  // 2026-11-21).
+  const known = me !== undefined;
   const list = useConversations(session.holder);
   const usage = useUsage(session.holder);
 
@@ -110,7 +118,6 @@ export function ChatApp() {
   // never shown first as the marks it was written in. Not before the page knows whose
   // session it has: the first paint, and the request for the session, don't wait
   // behind it.
-  const known = me !== undefined;
   useEffect(() => {
     if (known) {
       fetchRenderer();
@@ -124,6 +131,14 @@ export function ChatApp() {
   const [over, setOver] = useState(false);
   const listShown = wide ? !putAway : over;
   const listButton = useRef<HTMLButtonElement>(null);
+
+  // The mark on the page's root element says what the switch says, from the page's
+  // start on: the script in the head set it before the first paint (lib/frame.ts),
+  // and the list's place, decided by it, is shown again after a log-out, with no page
+  // loaded in between.
+  useEffect(() => {
+    markListAway(putAway);
+  }, [putAway]);
 
   const onExists = useCallback(() => {
     go(conversationPath(id), { replace: true });
@@ -163,28 +178,39 @@ export function ChatApp() {
         }
       }}
     >
+      {/* The header's two buttons are there from the first paint, so that nothing
+          moves when the session arrives. Until then they keep their places, unseen
+          and out of reach, and carry nothing that depends on what only the browser
+          knows. The remembered switch is read at the browser's first render, and
+          React doesn't repair an attribute that differs from what the server sent;
+          the window's width is read right after, and would change them in front of
+          the reader. */}
       <header className="flex shrink-0 items-center gap-3 border-b border-border px-3 py-2">
-        {me !== undefined && (
-          <button
-            ref={listButton}
-            type="button"
-            onClick={() => {
-              if (wide) {
-                setPutAway(!putAway);
-              } else {
-                setOver(!over);
-              }
-            }}
-            aria-expanded={listShown}
-            aria-label="Conversations"
-            title={
-              listShown ? "Hide the conversations" : "Show the conversations"
+        <button
+          ref={listButton}
+          type="button"
+          disabled={!known}
+          aria-hidden={known ? undefined : true}
+          onClick={() => {
+            if (wide) {
+              setPutAway(!putAway);
+            } else {
+              setOver(!over);
             }
-            className={HEADER_BUTTON}
-          >
-            <PanelIcon />
-          </button>
-        )}
+          }}
+          aria-expanded={known ? listShown : undefined}
+          aria-label="Conversations"
+          title={
+            known
+              ? listShown
+                ? "Hide the conversations"
+                : "Show the conversations"
+              : undefined
+          }
+          className={`${HEADER_BUTTON} ${known ? "" : "invisible"}`}
+        >
+          <PanelIcon />
+        </button>
         <h1 className="text-lg font-semibold tracking-tight">Actio</h1>
         <div className="ml-auto flex items-center gap-2">
           <Who
@@ -196,22 +222,31 @@ export function ChatApp() {
               setOver(false);
             }}
           />
-          {me !== undefined && (
-            <button
-              type="button"
-              onClick={() => {
-                startNew();
-              }}
-              className={HEADER_BUTTON}
-            >
-              <PlusIcon />
-              New chat
-            </button>
-          )}
+          <button
+            type="button"
+            disabled={!known}
+            aria-hidden={known ? undefined : true}
+            onClick={() => {
+              startNew();
+            }}
+            className={`${HEADER_BUTTON} ${known ? "" : "invisible"}`}
+          >
+            <PlusIcon />
+            New chat
+          </button>
         </div>
       </header>
       <div className="relative flex min-h-0 flex-1">
-        {me !== undefined && (
+        {me === undefined ? (
+          // The list's place, for as long as nobody has a session: in a wide window,
+          // unless the list was put away. CSS decides both, and the mark on the
+          // page's root element (lib/frame.ts): the server can't know either. Not an
+          // `aside`, which would be announced with nothing in it.
+          <div
+            aria-hidden
+            className={`hidden md:block list-away:hidden ${LIST_PLACE}`}
+          />
+        ) : (
           <>
             {listShown && !wide && (
               // Over a narrow window's chat, the rest of the screen closes the list.
@@ -227,7 +262,7 @@ export function ChatApp() {
             )}
             {listShown && (
               <aside
-                className={`flex w-72 shrink-0 flex-col border-r border-border bg-sidebar ${
+                className={`flex flex-col ${LIST_PLACE} ${
                   wide
                     ? ""
                     : "absolute inset-y-0 left-0 z-20 max-w-[85%] shadow-xl"

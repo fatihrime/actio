@@ -56,6 +56,14 @@ export class Chat {
   get header(): Locator {
     return this.page.getByRole("banner");
   }
+  /** The product's name, at the top. */
+  get title(): Locator {
+    return this.header.getByRole("heading", { level: 1 });
+  }
+  /** What the page says while it doesn't know whose session it has yet. */
+  get starting(): Locator {
+    return this.page.getByText("Starting…");
+  }
   /** The middle of the page: the chat, or one of the forms for the session. */
   get main(): Locator {
     return this.page.getByRole("main");

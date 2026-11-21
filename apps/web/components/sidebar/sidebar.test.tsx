@@ -7,9 +7,10 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { TITLE_LOOK_MS } from "@/lib/chat/list";
+import { LIST_AWAY_MARK } from "@/lib/frame";
 import {
   answer,
   conversation,
@@ -25,7 +26,7 @@ import {
   turn,
 } from "@/tests/fake-api";
 import type { Call } from "@/tests/fake-api";
-import { ask, open } from "@/tests/open";
+import { ask, narrowWindow, open } from "@/tests/open";
 import { recorded, RECORDED } from "@/tests/recorded";
 
 const LIST = "GET /api/conversations";
@@ -78,16 +79,6 @@ async function idle(ms: number): Promise<void> {
         setTimeout(resolve, ms);
       }),
   );
-}
-
-/** A window too narrow for the list to stand beside the chat. */
-function narrowWindow(): void {
-  vi.stubGlobal("matchMedia", (query: string) => ({
-    media: query,
-    matches: false,
-    addEventListener: () => undefined,
-    removeEventListener: () => undefined,
-  }));
 }
 
 describe("the list of conversations", () => {
@@ -1045,6 +1036,38 @@ describe("where the list is", () => {
     expect(await listButton()).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["", false],
+    [", in StrictMode as in development", true],
+  ])(
+    "is said to be away on the page's root while it is, from the start of the next visit%s",
+    async (_, strict) => {
+      // What decides the list's place before the session is known (lib/frame.ts).
+      fakeApi().on(LIST, () => json(200, listed(THREE)));
+      const root = document.documentElement;
+      const user = open("/", { strict });
+      await screen.findByRole("link", { name: "Flat tyres" });
+      expect(root).not.toHaveAttribute(LIST_AWAY_MARK);
+
+      await user.click(await listButton());
+      expect(root).toHaveAttribute(LIST_AWAY_MARK);
+      await user.click(await listButton());
+      expect(root).not.toHaveAttribute(LIST_AWAY_MARK);
+
+      await user.click(await listButton());
+      document.body.replaceChildren(); // the page is closed
+      // A new page starts without the mark, until the script in its head sets it
+      // (lib/frame.test.ts). The page sets it too, as it starts.
+      root.removeAttribute(LIST_AWAY_MARK);
+      open("/", { strict });
+
+      expect(screen.getByText("Starting…")).toBeInTheDocument();
+      expect(root).toHaveAttribute(LIST_AWAY_MARK);
+      expect(await listButton()).toHaveAttribute("aria-expanded", "false");
+      expect(root).toHaveAttribute(LIST_AWAY_MARK);
+    },
+  );
 
   it("lies over the chat in a narrow window, only while it is wanted", async () => {
     narrowWindow();
