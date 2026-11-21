@@ -293,3 +293,122 @@ After, on a production build of this change: the error at 0 of 15 page loads in 
 - **The end-to-end tests can't see this error:** they run Chromium, which never had it ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md)). A component test holds the order of the two calls (`components/chat/follow.test.tsx`); what WebKit makes of it was measured by hand, and would have to be again after a change to how the hook starts.
 
 **Why now, and not at the start:** the page was first run in WebKit in the performance runs of 2026-11-20.
+
+### 2026-11-21: a long conversation opens newest first
+
+#### Context
+
+A stored conversation came onto the page in one render: every message, and the markdown of every answer, before the browser could draw another frame. Measured on a production build of `c406a1d`, in a window of 1440×900, with conversations of 100 and of about 300 exchanges whose answers are 110 to 260 words with headings, lists, code and tables, in Chromium 158, Firefox 159 and WebKit 27.2:
+
+| Opened from the list | Chromium | Firefox | WebKit | Chromium at a quarter of the CPU's speed |
+|---|---|---|---|---|
+| 100 exchanges: longest time between two frames | 183 ms | 251 to 258 ms | 238 to 260 ms | 750 ms |
+| 300 exchanges | 350 to 367 ms | 475 to 567 ms | 513 to 523 ms | 1,467 ms |
+
+Opened by its address, with a reload or a link, the same: 133 to 242 ms at 100 exchanges, 383 to 650 ms at 300, and 583 and 1,500 ms at a quarter of the speed. The first message was on the page 245 to 359 ms after the click at 100 exchanges, and 444 to 751 ms after it at 300.
+
+And at every opening, in all three browsers, one frame was painted with the conversation at its top, its end 126,385 px below the screen at 100 exchanges and 417,483 px at 310. The next frame was at the end. The page went to the end when the `ResizeObserver` of `components/chat/follow.ts` first reported, and that observer is made in an effect, which React runs after the browser has painted what was committed.
+
+#### Options considered
+
+1. **One render, as it was.**
+2. **One transition around the whole conversation.** Measured in the performance runs of 2026-11-20: the longest stop 83 ms, 326 ms at a quarter of the speed.
+    - Con: the opening took 659 ms instead of 526 ms. The answers of the list, of the usage and of the models, arriving meanwhile, each start the interrupted render again from its beginning, and nothing of the conversation is on the page until all of it is done.
+3. **Newest first, the older messages in steps behind them, each step a transition drawn straight onto the page.** Built first, and measured: its frames were as short as the fifth's, under "Measured" below.
+    - Con: in Firefox and WebKit a reader's own scroll is lost while the older messages come in. Measured on a production build, with a conversation of about 300 exchanges: one wheel notch at a random moment of the filling in was kept 3 of 16 times in Firefox and 6 of 16 in WebKit; otherwise the reader was at the end afterwards, as if the wheel had not been turned. A swipe of thirty small wheel events, 600 px in all, ended 0, 0 and 600 px from the end in three tries in Firefox, and 460 to 600 px in WebKit. A Page Up in WebKit moved the reader 633 or 0 of 701 px. Chromium lost nothing, and on a conversation that was whole all three kept everything.
+    - The cause, as far as it was measured: a browser scrolls on a thread of its own, and the page hears of it a frame later. Each step changes the page above the reader and moves the scroller, and in Firefox and WebKit that overrides a scroll that is under way. It is not only the page's own writing of `scrollTop`: a build that wrote it only where the browser had not kept the place itself wrote it once in a whole opening, the first move to the end, since the browsers' own anchoring kept the place at all 30 steps, in all three, and it still lost wheel turns.
+4. **The same in plain steps, with a timer between them.** Measured in Chromium at a quarter of the CPU's speed, at 300 exchanges: steps of 20 left 24 frames over 50 ms, the longest 100 ms; steps of 10 left 4, of 67 ms at the longest; steps of 40 left 15 over 100 ms. Transitions left none over 50 ms: React draws a transition in slices, and only its commit is one piece. At full speed the two don't differ.
+    - Pro: a step lands in a bounded time, whatever else goes on.
+5. **Newest first, each step drawn out of sight as a transition, and shown a step at a time only while the reader is still.**
+6. **The third, writing `scrollTop` only where the browser did not keep the place.** Built and measured in the three browsers.
+    - Con: no help. And in WebKit a Page Up then left the reader 12,000 to 48,000 px away: WebKit's own anchoring doesn't hold while it animates a scroll of the keyboard's.
+7. **The third, taking no step while the reader scrolls,** the steps still drawn straight onto the page. Built and measured.
+    - Pro: swipes kept whole in all three.
+    - Con: a lone notch was still lost 1 of 3 times in Firefox and 2 of 3 in WebKit, by the step that was already under way.
+8. **The fifth, showing what is drawn less often and in larger pieces,** at most every 150 ms. Built and measured.
+    - Con: no better than a step at a time: in WebKit 12 of 16 notches kept, against 11 of 16.
+9. **Draw only what is near the screen,** a windowed list. Not built.
+    - Con: the browser's own search finds only what is drawn, the scrollbar is a guess for messages whose height is unknown, and keeping the end in view and a reader's place become that code's.
+10. **Read the conversation from the server in pages,** the older ones when the reader scrolls up. Not built.
+    - Con: the same loss for the browser's search, and a change to the API. And reading isn't what takes the time: drawing is.
+11. **`content-visibility: auto` on each message.** Not built.
+    - Con: it skips the layout and painting of what is off the screen, not React's rendering and the markdown, where the time goes.
+
+#### Decision
+
+The fifth. **The newest messages are on the page at once, at the conversation's end from the first painted frame. The older ones are drawn behind, out of sight and without holding the page up, and shown while the reader is still. What the reader looks at never moves by it, and a scroll of theirs is never taken from them.**
+
+- **Newest first** (`components/chat/chat.tsx`). A `Chat` that starts from a stored conversation of more than 20 messages draws its newest 20 (`DRAWN_FIRST`), and holds the older ones back. They are drawn in steps of 20 (`DRAWN_EACH_STEP`), the newest of them first.
+- **What is held back is a count of the conversation's oldest messages,** and only what it had when it came onto the page. A question, an answer that arrives, and whatever the conversation holds beyond that count when it is read again from the server (`resync`), are drawn and shown as they come, as before. Only the drawing and the showing start later. What a new question follows, whether the conversation has an answer yet, how its last turn ended, whether it is empty and which message is being written still read every message; which message is being written is counted in the whole list. A conversation that is gone when it is read again, an empty list, throws nothing, and takes both counts to nothing with it: a question asked next is the first message of a new conversation, at the place in the list where a step was held back, and is shown as it comes.
+- **Drawn out of sight, each step a transition** (`startTransition`), begun from an effect once the step before it is committed. What is out of sight changes nothing the reader sees or scrolls, so drawing doesn't wait for them. The next count is worked out from the one on the page, not by a function of the state before it: React's StrictMode, as under `make dev`, runs the effect twice, and the second run takes no second step.
+- **Each step's messages are in an element of their own,** which stays their parent for good: a message that moved to another parent would be drawn anew. It is keyed by where its step begins, and has the `hidden` attribute until it is shown. The attribute, not a class: it is what the browser and the queries by role go by, and the simulated page of the component tests has no stylesheet. It lays its messages out as the log lays out its own children (`flex flex-col gap-6`), so the page looks as it did. Not `display: contents`: keeping the reader's place needs the position of the first thing shown, and an element without a box has none. The newest 20 are in such an element too, shown from the start; a step that has no messages left has none.
+- **Shown while the reader is still,** a step at a time, the newest first, each in a task of its own, begun by a timer. A second count says which message is the first that is shown. While something is drawn and not shown, an effect sets a timer whose task asks `useFollow` how long until the reader is still (`untilStill`). If that isn't 0 it waits that long and asks again; otherwise it reads where the reader stands (`standing`), shows the step with `flushSync`, and tells `useFollow` right after (`addedAbove`). Asking, showing and putting the reader back are one task, so nothing of the reader's comes between them. The timer is cleared when the effect is undone, and the next count is worked out from the current one, as for drawing.
+- **20 and 20.** Steps of 10, each a transition, made no frame shorter than steps of 20 beyond the noise (59 against 75 ms in Firefox at a page's first opening, 69 against 68 in WebKit), and took as long in all. And 20 fills a screen even with messages of one line, which 10 may not.
+- **`Message` is memoized** (`components/chat/message.tsx`): a step drawn or shown, a key pressed in the box and an answer arriving draw no message again whose message and `writing` didn't change. Measured in the performance runs of 2026-11-20: the time the page's scripts took while an answer arrived under 300 exchanges went from 626 to 243 ms with it.
+- **A screen reader says nothing of the older messages.** The log is a live region, whose additions are said. While anything is still to be shown it has `aria-live="off"`; once nothing is, it has no `aria-live`, as before. A conversation that fits in the first 20 never has it.
+- **At the end before the first paint.** `useFollow` goes to the end in a layout effect when it starts. The observer stays in the effect, with the read of the scroller's box before `observe`: starting to observe in a layout effect did not cure WebKit's error (the revision before this one).
+- **The reader's place holds when messages are shown above, measured, not inferred.** Browsers keep a reader's place by themselves (`overflow-anchor`, which all three support), but none does at `scrollTop` 0, the top of what is shown, where a reader who wants the older messages goes. `standing` gives the scroller's `scrollTop`, and the first thing of the conversation that is shown, the log's first child that isn't `hidden`, with its `offsetTop`. `addedAbove` takes how far that thing moved down, sets `scrollTop` to what it was plus that, and moves the hook's note of where the reader last was (`top`) by as much. Where the browser has already moved the scroller, that sets the value it has. Not the growth of `scrollHeight`: the change that shows older messages can let an arriving answer grow at its end at once. Seen in the throwaway that showed with `flushSync` and took the growth: a reader who had scrolled up slipped by 24 px, one line, once an opening, in all three browsers.
+- **Why `top` moves along.** The hook tells that the reader went up by comparing `scrollTop` with `top`. When messages are added above between a reader's scroll and the browser's `scroll` event, `scrollTop` has grown by what was added, so it is larger than `top` although the reader went up: the hook took that for down, kept following, and pulled the reader back to the end at the next change of size. In the first throwaway, before `top` moved along, a reader who had scrolled up 700 px was back at the end, and the message they looked at had moved 834 px.
+- **Whether the reader is still.** The hook notes when the reader last did something that scrolls: a `wheel` event, a `touchmove` or a `pointerdown` on the scroller, which is a scrollbar taken hold of too; a key that scrolls (`PageUp`, `PageDown`, `Home`, `End`, `ArrowUp`, `ArrowDown`, space), pressed anywhere, since those keys scroll the conversation wherever the keyboard is, heard on the window while it is captured; and a `scroll` event that finds the reader a pixel or more from where the hook last noted them. The page's own moves leave the note where they put the scroller, so they don't count. The reader is still once 150 ms have passed since (`STILL_AFTER_MS`): longer than the time between two events of one gesture, of a key held down, or of the frames of a scroll the browser animates itself, and shorter than anyone notices. The time is read with `Date.now()`, so a test sets it (`tests/clock.ts`), and a clock that went backwards counts as still. The hook hands out one function for it: how long until the reader is still, 0 when they are.
+- **A wheel turned up leaves the end at once.** A `wheel` event with `deltaY < 0`, where there is something above (`scrollTop > 0`), ends the following then, not when the browser says that the reader scrolled: until then a change of size would take the reader back to the end, over the scroll under way. Not with Ctrl held: that makes the page larger and scrolls nothing, and two fingers moved apart on a trackpad are reported the same way.
+
+**Tests:**
+
+- in the page's component tests (`components/chat/newest-first.test.tsx`), with a stand-in for the code that draws markdown, which notes each text it drew once React has put it on the page, in order, with the `writing` it was given, and can wait for a promise the test keeps (`use`) for one older answer, which keeps that step from being drawn for certain:
+    - a conversation of 50 messages is drawn newest 20 first, then the 20 before them, then the first 10, also under StrictMode, and ends with every message on the page once, in its order;
+    - while the reader scrolls, by a wheel or a key, and the test's clock stands still, every older message is drawn and none is shown, and none is found by its role; once the clock has moved on, they are shown a step at a time, the newest first, and each was drawn once, showing included;
+    - its log has `aria-live="off"` from the moment it is on the page, and none once all are shown; a conversation of 20 messages never has it;
+    - each stored answer is drawn once by the time all are shown, and none again for typing, a question and its answer;
+    - an answer that arrives while older messages aren't all shown is drawn as arriving;
+    - a question asked while older messages are held back follows the conversation's last message, its answer shows, and the older messages still all arrive. The app is opened inside a Suspense boundary there (`open(path, { suspense: true })`): a step that waits and isn't a transition would put the boundary's fallback in the page's place, and each of those tests says that it stayed away. Without a boundary, React 19.3 leaves the page as it was for any update that waits, and throws nothing, so a test without one could not tell;
+    - a conversation read again while older messages are held back ends whole, and one that is gone by then holds nothing back, at once, and shows a question asked next as it comes;
+- in the hook's tests (`components/chat/follow.test.tsx`), with made-up sizes:
+    - the page is at the end when it is first painted, before any size was reported;
+    - messages shown above leave a reader at the end at the end, and a reader elsewhere at what they read, with the button to the newest message; what grew at the end in the same change doesn't move the reader, which fails when `addedAbove` takes the growth of `scrollHeight`; and a reader whose place the browser kept is moved no further;
+    - a scroll up that the browser tells of only after messages were shown above is a scroll up, after which a change of size leaves the reader where they are. That one fails when `top` doesn't move along;
+    - each thing that counts as the reader scrolling does, and the page's own moves, a key that doesn't scroll and a scroll of less than a pixel don't; the reader is still 150 ms after, by the clock, and not before, and with a clock that went backwards;
+    - a wheel turned up ends the following at once, so that a change of size before any `scroll` event leaves the reader; one turned up with nothing above, turned down, or turned with Ctrl held doesn't;
+- end to end, in a real browser (`e2e/newest-first.spec.ts`), with a conversation of 60 exchanges whose answers each hold a small table, made through the API from the page's own session, and the page watched from inside at the start of each frame, counting the messages that are shown:
+    - opened from the list, the page is at its end at every frame from the first that shows a message, and in the end all messages are there and the log has no `aria-live`;
+    - opened by its address, its first frame is at the end;
+    - a reader who goes to the top of what is shown once the first frame has begun, in a task of its own, sees the message there move a pixel at the most, at every frame until all messages are in, and is offered "Go to the newest message".
+
+    In each, the first frame showed less than the whole conversation, or the reader went up while messages were still to come: the control that the test saw them come in. No test says how long a frame took: on a shared machine that says little. And no end-to-end test turns a wheel: those tests run Chromium, which kept every scroll on the first build too.
+
+#### Measured
+
+On a production build of this change, in the same window and browsers. By then the larger conversation had grown to about 330 exchanges, its newest fifteen each with an answer of 1,500 words, from the runs with an arriving answer below. Two runs each, opened from the list:
+
+| | Chromium | Firefox | WebKit | Chromium at a quarter of the CPU's speed |
+|---|---|---|---|---|
+| 100 exchanges: longest time between two frames | 33 to 50 ms | 74 to 75 ms | 69 to 76 ms | 267 to 333 ms |
+| 330 exchanges | 17 to 33 ms | 50 to 51 ms | 34 to 45 ms | 117 to 150 ms |
+| 100 exchanges: first messages shown after | 116 to 124 ms | 121 to 138 ms | 123 to 133 ms | 346 to 425 ms |
+| 330 exchanges | 106 to 118 ms | 125 to 133 ms | 107 to 198 ms | 234 to 288 ms |
+| 100 exchanges: all shown after | 320 to 328 ms | 496 to 551 ms | 506 to 519 ms | 1,377 to 1,502 ms |
+| 330 exchanges | 855 to 921 ms | 1,311 to 1,326 ms | 1,300 to 1,347 ms | 3,309 to 3,465 ms |
+
+The 100-exchange conversation was each run's first opening after a page load, which is where its longer frame comes from. At a quarter of the speed the one render, measured again once the larger conversation had grown, had taken 900 ms at 100 exchanges and 1,717 ms at 314. Opened by its address: 17 to 75 ms at the longest at full speed in the three browsers, and 183 to 200 ms at a quarter of the speed.
+
+**Where the page stands.** A reader who scrolled up 700 px, or to the very top, as soon as the first frame had been shown: the message they looked at moved 0 px until all messages were shown, in all three browsers, in every run. No frame began with the conversation anywhere but at its end, with one exception: in one of Firefox's eight openings a frame began 134 px from the end, before the page watched its size, and the next was at the end. Its cause was not looked for here. WebKit's "ResizeObserver loop" error (the revision before this one) was counted again, since the hook now starts with a move to the end: at 0 of 15 page loads, new chats, conversations opened from the list and reloads.
+
+**A reader's own scroll,** with the conversation of about 330 exchanges, while the older messages came in. Sixteen tries a browser for the lone notch, at random moments, where the first build (the third option) had kept 3 in Firefox and 6 in WebKit:
+
+- a lone wheel notch: kept 16 of 16 in Chromium and in Firefox; in WebKit 9 and 12 of 16 in two rounds, and 7 of 16 while the machine was busy with other work;
+- a swipe of thirty small wheel events: kept whole in all three, 9 of 9;
+- a Page Up: kept whole in all three, 12 of 12.
+
+**With an answer arriving** in the conversation as it is opened, 1,500 words at 200 words a second: every older message was shown after 1.2 s in Chromium, 1.6 s in Firefox and 1.7 s in WebKit. At a quarter of the CPU's speed in Chromium, 91 of 331 exchanges were shown when the answer ended after 7.4 s, and all of them 2.9 s later. A reader who scrolled up as soon as the page read along: the message they looked at moved 0 px, in five runs, two of them at a quarter of the speed.
+
+#### Consequences
+
+- **Until the older messages are shown, the browser's own search finds only what is shown,** and the scrollbar shortens as they come.
+- **The first messages are on the page sooner, and all of them later than with the one render:** at about 300 exchanges, the first after 106 to 198 ms where they took 444 to 751 ms, and all of them after 855 to 1,347 ms, while the reader is still.
+- **While the reader scrolls, nothing older is shown,** however long: what is drawn waits until they have been still for 150 ms. A key that scrolls counts wherever it is pressed, a space typed into the box too, and so does any press on the conversation, as a click that begins to select some text.
+- **In WebKit a lone wheel notch that falls together with a step being shown is still lost:** 4 to 7 of 16 at random moments of the filling in, and 9 of 16 while the machine was busy, where the first build lost 10. No write of the page's own is needed for it: a build that wrote the scroller's place once in a whole opening lost them too. Whatever follows the notch is kept, since the page then waits for the reader.
+- **Scrolling in Firefox and WebKit is held by no test.** The end-to-end tests run Chromium ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md)), which kept every scroll on the first build too. It was measured by hand, and would have to be again after a change to how a conversation comes onto the page.
+- **While an answer arrives in the conversation being opened, on a slow device the older messages come more slowly.** At a quarter of the CPU's speed, with an answer of 1,500 words arriving at 200 words a second, 91 of 331 exchanges were shown when the answer ended, after 7.4 s, and all of them 2.9 s later; at full speed all were shown after 1.2 to 1.7 s in the three browsers. And React finishes a transition at once that has waited five seconds.
+- **`Message` is memoized,** so nothing that is new at every render may be passed to it: every message would be drawn again each time.
+- **How long a frame takes is held by no test.** It was measured by hand, in three browsers, and would have to be again after a change to how a conversation comes onto the page.
+
+**Why now, and not at the start:** the page was first measured with long conversations in the performance runs of 2026-11-20. The frame at the top was found while measuring this step, and the scrolls lost in Firefox and WebKit while measuring its first build.
