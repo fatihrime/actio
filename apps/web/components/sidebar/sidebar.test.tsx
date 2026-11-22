@@ -1057,8 +1057,8 @@ describe("where the list is", () => {
 
       await user.click(await listButton());
       document.body.replaceChildren(); // the page is closed
-      // A new page starts without the mark, until the script in its head sets it
-      // (lib/frame.test.ts). The page sets it too, as it starts.
+      // A new page starts without the mark, until the script at the start of its body
+      // sets it (lib/frame.test.ts). The page sets it too, as it starts.
       root.removeAttribute(LIST_AWAY_MARK);
       open("/", { strict });
 

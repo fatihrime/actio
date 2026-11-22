@@ -5,9 +5,11 @@ import { LIST_AWAY_SCRIPT } from "@/lib/frame";
 
 import RootLayout from "./layout";
 
-test("the page's head holds the script that marks a list put away, and no other", () => {
-  // It has to run before the first paint, while the page is read: in the head, as
-  // the browser gets it from the server (lib/frame.ts).
+test("the page's body begins with the script that marks a list put away, and holds no other", () => {
+  // It has to run before the first paint, while the page is read, as the browser gets
+  // it from the server (lib/frame.ts): before anything of the page's content. Not in
+  // the head, where it held back the page's own scripts in Chromium until the
+  // stylesheet was in (ADR 0015, revision of 2026-11-22).
   const page = new DOMParser().parseFromString(
     renderToStaticMarkup(
       <RootLayout>
@@ -18,11 +20,14 @@ test("the page's head holds the script that marks a list put away, and no other"
   );
 
   const scripts = [...page.querySelectorAll("script")];
-  expect(scripts.map((script) => script.parentElement?.tagName)).toEqual([
-    "HEAD",
-  ]);
+  expect(scripts).toHaveLength(1);
   expect(scripts[0]?.textContent).toBe(LIST_AWAY_SCRIPT);
-  expect(page.body.textContent).toBe("The page");
+  expect(page.head.querySelector("script")).toBeNull();
+  expect([...page.body.children].map((child) => child.tagName)).toEqual([
+    "SCRIPT",
+    "P",
+  ]);
+  expect(page.body.lastElementChild?.textContent).toBe("The page");
 });
 
 test("the page's root lets the script's mark be", () => {

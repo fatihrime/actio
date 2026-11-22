@@ -5,11 +5,13 @@
 // revision of 2026-11-21).
 //
 // One thing about the frame the server can't know: whether this browser put the list
-// away. That is remembered in the browser's own storage. So the page's head holds one
-// small script, which runs while the HTML is read, before the first paint: it marks
-// the page's root element when the list was put away, and CSS then leaves the list no
-// place (`list-away` in app/globals.css). From then on the page keeps the mark in step
-// with the switch itself.
+// away. That is remembered in the browser's own storage. So the page's body begins with
+// one small script, which runs while the HTML is read, before the frame's first paint:
+// it marks the page's root element when the list was put away, and CSS then leaves the
+// list no place (`list-away` in app/globals.css). From then on the page keeps the mark
+// in step with the switch itself. Not in the page's head, where it held back the
+// page's own scripts in Chromium until the stylesheet was in (ADR 0015, revision of
+// 2026-11-22).
 //
 // This module holds what the script and the page must agree on. No hooks, and no
 // "use client": the layout, which only the server renders, imports it.
@@ -22,9 +24,9 @@ export const LIST_HIDDEN_KEY = "actio.conversations.hidden";
  * app/globals.css names it too, in the variant `list-away`. */
 export const LIST_AWAY_MARK = "data-list-away";
 
-/** The script in the page's head, as the browser runs it: it sets the mark when the
- * switch is on. It never throws: storage can be off limits, as in some private
- * windows, and then the list keeps its place. */
+/** The script at the start of the page's body, as the browser runs it: it sets the
+ * mark when the switch is on. It never throws: storage can be off limits, as in some
+ * private windows, and then the list keeps its place. */
 export const LIST_AWAY_SCRIPT = `try{if(localStorage.getItem(${JSON.stringify(LIST_HIDDEN_KEY)})==="on")document.documentElement.setAttribute(${JSON.stringify(LIST_AWAY_MARK)},"")}catch(e){}`;
 
 /** Set the mark on the page's root element, or take it away. */

@@ -1,5 +1,5 @@
-// The script in the page's head, run as the browser runs it: an element of the page,
-// which the simulated browser runs as soon as it is in the page.
+// The script at the start of the page's body, run as the browser runs it: an element of
+// the page, which the simulated browser runs as soon as it is in the page.
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -9,8 +9,8 @@ import {
   markListAway,
 } from "./frame";
 
-/** Run the text the layout sends, as a script in the page's head, and hand back what
- * it threw. */
+/** Run the text the layout sends, as a script at the start of the page's body, and
+ * hand back what it threw. */
 function runTheScript(): unknown[] {
   const thrown: unknown[] = [];
   const caught = (event: ErrorEvent) => {
@@ -19,7 +19,7 @@ function runTheScript(): unknown[] {
   window.addEventListener("error", caught);
   const script = document.createElement("script");
   script.textContent = LIST_AWAY_SCRIPT;
-  document.head.append(script);
+  document.body.prepend(script);
   script.remove();
   window.removeEventListener("error", caught);
   return thrown;
@@ -27,7 +27,7 @@ function runTheScript(): unknown[] {
 
 const root = () => document.documentElement;
 
-describe("the script in the page's head", () => {
+describe("the script at the start of the page's body", () => {
   it("names what people's browsers hold", () => {
     // Browsers remember the switch under this name, and the styles look for this
     // attribute: renamed, either would be lost.
