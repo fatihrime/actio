@@ -560,3 +560,98 @@ On the code as built, in Playwright's Chromium 158, Firefox 159 and WebKit 27.2,
 #### Why now, and not at the start
 
 The revision that fetched the renderer ahead measured the largest paint, the time the page's scripts kept it busy and the first answer, not when the list's rows were on the page. A performance run after the steps of that week compared the page's first visit with the build before them, back to back, and found the rows later than before.
+
+### 2026-11-22: an answer that arrives waits for the renderer too
+
+#### Context
+
+The revision "the renderer is fetched ahead, and a stored answer waits for it" held a stored conversation until the renderer was here, three seconds at the most after the API had answered, and left an answer that arrives while the renderer is on its way as it was: shown as written, to become markdown once the renderer is here, since "words are worth more than a blank". The revision "the renderer is fetched once the list of conversations is on the page" asks for the renderer ahead only once the list has been read and the frame that shows it painted, and at once at the first letter typed into the box. So an answer can arrive while the renderer is still on its way, and that revision named the case it left: a question pasted and sent in one instant, to a model that begins at once, while the list has not answered. "What would end it for good is an arriving answer that waits for the renderer as a stored one does, a step of its own." This is that step.
+
+In `components/chat/message.tsx`, `Words` showed an answer's text as written (`AsWritten`) until the renderer was here, and was what asked for it: an answer asked for the renderer once its first words were on the page. `StoredChat` in `components/chat/chat-app.tsx` held a stored conversation by a wait of its own (`useWaitedOut(held, RENDERER_WAIT_MS)`).
+
+Measured on 2026-11-22, in Playwright 1.65 with Chromium 158, Firefox 159 and WebKit 27.2, on a scratch stack with the test model, which begins its answer within some tens of milliseconds and writes it at full speed; the list of conversations held back at a route for good, so the page has not asked for the renderer ahead; every change of the answer watched from inside the page:
+
+- **The code as pushed (`ebd83e8`).** A question pasted and sent in the same instant: Firefox showed the answer's first words as written in 3 visits of 6 (3 of 4 in an earlier round), Chromium and WebKit in 0 of 4 each. On an emulated slow connection (Chromium, 150 ms latency, 1.6 Mbit/s), the question's first letters typed over a third of a second: the answer was on the page as written from 0.21 to 0.23 s after it was sent until the renderer was here at 1.08 to 1.09 s, in 3 visits of 3.
+
+#### Options considered
+
+The second and the third were built in throwaways, and measured the same way (under "Measured"):
+
+1. **As it was: an arriving answer is shown as written until the renderer is here.**
+    - Pro: its words are on the page as soon as they come.
+    - Con: the swap that the revision of 2026-11-21 was made to end, whenever the renderer is on its way: in Firefox in 3 visits of 6 for a question pasted and sent at once, and on the slow connection for most of a second.
+2. **Hold only an answer that was still arriving when it came onto the page** (`writing` true at its first render).
+    - Pro: pasted and sent at once, never as written.
+    - Con: on the slow connection it held nothing: there the answer comes in one piece, and is complete at its first render. Whether an answer is arriving says nothing of whether the renderer is here.
+3. **A wait of its own for each answer, beside the stored conversation's.**
+    - Pro: never as written, on the slow connection or pasted and sent at once.
+    - Con: the waits add up. With the renderer's code slow to come, a stored conversation waits its three seconds, and then each of its answers three more: the component test "a conversation opened by its address > is shown as written when the code is slow to come, and as markdown once it is here" (`renderer.test.tsx`) fails, the one of 418 that does. And an answer asked later waits three seconds again, for a download that has already stalled.
+4. **One wait for the page, shared by a stored conversation and every answer.**
+
+#### Decision
+
+The fourth. **While the renderer is on its way, none of an answer's words is on the page, whether the answer is still arriving or already complete, and the page waits for the renderer once, three seconds at the most.**
+
+- **The rule is one hook,** `useWaitsForRenderer(words)` in `message.tsx`: words to show wait while nobody has asked for the renderer or it is being fetched, until the page's wait is over. When the renderer can't be had, nothing waits, and words are shown as written at once, as before.
+- **The answer** is the answer's half of `Message`, a component of its own now (`Answer`), with hooks. While its words wait it shows none of its parts, neither the reasoning nor the words, and in their place what it shows before its first word: "Waiting for the model…" (`Waiting`), once, also when it has both a reasoning and words. Then all of its parts are shown together: as markdown from their first render once the renderer is here, an arriving one with the text it has by then and at the pace it is drawn at (`usePaced`); or as written once the wait is over. `Message` stays memoized, and is given nothing new.
+- **An answer asks for the renderer as soon as it is on the page,** before its first word: the hook asks through `useRenderer`. The other ways of asking are as they were: ahead once the list's frame is painted, the box's first letter, and a stored conversation.
+- **One wait for the page,** kept in `message.tsx` beside the renderer's state, for as long as the page is open:
+    - it begins at the first moment that something on the page has words to show and no renderer: an answer's first words, a reasoning's too, or a stored conversation the page has read. `StoredChat` asks the same hook, in place of a wait of its own. It is begun from an effect, and only once a page, so React's StrictMode, which runs an effect twice, begins it once;
+    - it is counted by the clock, `Date.now()`, which it looks at every second at the most (`CLOCK_LOOK_MS`), as the stored conversation's wait was;
+    - after `RENDERER_WAIT_MS`, 3000 ms, it is over for everything that waits: the store tells every component that reads it, also when what began the wait has left the page. From then on nothing on the page waits for the renderer: a later answer, or a stored conversation opened then, is shown as written at once;
+    - once the renderer is here, everything is markdown, as before. Its timer is cleared once the renderer's fetch is over, however it went.
+- **`RENDERER_WAIT_MS` moved to `message.tsx`** with the wait, and `chat-app.tsx` names it too, as a re-export: the stored conversation's tests read it there.
+- **Unchanged:** a question is shown as it was typed; `AsWrittenOnError`, the pacing, the reasoning's fold, Stop and the notices are as they were; and a stored conversation behaves as before, its tests unchanged.
+
+**Why:** the first keeps the swap. The second looks at the wrong thing, and misses the answer that arrives whole, which is the slow connection's. The third makes the page wait more than once for one download, and a stored conversation's answers twice. One wait keeps the rule of the revision of 2026-11-21, that a download that stalls must not hide what the page already has, for the page as a whole.
+
+**Tests:**
+
+- in the page's component tests (`components/chat/renderer.test.tsx`), each from modules loaded anew, with the renderer's code held back until the test lets it arrive:
+    - an answer whose words arrive while the code is held back says "Waiting for the model…" once, for its reasoning and its words, and none of its words is ever on the page; once the code arrives, its words are markdown, with what it has by then while it still arrives, and never as written;
+    - the same for an answer that is complete at its first render. The request for its turn fails before any of its events arrive, and the page reads the conversation again, which holds the whole answer by then: the chat library never held that answer before, and nothing is being written once the request has failed, so `writing` is false from the answer's first render. A rule that looks at `writing` fails here;
+    - the page's wait: an answer's reasoning arrives, the clock moves two seconds on, its words arrive and the answer ends, and it still waits once the page has looked at the clock again; at three seconds after the reasoning its reasoning and its words are shown as written, together at every change of the page. A second answer is then shown as written at once, the clock standing still, and the first is markdown once the code arrives;
+    - the wait is counted from an answer's first words, not from when the answer came onto the page: a model takes four seconds to begin, the answer saying "Waiting for the model…" meanwhile, and when its reasoning then arrives the answer still waits, for three seconds more;
+    - a stored conversation shares the wait: opened from the list two seconds into an answer's wait, it is shown, as written, one second later and not three; and opened anew once the wait is over, with the clock standing still, it is there at once;
+    - two answers that both wait are both shown when the wait is over;
+    - a fetch of the code that fails while an answer waits shows it as written at once, the clock standing still, and a later answer the same;
+    - an answer that has no words yet asks for the code, with no frame coming;
+    - under React's StrictMode: an answer waits, its conversation leaves the page, a second later an answer in a new conversation waits too, and three seconds after the first answer's words the second is shown, so the wait was neither lost, nor begun again, nor counted twice; nothing is written to the console as an error or a warning meanwhile;
+    - the tests of a conversation opened by its address pass unchanged;
+- end to end, in a real browser (`e2e/renderer.spec.ts`): every script of the app's that the document doesn't name is held at a gate, the renderer's code among them. A question is asked, which the test model echoes at once, and its answer ends while the gate is closed: it says "Waiting for the model…", and none of the question's words was ever in it. The gate is opened well within three seconds, and the heading and the words in bold are there, its marks never. It failed on the code before this revision, which showed the answer as written while the gate was closed.
+
+#### Measured
+
+With the two throwaways, before this was built, in the same browsers and stack, and the same way:
+
+- **A first throwaway, which held only an answer that was still arriving when it came onto the page** (`writing` true at its first render): pasted and sent at once, never as written in 18 visits of 18. But on the slow connection it held nothing, 3 visits of 3: there the answer comes in one piece and is complete at its first render (`writing` false).
+- **A second throwaway, the rule above without the shared wait:** on the slow connection never as written, the words first shown, as markdown, at 1.08 to 1.10 s (3 of 3); pasted and sent at once never as written in 15 visits of 15, five a browser, the words shown 75 to 97 ms after sending; with the renderer's code held back five seconds: "Waiting for the model…", then the words as written at 3.05 to 3.06 s and as markdown at 4.75 to 4.77 s, once in each browser; with the renderer's code refused: as written at once (49 to 94 ms). The web suite against it: 417 of 418 pass, and "a conversation opened by its address > is shown as written when the code is slow to come, and as markdown once it is here" (renderer.test.tsx) fails, because the stored conversation's own three seconds and then each answer's three seconds add up. Hence one wait for the page.
+
+The code as built, in the same browsers and stack, and the same way:
+
+- **A question pasted and sent in the same instant:** never as written, in 15 visits of 15, five a browser; the words were on the page 80 to 93 ms after sending.
+- **A question whose first letters are typed over a third of a second:** never as written, in 9 visits of 9, three a browser.
+- **On the slow connection, in Chromium:** never as written, 3 visits of 3; the answer said "Waiting for the model…" until its words came, as markdown, at 1.08 to 1.10 s.
+- **The renderer's code held back five seconds:** the words as written at 3.05 to 3.08 s, and as markdown at 4.74 to 4.75 s, once in each browser.
+- **The renderer's code refused:** as written at once, at 54 to 59 ms, once in each browser.
+- **A stored conversation opened by its address, and the first answer of a visit,** with nothing held back: never as written, in the three browsers.
+- **What it costs where the renderer is here,** in Chromium, the code before and the code as built swapped back to back, two rounds: while an answer of 1,500 words arrives at 150 words a second the page's scripts ran for 875 and 928 ms before and 813 and 1,043 ms as built, at a quarter of the CPU's speed for 2,130 and 2,196 ms before and 2,334 and 2,101 ms as built, with no frame longer than 34 ms either way; a conversation of 300 exchanges opened from the list was all on the page after 952 and 900 ms before and 753 and 852 ms as built. Nothing that the two rounds tell apart.
+
+#### Consequences
+
+- **With the renderer's code slow to come, an answer's first words are on the page later than they were:** up to three seconds later, where they were shown as written at once. On the slow connection of the measurements they came at 1.08 to 1.10 s, as markdown, where they were there as written from 0.21 to 0.23 s.
+- **"Waiting for the model…" is also said while the page waits for its own code,** and by an answer that is complete, or that was stopped or broke off after some words: for up to three seconds such an answer says it beside the notice of what happened to it. A screen reader hears it as before an answer's first word: it is a `role="status"`.
+- **The page waits once.** After three seconds of a download that stalls, whatever waited is shown as written, and so is everything after it, until the code comes, as before; nothing on that page waits for it again.
+- **A stored conversation shares that wait.** One read while an answer's wait is running waits for what is left of it, and one read after the wait is over is shown as written at once, where each stored conversation had three seconds of its own.
+- **A component test that shows an answer before its file has loaded the renderer's code** sees "Waiting for the model…" until the code is in, where it saw the words as written: about half a second in the full run of the page's tests, within the three seconds a component test waits for something to appear (`tests/setup.ts`).
+- **The case the revision before this one called worse is ended:** a question pasted and sent in one instant, to a model that begins at once, while the list of conversations has not answered, no longer shows its first words as written: 0 visits of 15 as built, where Firefox showed them in 3 of 6.
+
+**What no longer holds:**
+
+- in the revision "the renderer is fetched ahead, and a stored answer waits for it", under "Decision": that an answer that arrives while the renderer is on its way is shown as written, and becomes markdown when the renderer is here ("Words are worth more than a blank"); and that a stored conversation waits three seconds after the API has answered, which holds now only when nothing else on the page began the page's wait before;
+- in the revision "an answer that can't be drawn is shown as written": that the text as written is what the reader sees while the renderer is on its way. Now it is what they see once the page's wait is over;
+- in the revision "the renderer is fetched once the list of conversations is on the page", under "Consequences": that an answer that arrives before the renderer is here is shown as written until it is, and "One case is worse than it was", which this ends.
+
+#### Why now, and not at the start
+
+The revision of 2026-11-21 kept an arriving answer as it was because the renderer, asked for as soon as the session was known, was nearly always here before an answer. Since the revision before this one, it is asked for later, and the measurements above found answers that came first.
