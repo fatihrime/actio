@@ -8,7 +8,7 @@ The scripts are sent once with SCRIPT LOAD and then called by their hash (EVALSH
 Valkey restarts and forgets them, the client sends them again.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncGenerator, Iterable, Sequence
 from importlib.resources import files
 from typing import Any
 
@@ -40,6 +40,11 @@ from actio_quota.state import BucketState, check_buckets, current, dump_state, r
 IDLE_TTL_MS = 8 * 24 * 3_600_000
 """A user's keys vanish together after this long without a write; the next request
 rebuilds them from the ledger. Longer than a week, so a weekly window survives."""
+
+SCAN_PAGE = 500
+"""How many keys one SCAN looks at, as `users` asks Valkey: a hint, not a limit. Each
+page is a round trip, and holds Valkey only for as long as it takes to look at that many
+keys."""
 
 
 def _script(name: str) -> str:
@@ -194,6 +199,40 @@ class ValkeyQuota:
             return None
         stored = _buckets(fields)
         return tuple(current(stored.get(b.name), b, now_ms).view() for b in buckets)
+
+    async def buckets(self, user_id: str) -> dict[str, BucketState] | None:
+        """The user's buckets as they are stored, by name: each one's window and
+        counters, whatever the time, or `None` when the user has no counters.
+
+        Unlike `snapshot`, it takes no plan: a window that is over is given as it was
+        stored, and the caller decides what it is worth. It reads in one MULTI, as
+        `snapshot` does, and writes nothing: the user's keys expire when they would
+        have."""
+        meta, raw = self._keys(user_id)[:2]
+        epoch, fields = await self._read(("hget", meta, "epoch"), ("hgetall", raw))
+        return None if epoch is None else _buckets(fields)
+
+    async def users(self) -> AsyncGenerator[str]:
+        """The ids of the users that have counters under this engine's prefix, each once,
+        in no particular order.
+
+        Found by their `meta` keys, a page of the key space at a time (SCAN), so that
+        Valkey is never held for long and a caller can stop where it likes. A user whose
+        counters appear or vanish meanwhile may be among them or not. It writes
+        nothing."""
+        # Neither the braces nor the prefix mean anything to the pattern: a prefix has
+        # none of `*?[]\` (`check_name`). The other keys of a user don't end in `:meta`.
+        head, tail = f"{self._prefix}:{{u:", "}:meta"
+        found: set[str] = set()
+        async for key in self._client.scan_iter(match=f"{head}*{tail}", count=SCAN_PAGE):
+            # A key that something else wrote here can hold any bytes: it is given as an
+            # id all the same, for the caller to leave out, instead of ending the scan.
+            name = key.decode(errors="backslashreplace") if isinstance(key, bytes) else str(key)
+            user_id = name[len(head) : -len(tail)]
+            # SCAN can give a key twice, when the key space grows or shrinks meanwhile.
+            if user_id not in found:
+                found.add(user_id)
+                yield user_id
 
     async def epoch(self, user_id: str) -> int | None:
         (value,) = await self._read(("hget", self._keys(user_id)[0], "epoch"))

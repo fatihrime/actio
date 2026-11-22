@@ -21,7 +21,7 @@ events at the same `now_ms` values always gives the same state.
 """
 
 import copy
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -247,6 +247,19 @@ class QuotaOracle:
         if user is None:
             return None
         return tuple(current(user.buckets.get(b.name), b, now_ms).view() for b in buckets)
+
+    def buckets(self, user_id: str) -> dict[str, BucketState] | None:
+        """The user's buckets as they are stored, by name: each one's window and
+        counters, whatever the time, or `None` when the user has no counters.
+
+        Unlike `snapshot`, it takes no plan: a window that is over is given as it was
+        stored. Copies: changing them changes nothing here."""
+        user = self._users.get(user_id)
+        return None if user is None else copy.deepcopy(user.buckets)
+
+    def users(self) -> Iterator[str]:
+        """The ids of the users that have counters, each once, in no particular order."""
+        return iter(list(self._users))
 
     def rebuild(
         self,

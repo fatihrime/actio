@@ -3,6 +3,7 @@
 import asyncio
 import random
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from valkey.asyncio import Valkey
@@ -153,6 +154,92 @@ async def test_users_are_isolated(clients: list[Valkey]) -> None:
         await engine.reserve("u2", "r1", buckets(10), Estimate.flat(10), ttl_ms=TTL, now_ms=T0),
         Granted,
     )
+
+
+@pytest.mark.anyio
+async def test_the_users_are_found_under_this_engines_prefix_alone(clients: list[Valkey]) -> None:
+    """Not those of a neighbour prefix, nor another key that ends in `:meta`, as one of
+    the rate limits' could."""
+    client = clients[0]
+    engine = ValkeyQuota(client, prefix="q")
+    for user in ("u1", "u2"):
+        assert await engine.rebuild(user, buckets(10), [], now_ms=T0, if_epoch=None)
+    neighbour = ValkeyQuota(client, prefix="q:x")
+    assert await neighbour.rebuild("u3", buckets(10), [], now_ms=T0, if_epoch=None)
+    await client.set("q:rl:{u:u4}:meta", "1")
+
+    assert sorted([user async for user in engine.users()]) == ["u1", "u2"]
+
+
+@pytest.mark.anyio
+async def test_a_key_that_holds_other_bytes_than_text_doesnt_end_the_scan(
+    clients: list[Valkey],
+) -> None:
+    """The engine writes no such key: its ids are checked. One that something else wrote
+    under the prefix is given as an id, with its bytes spelt out, for the caller to
+    leave out, and the users beside it are found."""
+    client = clients[0]
+    engine = ValkeyQuota(client, prefix="q")
+    assert await engine.rebuild("u1", buckets(10), [], now_ms=T0, if_epoch=None)
+    await client.set(b"q:{u:\xff\xfe}:meta", "1")
+
+    assert sorted([user async for user in engine.users()]) == ["\\xff\\xfe", "u1"]
+
+
+class ScansTwice(Valkey):
+    """A client whose SCAN gives every key twice, as Valkey's may when its key space
+    grows or shrinks between two pages."""
+
+    # The client's types give it the blocking client's `scan_iter` as well as its own.
+    async def scan_iter(  # type: ignore[override]
+        self,
+        match: str | bytes | memoryview | None = None,
+        count: int | None = None,
+        _type: str | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[Any]:
+        async for key in super().scan_iter(match, count, _type, **kwargs):
+            yield key
+            yield key
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("clients")  # for the empty database
+async def test_a_user_whose_key_a_scan_gives_twice_is_found_once(valkey_url: str) -> None:
+    async with ScansTwice.from_url(valkey_url) as client:
+        engine = ValkeyQuota(client, prefix="q")
+        for user in ("u1", "u2"):
+            assert await engine.rebuild(user, buckets(10), [], now_ms=T0, if_epoch=None)
+
+        assert sorted([user async for user in engine.users()]) == ["u1", "u2"]
+
+
+@pytest.mark.anyio
+async def test_reading_the_users_and_their_buckets_writes_nothing(clients: list[Valkey]) -> None:
+    """Not even when the keys expire: every write pushes that back, and a read must not.
+    So they are made to expire at a moment that no write would set."""
+    client = clients[0]
+    engine = ValkeyQuota(client, prefix="q")
+    assert await engine.rebuild("u1", buckets(100), [], now_ms=T0, if_epoch=None)
+    for rid in ("r1", "r2"):
+        await engine.reserve("u1", rid, buckets(100), Estimate.flat(3), ttl_ms=TTL, now_ms=T0)
+    await engine.settle("u1", "r1", 3, now_ms=T0)  # and r2 is still held
+    seconds, microseconds = await client.time()
+    at = seconds * 1000 + microseconds // 1000 + 24 * HOUR + 1
+    keys = sorted(await client.keys("q:*"))
+    for key in keys:
+        assert await client.pexpireat(key, at)
+    before = await engine.dump("u1", now_ms=T0)
+
+    assert [user async for user in engine.users()] == ["u1"]
+    assert await engine.buckets("u1")
+
+    assert sorted(await client.keys("q:*")) == keys
+    assert len(keys) == 6
+    # The client types it as the blocking client's: here it is awaited.
+    expire_at = [await client.pexpiretime(key) for key in keys]  # type: ignore[misc]
+    assert expire_at == [at] * 6
+    assert await engine.dump("u1", now_ms=T0) == before
 
 
 def test_rejects_ids_that_could_escape_the_key_layout() -> None:

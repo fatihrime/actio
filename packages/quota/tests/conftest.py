@@ -8,7 +8,7 @@ which starts a throwaway server from the image pinned in compose.yaml.
 
 import asyncio
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
 
 import pytest
@@ -25,6 +25,7 @@ from actio_quota import (
     ReserveResult,
 )
 from actio_quota.engine import ValkeyQuota
+from actio_quota.state import BucketState
 
 settings.register_profile("dev", max_examples=100)
 settings.register_profile("ci", max_examples=200, print_blob=True)
@@ -71,6 +72,12 @@ class SyncValkeyQuota:
     ) -> tuple[BucketView, ...] | None:
         return self._run(self.engine.snapshot(user_id, buckets, now_ms=now_ms))
 
+    def buckets(self, user_id: str) -> dict[str, BucketState] | None:
+        return self._run(self.engine.buckets(user_id))
+
+    def users(self) -> Iterator[str]:
+        return iter(self._run(_all(self.engine.users())))
+
     def rebuild(
         self,
         user_id: str,
@@ -111,6 +118,10 @@ async def _connect(url: str) -> Valkey:
 
 async def _flush(client: Valkey) -> None:
     await client.flushdb()
+
+
+async def _all(found: AsyncIterator[str]) -> list[str]:
+    return [item async for item in found]
 
 
 @pytest.fixture

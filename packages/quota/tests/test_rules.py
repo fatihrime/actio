@@ -23,7 +23,9 @@ from actio_quota import (
     Rolling,
     UsageWarning,
 )
+from actio_quota.engine import SCAN_PAGE
 from actio_quota.model import DONE_TTL_MS, GC_BATCH
+from actio_quota.state import BucketState
 
 HOUR = 3_600_000
 T0 = 1_800_000_000_000  # an arbitrary start time, in ms
@@ -306,6 +308,82 @@ def test_losing_valkey_data_drops_in_flight_reservations(engine: QuotaOracle) ->
     assert engine.rebuild("u1", buckets(), [], now_ms=T0, if_epoch=None)
     assert engine.settle("u1", "r1", 10, now_ms=T0).outcome is Outcome.UNKNOWN
     assert views(engine)["session"].used == 0
+
+
+# --- Reading what is stored, without a plan --------------------------------------------
+
+
+def as_dumped(stored: dict[str, BucketState]) -> dict[str, dict[str, object]]:
+    """Buckets as `dump` gives them."""
+    return {
+        name: {
+            "start_ms": bucket.start_ms,
+            "reset_ms": bucket.reset_ms,
+            "limit": bucket.limit,
+            "used": bucket.used,
+            "reserved": bucket.reserved,
+            "warned": sorted(bucket.warned),
+        }
+        for name, bucket in stored.items()
+    }
+
+
+def test_a_users_buckets_are_read_as_they_are_stored_whatever_the_time(
+    engine: QuotaOracle,
+) -> None:
+    """Used, held and warned of. Six hours on the session is over, and its window is
+    given all the same: what it is worth is for the caller to say."""
+    assert isinstance(reserve(engine, "r1", 60), Granted)
+    engine.settle("u1", "r1", 55, now_ms=T0)  # past half of the session's 100
+    assert isinstance(reserve(engine, "r2", 10), Granted)
+
+    stored = engine.buckets("u1")
+
+    state = engine.dump("u1", now_ms=T0 + 6 * HOUR)
+    assert stored is not None
+    assert state is not None
+    assert as_dumped(stored) == state["buckets"]
+    assert stored["session"] == BucketState(
+        T0, T0 + 5 * HOUR, 100, used=55, reserved=10, warned={50}
+    )
+
+
+def test_a_user_without_counters_has_no_buckets_and_new_counters_have_none_stored(
+    fresh: QuotaOracle,
+) -> None:
+    assert fresh.buckets("u1") is None
+    assert fresh.rebuild("u1", buckets(), [], now_ms=T0, if_epoch=None)
+    assert fresh.buckets("u1") == {}
+
+
+def test_what_is_read_of_a_users_buckets_is_a_copy(engine: QuotaOracle) -> None:
+    assert isinstance(reserve(engine, "r1", 60), Granted)
+    engine.settle("u1", "r1", 55, now_ms=T0)
+    before = engine.dump("u1", now_ms=T0)
+    stored = engine.buckets("u1")
+    assert stored is not None
+
+    stored["session"].used += 1
+    stored["session"].warned.add(75)
+    del stored["week"]
+
+    assert engine.dump("u1", now_ms=T0) == before
+
+
+def test_the_users_are_those_that_have_counters_each_once(fresh: QuotaOracle) -> None:
+    """More of them than one page of Valkey's SCAN looks at. Those whose counters were
+    lost are not among them."""
+    for lost in ("lost1", "lost2"):
+        assert fresh.rebuild(lost, buckets(), [], now_ms=T0, if_epoch=None)
+    fresh.flush()
+    users = {f"u{i}" for i in range(3 * SCAN_PAGE)}
+    for user in sorted(users):
+        assert fresh.rebuild(user, buckets(), [], now_ms=T0, if_epoch=None)
+
+    found = list(fresh.users())
+
+    assert len(found) == len(users)
+    assert set(found) == users
 
 
 @pytest.mark.parametrize(

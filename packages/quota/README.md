@@ -85,6 +85,8 @@ Each user has six keys, all under the hash tag `{u:<id>}`, so a cluster keeps th
 
 Times come from the `now_ms` arguments, never from Valkey's clock, so tests can replay any sequence of events. Every write also sets all six keys to expire after 8 idle days; a returning user is rebuilt from the ledger.
 
+Reading writes nothing, and leaves those expiry times as they were: `snapshot`, which reads a user's buckets through a plan, and two reads that take none. `users` gives the ids of the users that have counters, found by a SCAN of their `meta` keys, a page at a time, and `buckets` a user's stored windows as they are, whatever the time. Actio's worker uses the last two to compare the counters with the ledger.
+
 The `q` is a prefix the caller chooses. Actio's API and its worker use `actio:q`, beside the rate limits' keys. Actio runs Valkey without any persistence: counters that came back from an old file would be there, and stale, and nothing would rebuild them.
 
 ## Tests
