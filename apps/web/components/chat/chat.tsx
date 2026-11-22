@@ -733,9 +733,9 @@ export function Chat({
             // Someone is writing a question, so the code that will draw its answer is
             // asked for now, unless the page has asked already: ahead of any answer it
             // asks only once the list of conversations is on the page, and a question
-            // can be written before that. Asked for only when the answer's first words
-            // are here, those words would be shown as written first (ADR 0016,
-            // revision of 2026-11-22).
+            // can be written before that. Asked for only when the answer is on the
+            // page, the answer's words would wait for it there (ADR 0016, revisions of
+            // 2026-11-22).
             fetchRenderer();
             setText(written);
           }}

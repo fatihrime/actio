@@ -6,12 +6,12 @@ import { afterEach, vi } from "vitest";
 
 import { LIST_AWAY_MARK } from "@/lib/frame";
 
-// How long a test waits for something to appear, at the most. A stored conversation
-// is shown once the code that reads markdown is here (ADR 0016, revision of
-// 2026-11-21), and the first test of a file to open one waits for that code to be
-// loaded: about half a second on a developer's machine, 0.8 to 1.0 s with every core
-// busy, which is all of the library's own one second. A test that passes takes no
-// longer for this.
+// How long a test waits for something to appear, at the most. A stored conversation,
+// and an answer's words, are shown once the code that reads markdown is here (ADR 0016,
+// revisions of 2026-11-21 and "an answer that arrives waits for the renderer too"), and
+// the first test of a file to show one waits for that code to be loaded: about half a
+// second on a developer's machine, 0.8 to 1.0 s with every core busy, which is all of
+// the library's own one second. A test that passes takes no longer for this.
 configure({ asyncUtilTimeout: 3000 });
 
 // A test file that runs in Node instead of the simulated page (`@vitest-environment

@@ -24,8 +24,8 @@ const ANSWER: ChatMessage = {
 test("an answer is shown as it was written when what formats it can't be fetched", async () => {
   render(<Message message={ANSWER} />);
 
-  // Until the fetch has failed, the same words stand in for the formatted answer.
-  // So wait for that, and for the page to have taken it in.
+  // Until the fetch has failed, the answer waits for it. So wait for that, and for the
+  // page to have taken it in.
   await act(async () => {
     await vi.dynamicImportSettled();
   });

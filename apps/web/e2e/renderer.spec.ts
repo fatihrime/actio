@@ -3,7 +3,10 @@
 // 2026-11-21). What only shows in a real browser, with the code that reads markdown
 // fetched over a real network: after a reload, and in the first answer of a visit. And
 // when a first visit asks for that code: once the list of conversations has come
-// (revision of 2026-11-22).
+// (revision of 2026-11-22). And an answer that arrives before that code: it waits for
+// it, as a stored one does (revision "an answer that arrives waits for the renderer
+// too"). How long it waits at the most, and what it shows after that, are the component
+// tests' (components/chat/renderer.test.tsx).
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "./chat";
@@ -175,4 +178,65 @@ test("a first visit asks for the code that draws markdown once the list of conve
 
   await expect(chat.list.getByText(/No conversations yet/)).toBeVisible();
   await expect.poll(() => apart(false).length).toBeGreaterThan(0);
+});
+
+test("an answer that arrives before the code that draws markdown waits for it, and is never shown as the marks it was written in", async ({
+  chat,
+  page,
+}) => {
+  // Every script of the app's that the document doesn't name waits at a gate: the
+  // code that draws markdown is a piece apart, which the page asks for later. Which
+  // scripts the document names is known once the document is there, before the page
+  // can ask for any.
+  let knowNamed: (named: Set<string>) => void = () => undefined;
+  const named = new Promise<Set<string>>((resolve) => {
+    knowNamed = resolve;
+  });
+  const held: string[] = [];
+  let openGate: () => void = () => undefined;
+  const gateOpen = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  await page.route("**/_next/static/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (isAppScript(request) && !(await named).has(path)) {
+      held.push(path);
+      await gateOpen;
+    }
+    await route.continue();
+  });
+  await watchAnswers(page);
+
+  const response = await page.goto("/", { waitUntil: "commit" });
+  knowNamed(new Set(scriptsNamedIn((await response?.text()) ?? "")));
+  await expect(chat.box).toBeVisible();
+
+  // Asked at once. The test model echoes it at once, and the answer is over, all its
+  // words on the page's side, while the code is still held back.
+  await chat.ask(QUESTION);
+  const answer = page.locator(ANSWER);
+  await expect(answer).toHaveCount(1);
+  await chat.answered();
+  // The control: the page asked for the code, and the gate holds it.
+  expect(held).not.toEqual([]);
+
+  // It says that it waits, and none of its words is on the page. The gate is opened
+  // at once: past three seconds the page would show the words as written.
+  await expect(answer).toHaveText("Waiting for the model…");
+  const before = await answersSeen(page);
+  expect(before.filter((text) => /Bike parts|saddle|chain/.test(text))).toEqual(
+    [],
+  );
+
+  openGate();
+
+  await shownWhole(page);
+  await expect(answer.locator('[data-streamdown="strong"]')).toHaveText([
+    "saddle",
+    "chain",
+  ]);
+  const seen = await answersSeen(page);
+  expect(seen.some((text) => text.includes("Bike parts"))).toBe(true);
+  expect(seen.filter((text) => MARKS.test(text))).toEqual([]);
 });

@@ -11,12 +11,34 @@ import { usePaced } from "./paced";
 // piece apart from the page: the renderer. A page fetches it once: ahead, once it knows
 // whose session it has and the list of conversations is on the page (`fetchRenderer`,
 // called by ChatApp, ADR 0016, revision of 2026-11-22), or at once when something
-// needs it before that: a question being written (chat.tsx), and an answer or a stored
-// conversation that waits for it on the page (`useRenderer`). Once it is here, an answer is shown as markdown from its first
-// render. Until then, and for good if it can't be fetched (the installation was
-// upgraded under an open page), an answer is shown as it was written (ADR 0016,
-// revision of 2026-11-21). So is a piece of an answer whose markdown can't be drawn
-// once it is here (`AsWrittenOnError`).
+// needs it before that: a question being written (chat.tsx), an answer on the page,
+// before its first words, and a stored conversation (`useRenderer`).
+//
+// Once it is here, an answer is shown as markdown from its first render. While it is on
+// its way, none of an answer's words is on the page: shown as written, they would be
+// swapped for markdown a moment later, and the page would jump. The answer says that it
+// waits, and a stored conversation that the page has is not shown yet (chat-app.tsx).
+// But not for long: the page waits for the renderer once, `RENDERER_WAIT_MS` at the
+// most, counted from the first moment something on it had words to show, and from then
+// on whatever waited, and whatever comes after, is shown as written, to be markdown
+// once the renderer is here (`useWaitsForRenderer`, ADR 0016, revision "an answer that
+// arrives waits for the renderer too"). When the renderer can't be fetched (the
+// installation was upgraded under an open page), words are shown as written at once,
+// and for good. So is a piece of an answer whose markdown can't be drawn once it is
+// here (`AsWrittenOnError`).
+
+/** How long the page waits for the renderer at the most, by the clock, before what
+ * waits for it is shown as written, to become markdown once it is here: a stored
+ * conversation since ADR 0016's revision of 2026-11-21, and an answer that arrives since
+ * its revision "an answer that arrives waits for the renderer too". On a slow
+ * connection (1.6 Mbit/s) the renderer takes 1.7 to 2.4 seconds: a shorter wait would
+ * show the marks there. A download that stalls must not hide words the page already
+ * has. */
+export const RENDERER_WAIT_MS = 3000;
+
+/** How often, at the most, the page's wait goes without looking at the clock. A test
+ * moves the clock (tests/clock.ts), and the page notices when it next looks. */
+const CLOCK_LOOK_MS = 1000;
 
 /** Where this page's renderer stands: on its way, here, or not to be had. Nothing
  * while nobody has asked for it, and on the server. */
@@ -26,13 +48,26 @@ type Renderer =
   | { state: "gone" };
 
 let fetched: Renderer | null = null;
+// The page's one wait for the renderer: whether it has begun, whether it is over, and
+// the timer that looks at the clock until then. Once over, it stays over.
+let waitBegun = false;
+let waitedOut = false;
+let lookAgain: ReturnType<typeof setTimeout> | undefined;
 const listeners = new Set<() => void>();
 
-function become(now: Renderer): void {
-  fetched = now;
+function tellListeners(): void {
   for (const listener of listeners) {
     listener();
   }
+}
+
+function become(now: Renderer): void {
+  fetched = now;
+  if (now.state !== "fetching") {
+    // Nothing waits for it any more.
+    clearTimeout(lookAgain);
+  }
+  tellListeners();
 }
 
 /** Ask for the renderer, unless this page has already: whatever asks first fetches
@@ -52,6 +87,27 @@ export function fetchRenderer(): void {
   );
 }
 
+/** Begin the page's wait for the renderer, unless it has begun, or the renderer's
+ * fetch is over. It ends `RENDERER_WAIT_MS` later by the clock, for everything that
+ * waits, whether or not what began it is still on the page. */
+function beginWait(): void {
+  if (waitBegun || (fetched !== null && fetched.state !== "fetching")) {
+    return;
+  }
+  waitBegun = true;
+  const until = Date.now() + RENDERER_WAIT_MS;
+  function look() {
+    const left = until - Date.now();
+    if (left > 0) {
+      lookAgain = setTimeout(look, Math.min(left, CLOCK_LOOK_MS));
+      return;
+    }
+    waitedOut = true;
+    tellListeners();
+  }
+  lookAgain = setTimeout(look, Math.min(RENDERER_WAIT_MS, CLOCK_LOOK_MS));
+}
+
 function listen(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
@@ -67,6 +123,28 @@ export function useRenderer(): Renderer | null {
     () => fetched,
     () => null,
   );
+}
+
+/** Whether words that are to be shown wait for the renderer: while nobody has asked for
+ * it or it is being fetched, until the page's wait for it is over. `words` says
+ * whether there are any to show yet: the page's wait begins at the first moment that
+ * something on it has words and no renderer, and is told to everything that waits when
+ * it is over. The renderer is asked for, if nobody has yet. */
+export function useWaitsForRenderer(words: boolean): boolean {
+  const renderer = useRenderer();
+  const over = useSyncExternalStore(
+    listen,
+    () => waitedOut,
+    () => false,
+  );
+  const waits =
+    words && (renderer === null || renderer.state === "fetching") && !over;
+  useEffect(() => {
+    if (waits) {
+      beginWait();
+    }
+  }, [waits]);
+  return waits;
 }
 
 /** One message of a conversation: a question, or a model's answer.
@@ -95,28 +173,49 @@ export const Message = memo(function Message({
       </article>
     );
   }
+  return <Answer message={message} writing={writing} />;
+});
+
+/** A model's answer: what it thought, and its words.
+ *
+ * None of them is on the page while the renderer is on its way, whether the answer is
+ * still arriving or already complete, until the page's wait for it is over
+ * (`useWaitsForRenderer`). Meanwhile the answer says what it says before its first
+ * word, once. Then all of them are shown at once, as markdown from their first render,
+ * or as written when the wait ran out. It asks for the renderer as soon as it is on the
+ * page, before its first word. */
+function Answer({
+  message,
+  writing,
+}: {
+  message: ChatMessage;
+  writing: boolean;
+}) {
   const shown = message.parts.filter(
     (part) => part.type === "text" || part.type === "reasoning",
   );
+  const waits = useWaitsForRenderer(shown.length > 0);
   return (
     <article aria-label="Actio" className="space-y-3">
-      {shown.map((part, index) => {
-        // Only the last part can still be arriving.
-        const arriving = writing && index === shown.length - 1;
-        return part.type === "reasoning" ? (
-          <Reasoning key={index} text={part.text} writing={arriving} />
-        ) : (
-          <Words key={index} text={part.text} writing={arriving} />
-        );
-      })}
-      {writing && shown.length === 0 && <Waiting />}
+      {!waits &&
+        shown.map((part, index) => {
+          // Only the last part can still be arriving.
+          const arriving = writing && index === shown.length - 1;
+          return part.type === "reasoning" ? (
+            <Reasoning key={index} text={part.text} writing={arriving} />
+          ) : (
+            <Words key={index} text={part.text} writing={arriving} />
+          );
+        })}
+      {(waits || (writing && shown.length === 0)) && <Waiting />}
     </article>
   );
-});
+}
 
-/** A model's words, as markdown once the renderer is here, and as written until then,
- * or when they can't be drawn. While they arrive, they are drawn at most every
- * `DRAWN_EVERY_MS`, and whole once they are complete (`usePaced`). */
+/** A model's words, as markdown once the renderer is here, and as written when the
+ * page's wait for it ran out or it can't be had, or when they can't be drawn. While
+ * they arrive, they are drawn at most every `DRAWN_EVERY_MS`, and whole once they are
+ * complete (`usePaced`). */
 function Words({
   text,
   writing,
@@ -230,7 +329,8 @@ function Reasoning({ text, writing }: { text: string; writing: boolean }) {
   );
 }
 
-/** Stands in for an answer that hasn't begun: a model may first have to load. */
+/** Stands in for an answer that hasn't begun: a model may first have to load. And for
+ * one whose words wait for the renderer. */
 export function Waiting() {
   return (
     <p
