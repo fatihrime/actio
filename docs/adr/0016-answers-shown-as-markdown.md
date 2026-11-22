@@ -365,3 +365,116 @@ With every script refused once the renderer was here, and an answer with a block
 #### Why now, and not at the start
 
 At the start, the one fetch that was thought of was the renderer's own, and its failure was caught where it was asked for: on the import, and since the revision "the renderer is fetched ahead" in `fetchRenderer`. That the library fetches parts of its own while it draws, where nothing the app catches on an import can reach, was found on 2026-11-21, when a production build was tried with its scripts refused.
+
+### 2026-11-22: an arriving answer is drawn at most every 50 ms
+
+#### Context
+
+While a model's answer arrived, `Words` in `components/chat/message.tsx` gave the renderer the whole text of the piece that was arriving, at every piece that came in: the chat library publishes its messages at each event of the stream. So the page drew the arriving answer at every frame it painted: 57 to 60 times a second in Chromium and WebKit. In Firefox, whose frames were 8.3 ms there, that was 110 times a second for the 1,500 words of the table below, and at each of the 29 frames a second it still painted for the block of code. Each of those draws the piece's whole markdown again, and most of them no reader can tell apart.
+
+Measured on production builds of `9d6539a` in a scratch stack, in a window of 1440×900, in Chromium 158, Firefox 159 and WebKit 27.2, with an answer's words let through one at a time by a pacing proxy. "A quarter of the speed" is Chromium with its CPU slowed four times.
+
+| | Chromium | Chromium at a quarter of the speed | Firefox | WebKit |
+|---|---|---|---|---|
+| One block of code of 1,500 lines (71,530 characters) at 300 words a second, 36.8 s: frames a second | 57 | 26 | 29 | 59 |
+| The same: frames longer than 50 ms | 0 | 234 | 189 | 1 |
+| The same: share of the time the page's main thread was busy | 95 % | 99 % | not measurable | not measurable |
+| The same: time in the page's scripts | 29.5 s | 27.1 s | | |
+| 1,500 words with headings, lists, code and tables at 150 words a second, in a conversation of 600 messages, 10.7 s: main thread busy | 37 % | 99 % | (118 frames a second) | (60 frames a second) |
+| 12,000 such words as fast as the stack delivers, 4.2 to 4.4 s: frames a second, and frames over 50 ms | not run | 18, 32 | 36, 1 | not run |
+| One table of 200 rows at 300 words a second, 13.6 s: frames a second, and frames over 50 ms | not run | 29, 71 | not run | not run |
+
+Typing into the box while the block of code arrived, at a quarter of the speed, a character was on the page after 20 ms (the median), and 65 ms at the most.
+
+#### Options considered
+
+The first five were built in throwaways, and measured as above:
+
+1. **The chat library's own `throttle: 50`, as it is** (`useChat({ throttle: 50 })`). `@ai-sdk/react` 4.0.170 wraps the callback that publishes the messages in `throttleit` 2.1.0. The status and the error are not held back, and a change of status publishes the messages as they are.
+    - Con: four component tests fail, and each shows the page for up to 50 ms with messages older than what the page knows beside them, because the page's own `setMessages`, after a conversation is read again (`resync`), goes through the same callback that is held back. In `chat-app.test.tsx`, "explains a model's failure, and tries again when asked": the failure's notice beside the empty answer it replaced, two articles where one is expected; "goes back into the box, with the reason": a refused question in the box and still on the page. In `newest-first.test.tsx`, "holds nothing back once it is gone when it is read again": a conversation that is gone still on the page. In `usage.test.tsx`, "is offered at the limit, and answers from then on".
+    - Con: `throttleit` reads `Date.now()` with no care for a clock that goes backwards. After a clock set back, every change of the messages that comes without a change of status waits until the clock has caught up.
+2. **The library's throttle only while an answer streams** (`throttle: streaming ? 50 : undefined`, with a state that follows the status).
+    - Pro: all 393 component tests pass. The block of code kept Chromium's main thread busy 31 % of the time; at a quarter of the speed 43 frames a second, and 122 frames over 50 ms; Firefox drew 109 frames a second, 1 of them over 50 ms. Over the 1,500 words in 600 messages the page's scripts took 0.94 s, where they took 2.0 s before, and 1.9 s at a quarter of the speed, where they took 4.1 s, with the main thread busy 47 % of the time there.
+    - Con: it rests on how that version's hook happens to subscribe again, and read the messages anew, when the option changes, which nothing documents. And a clock set back while an answer streams stops the answer's text until it ends.
+3. **A pacing of our own on the text handed to the renderer, the wait counted from the moment a piece was handed on.**
+    - Pro: the block of code kept Chromium busy 35 % of the time; Firefox drew 108 frames a second, 2 of them over 50 ms.
+    - Con: once a draw takes 50 ms itself, the page draws back to back. At a quarter of the speed, in three runs: 46 to 48 frames a second for the block of code, with 43, 57 and 85 frames over 50 ms; and 39 to 41 frames a second for the table, with 50 to 59 over 50 ms and the main thread busy 83 to 86 % of the time.
+4. **The same, the wait counted from when the piece was on the page.**
+    - Pro: as the third at full speed and in Firefox: in a throwaway the block of code kept Chromium busy 32 % of the time, and Firefox drew 111 frames a second, 2 of them over 50 ms. At a quarter of the speed, on the final build (under "Measured" below): 45 to 52 frames a second for the block of code, with 5 to 44 frames over 50 ms in four runs; and 51 to 52 frames a second for the table, with 8 to 16 over 50 ms and the main thread busy 60 to 66 % of the time.
+    - Con: the list of messages is still rendered at each piece, which the library's throttle saves.
+5. **React's `useDeferredValue` on the text, alone.**
+    - Pro: at a quarter of the speed its frames are short, since React draws a deferred value in slices: 51 frames a second, 34 over 50 ms; the 12,000 words 52 frames a second.
+    - Con: it saves no work. The block of code kept Chromium's main thread 95 % busy, as before. At a quarter of the speed the 12,000 words were drawn only 7.6 times a second. And Firefox stayed at 39 frames a second, with 69 frames over 50 ms, where the fourth reaches 111.
+6. **Keeping the objects of the messages that didn't change when a conversation is read again,** where `resync` makes every message a new object.
+    - Con: not needed. Measured on the code before this revision, in a conversation of 600 messages: at Stop no frame over 16.8 ms in Chromium, one of 67 ms at a quarter of the speed, and 20 to 25 ms in WebKit; at each look for an answer that is written elsewhere, every second and a half, no frame over 16.8 ms in Chromium at either speed, and 20 to 23 ms in WebKit. The library's component is memoized on its text, so a message made anew with the same text draws no markdown again.
+
+#### Decision
+
+The fourth. **While an answer arrives, the text handed to the renderer changes at most every 50 ms, counted from when the text before it was on the page, and it is whole in the very render in which the answer ends. Nothing else on the page is slowed.**
+
+- **One hook, `usePaced(text, arriving)`,** in `components/chat/paced.ts`, with `DRAWN_EVERY_MS = 50`:
+    - text that isn't arriving is handed on as it is, in the same render, whatever was handed on before. It is then what was last handed on: should it arrive again, it goes on from there;
+    - while the text arrives, the hook hands on what it handed on last. The text the component starts with counts as the first. A newer text is handed on once 50 ms have passed since what was last handed on was on the page: the moment is noted in an effect that runs when what was handed on changed, after React committed it, and not when it was handed on. So a draw that takes long doesn't use up the wait, and a slow device is never drawing back to back;
+    - the newest text is handed on then, never those that arrived in between;
+    - when the text stops arriving, it is handed on whole in that same render: not after a timer, and not an effect later;
+    - only an earlier state of the same text is ever handed on in its place. When what was last handed on isn't the beginning of the text now, the text is handed on as it is, at once;
+    - the time is read with `Date.now()`, as `untilStill` in `components/chat/follow.ts` reads it, so a test sets it (`tests/clock.ts`). A clock that went backwards holds nothing back;
+    - while the wait isn't over, a timer looks again when it would be. It is cleared when a newer text comes, when the text stops arriving and when the component leaves the page, and none runs while nothing waits. When the wait is already over, the text is handed on from the effect itself, not by a timer of 0 ms: one set anew at each piece could be put off for as long as pieces keep coming.
+- **`Words` in `message.tsx` uses it,** and what it gives goes to the renderer, to `AsWrittenOnError` and to `AsWritten` alike. So an answer's reasoning, which `Reasoning` draws through `Words`, is paced too. A question doesn't go through `Words`, and isn't.
+- **Nothing else changes.** The chat library's messages, which message is being written, the status, the notices and the list of conversations are what they were, at every piece. No `throttle` on `useChat`, and no `useDeferredValue`. `Message` stays memoized.
+
+**Why:** the library's throttle as it is holds back the page's own changes of its messages, and shows the page with older messages beside newer ones. Switched on only while an answer streams, it rests on behaviour that nothing documents, and a clock set back stops the answer. Of the two pacings, the one counted from the hand-on draws back to back once a draw takes 50 ms, which is what a slow device does: at a quarter of the speed it left 43 to 85 frames over 50 ms for the block of code where the one counted from the page left 5 to 44, and 50 to 59 for the table where the other left 8 to 16. `useDeferredValue` makes the frames short in Chromium and saves no work, and Firefox stays at a third of the frames. The fourth touches nothing but the text the renderer is given, was the best of them on a slow device, and as good as any in Firefox.
+
+**Tests:**
+
+- in the hook's tests (`components/chat/paced.test.tsx`), with a small page of the test's own that notes each text the hook handed on once React had put it on the page, with whether it was arriving, and the test's clock:
+    - text that isn't arriving is handed on as it is, at once, also after it changed;
+    - the text the page starts with is handed on at once; while the clock stands still, nothing newer, also after more than 50 ms of real time; once it has moved on, the newest, and none of those in between; 50 ms by the clock, and not 49;
+    - the wait counts from when the text before was on the page: a page that moves the clock 30 ms while it puts a text on the page puts the next one off by as much. That one fails when the moment is noted when a text is handed on;
+    - a clock that went backwards holds nothing back, before a newer text comes and while one waits;
+    - a text that stops arriving is whole in that very render, never on the page with the older text once it no longer arrives, and goes on from there should it arrive again;
+    - a text that doesn't begin with what was last handed on is handed on as it is, at once;
+    - with the timers counted, none runs while nothing waits, one alone after a newer text came, the one before it cleared, and none once the text stops arriving or the page is left;
+    - those in which effects matter, under React's StrictMode too;
+- in the page's component tests (the same file), with a stand-in for the code that draws markdown that notes each text it drew once React had put it on the page, with its `writing` and whether the box could send, and a recorded turn sent piece by piece at the test's command (`sentByHand` in `tests/fake-api.ts`):
+    - while the clock stands still, an answer is drawn from its first piece and from none of the later ones; once the clock has moved on, from its newest; and whole, with `writing` false, in the render in which the box can send again;
+    - its reasoning is drawn at the same pace, and whole once the answer's words begin;
+    - stopped while a piece of it is held back, it ends with what the server kept, as before;
+- in the tests of an answer that is shown as written (`components/chat/as-written.test.tsx`), with the clock standing still: an answer whose markdown can't be drawn, and one that arrives while the code that draws markdown can't be had, show their first words, nothing newer however long, the newest once the clock has moved on, and the whole answer at its end. Without them `Words` could hand those two the text as it arrives, and no test would say so;
+- end to end, in a real browser (`e2e/paced.spec.ts`): an answer of 300 words at 200 words a second, the length of its text noted from inside the page at each frame. Between its first change and its last, it changed at most `Math.ceil(elapsed / 50) + 3` times: each drawing at least 50 ms after the one before, the frame that shows one a frame late at the most, and one more for the whole answer at its end. And at least five times, the control that it came in pieces and was not drawn only at its end. In the end the whole answer is there. No assertion says how long a frame took.
+
+No test that was there changed what it asserts. `as-written.test.tsx` sends its turns with the shared `sentByHand` now, in place of one of its own.
+
+#### Measured
+
+On a production build of this change, in the same stack, window and browsers, with the same answers. Two runs each, and four at a quarter of the speed for the block of code and the table, which vary most from run to run:
+
+| | Chromium | Chromium at a quarter of the speed | Firefox | WebKit |
+|---|---|---|---|---|
+| The block of code: frames a second | 60 | 45 to 52 | 108 to 109 | 60 |
+| The same: frames longer than 50 ms | 0 | 5, 12, 15 and 44 | 2 and 5 | 0 and 1 |
+| The same: share of the time the page's main thread was busy | 32 to 36 % | 85 to 89 % | not measurable | not measurable |
+| The same: time in the page's scripts | 8.2 to 8.8 s | 22.2 to 22.6 s | | |
+| The same: times a second the answer's text changed on the page | 18 | 13 to 14 | 17 | 18 |
+| The 1,500 words in a conversation of 600 messages: main thread busy | 24 to 25 % | 66 to 68 % | (118 frames a second) | (60 frames a second) |
+| The 12,000 words: frames a second, and frames over 50 ms | not run | 28 to 34, 15 to 23 | 114, 0 | not run |
+| The table of 200 rows: frames a second, and frames over 50 ms | not run | 51 to 52, 8 to 16 | not run | not run |
+
+Each answer was as long on the page in the end as before, and ended when its stream did.
+
+- **The two pacings again, back to back,** at a quarter of the speed, two runs each, since that case varies: counted from the hand-on, 43 and 57 frames over 50 ms for the block of code, and 58 and 59 for the table; counted from the page, as built, 5 and 12, and 16 and 11.
+- **Typing meanwhile,** at a quarter of the speed, while the block of code arrived: a character was on the page after 11 ms (the median), and 55 ms at the most, where it took 20 and 65. While the 1,500 words arrived, 9 to 12 ms at either speed, as before.
+- **Stop,** in a conversation of 600 messages: the box could send again 34 ms after the click in Chromium, 67 ms at a quarter of the speed, and 9 ms in Firefox and in WebKit, where it took 27, 60, 6 and 14 ms. The frames after it were as before: none over 17 ms in Chromium, one of 67 ms at a quarter of the speed, none over 27 ms in WebKit.
+- **A reader's own scroll.** A wheel turned up at a random moment, while 600 words arrived at 100 words a second, was kept 8 of 8 times in each of the three browsers: the reader stayed where the wheel took them, and was offered "Go to the newest message". Before, 6 of 6 in Firefox and in WebKit.
+- **With the real model,** on the maintainer's own stack (Qwen 3.5 4B through Ollama), a function with an explanation of it, asked in each of the three browsers: the answer's text changed 18 to 19 times a second while it arrived, it ended whole with its code coloured, and the page reported no error.
+
+#### Consequences
+
+- **The list of messages is still rendered at each piece.** That is cheap, since `Message` is memoized, but not nothing: with 600 messages, the page's scripts took 1.4 to 1.5 s over the 1,500 words, where they took 2.0 s before and the library's throttle left 0.94 s.
+- **A word is on the page later than it was:** up to 50 ms after the text before it was drawn, and then for as long as its own drawing takes. An answer grows about twenty times a second at the most, instead of at every frame, and less often where a drawing takes long.
+- **A component test that sets the clock, and reads an answer while it arrives, sees the text its words began with, and more only once it moves the clock on.** That is the answer's first piece when the events before it and that piece reach the page together, as they do when a test sends them at once; sent apart, the words begin with nothing. Timers run as ever there (`tests/clock.ts`), and the clock stands still.
+- **Not this revision's, and not the page's work:** in Firefox, with a conversation of 600 messages on the page, one frame of 122 to 151 ms comes about four to six seconds after the conversation is whole on the page, in every run, also when the page does nothing at all, as in a run with the conversation open and nothing going on. The page does no work at that moment. What it is inside Firefox was not established. And in WebKit the frame in which the answer with the block of code ended took 187 to 243 ms in five of seven runs, before this change and with it; what in it takes the time was not looked for.
+
+#### Why now, and not at the start
+
+The page was first measured with long answers in the performance runs of 2026-11-20. This is the second half of what they showed about long conversations and long answers, the first being [ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md)'s revision "a long conversation opens newest first".
