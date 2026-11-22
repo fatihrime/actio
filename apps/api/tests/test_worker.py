@@ -40,8 +40,8 @@ from actio.identity import accounts, sessions
 from actio.identity.models import BrowserSession, User
 from actio.identity.passwords import Passwords
 from actio.identity.sessions import ACCOUNT_IDLE_LIFETIME, GUEST_LIFETIME
-from actio.usage import ledger
-from actio.usage.limits import Account, UsageLimits
+from actio.usage import drift, ledger
+from actio.usage.limits import Account, Reserved, UsageLimits, to_ms
 from actio.usage.missed import COUNTED_WITHIN
 from actio.usage.models import Uncounted, UsageEntry
 from actio_llm import Finish, FinishReason, TextDelta, Usage
@@ -50,8 +50,10 @@ from actio_quota.engine import ValkeyQuota
 
 pytestmark = pytest.mark.anyio
 
-# Required by the settings, and nothing listens on port 1. The worker asks Valkey only
-# of usage its counters missed: where there is none, it never connects.
+# Required by the settings, and nothing listens on port 1. The worker asks Valkey of
+# usage its counters missed, where there is any, and when it compares the counters with
+# the ledger, which a worker that starts in the ten minutes after five past the hour
+# does at once: that job then says in the log that Valkey didn't answer, and ends well.
 NOWHERE_VALKEY = "valkey://127.0.0.1:1/0"
 NOWHERE_DATABASE = "postgresql://actio:unused@127.0.0.1:1/actio"  # nothing listens on port 1
 # The repository's models file, wherever the tests are run from: the worker reads it.
@@ -78,6 +80,11 @@ def counting_missed_usage(listed: list[jobs.Job]) -> jobs.Job:
 def looking_after_the_queue(listed: list[jobs.Job]) -> jobs.Job:
     [looking] = [job for job in listed if job.name == worker.LOOK_AFTER_QUEUE]
     return looking
+
+
+def comparing_usage(listed: list[jobs.Job]) -> jobs.Job:
+    [comparing] = [job for job in listed if job.name == worker.COMPARE_USAGE]
+    return comparing
 
 
 def first_then(
@@ -127,13 +134,14 @@ async def a_turn(db: AsyncSession, *, heard_from: datetime) -> Turn:
     return begun.turn
 
 
-async def test_the_worker_runs_four_jobs_every_ten_minutes_and_writes_titles_when_told_to(
+async def test_the_worker_runs_four_jobs_every_ten_minutes_one_every_hour_and_writes_titles_when_told_to(
     settings: Settings, clock: Any
 ) -> None:
-    """The fourth looks after the queue itself, and is given it. The fifth has no
-    schedule: a turn defers it, once for a conversation. It is the one job run again
-    after an error of its own, a title its model couldn't give for now: asked for again
-    after half a minute, two minutes, then ten."""
+    """The fourth looks after the queue itself, and is given it. The fifth compares the
+    usage counters with the ledger, at five past each hour: off the ten-minute marks.
+    The sixth has no schedule: a turn defers it, once for a conversation. It is the one
+    job run again after an error of its own, a title its model couldn't give for now:
+    asked for again after half a minute, two minutes, then ten."""
     async with open_resources(settings) as resources:
         listed = worker.listed(resources, NO_MODELS, clock=lambda: clock.now)
 
@@ -146,6 +154,7 @@ async def test_the_worker_runs_four_jobs_every_ten_minutes_and_writes_titles_whe
         (worker.GIVE_UP, "*/10 * * * *", False, None),
         (worker.COUNT_MISSED, "*/10 * * * *", False, None),
         (worker.LOOK_AFTER_QUEUE, "*/10 * * * *", True, None),
+        (worker.COMPARE_USAGE, "5 * * * *", False, None),
         ("write-title", None, False, asked_again),
     ]
     assert titles.WRITE_TITLE == "write-title"
@@ -621,6 +630,215 @@ async def test_a_worker_that_cant_reach_valkey_says_so_once_and_leaves_the_rows_
         )
     ]
     assert await db.scalar(select(func.count()).select_from(Uncounted)) == 2
+
+
+async def held(
+    limits: UsageLimits, db: AsyncSession, account: Account, *, now: datetime
+) -> Reserved:
+    """An answer being written: the credits it may cost are held."""
+    return await limits.reserve(
+        db,
+        account,
+        new_id(),
+        model="standard",
+        prompt_tokens=10,
+        max_output_tokens=100,
+        hold_for=STALE_AFTER,
+        now=now,
+    )
+
+
+async def ended(
+    limits: UsageLimits, db: AsyncSession, reserved: Reserved, *, now: datetime
+) -> None:
+    """The answer ends as a turn's does, for 30 credits: recorded and committed, counted,
+    and its note taken away."""
+    credits = limits.record(
+        db, reserved, input_tokens=10, output_tokens=20, estimated=False, now=now
+    )
+    await db.commit()
+    assert await limits.settle(reserved, credits, now=now) is not None
+    await limits.counted(db, reserved)
+    await db.commit()
+
+
+def said_by_the_worker(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    return [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == "actio.worker"
+    ]
+
+
+@pytest.mark.parametrize("accounts", [0, 1])
+async def test_the_worker_says_how_many_accounts_it_compared_when_nothing_is_apart(
+    accounts: int,
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    plans_with: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Also when there was none: a missing line couldn't be told from a job that didn't
+    run."""
+    caplog.set_level(logging.INFO, logger="actio.worker")
+    async with open_resources(settings) as resources:
+        limits = UsageLimits(resources.quota, plans_with())
+        for _ in range(accounts):
+            account = Account(new_id(), is_guest=True)
+            await ended(limits, db, await held(limits, db, account, now=clock.now), now=clock.now)
+
+        await comparing_usage(worker.listed(resources, NO_MODELS, clock=lambda: clock.now)).run()
+
+    assert said_by_the_worker(caplog) == [
+        (
+            logging.INFO,
+            "usage counters compared with the ledger, nothing apart, accounts compared: "
+            f"{accounts}",
+        )
+    ]
+
+
+async def test_the_worker_names_the_accounts_whose_usage_counters_are_apart_from_the_ledger(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    plans_with: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Seven accounts. One's counters agree with the ledger. One's are short by 30
+    credits, in both windows, of an answer written while they were lost and rebuilt.
+    Five's are over by 77 credits, in both windows, of a settle the ledger has no row
+    for. Ten of the twelve windows apart are named, and the two others counted."""
+    caplog.set_level(logging.INFO, logger="actio.worker")
+    now = clock.now
+    async with open_resources(settings) as resources:
+        limits = UsageLimits(resources.quota, plans_with())
+        agrees, short = Account(new_id(), is_guest=True), Account(new_id(), is_guest=True)
+        await ended(limits, db, await held(limits, db, agrees, now=now), now=now)
+        await ended(limits, db, await held(limits, db, short, now=now), now=now)
+        being_written = await held(limits, db, short, now=now)
+        keys = await resources.valkey.keys(f"{settings.valkey_prefix}:q:{{u:{short.user_id}}}:*")
+        await resources.valkey.delete(*keys)  # lost, as at a restart
+        await held(limits, db, short, now=now)  # rebuilds them, from the first answer
+        await ended(limits, db, being_written, now=now)
+        over = [Account(new_id(), is_guest=True) for _ in range(5)]
+        for account in over:
+            never_recorded = await held(limits, db, account, now=now)
+            await resources.quota.settle(
+                str(account.user_id), str(never_recorded.id), 77, now_ms=to_ms(now)
+            )
+
+        await comparing_usage(worker.listed(resources, NO_MODELS, clock=lambda: clock.now)).run()
+
+    def apart(account: Account, counted: int, in_the_ledger: int) -> set[str]:
+        return {
+            f"usage counters apart from the ledger: account {account.user_id}, {window} opened"
+            f" at {opened}, counted {counted}, in the ledger {in_the_ledger}"
+            for window, opened in (
+                ("session", "2026-11-10T12:00:00+00:00"),
+                ("week", "2026-11-09T00:00:00+00:00"),
+            )
+        }
+
+    every_window = apart(short, 30, 60).union(*(apart(account, 77, 0) for account in over))
+    said = said_by_the_worker(caplog)
+    assert said[0] == (
+        logging.WARNING,
+        "usage counters compared with the ledger, apart in 6 of 7 accounts compared, in "
+        "credits: session 30 short and 385 over, week 30 short and 385 over",
+    )
+    named = said[1:-1]
+    assert len(named) == len(set(named)) == 10
+    assert {level for level, _ in named} == {logging.WARNING}
+    assert {line for _, line in named} <= every_window
+    assert said[-1] == (
+        logging.WARNING,
+        "usage counters apart from the ledger: 2 more windows, not named",
+    )
+
+
+async def test_the_worker_says_when_there_were_more_accounts_than_a_run_compares(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    plans_with: Any,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Here a run compares two, and there are three."""
+    monkeypatch.setattr(drift, "compare", partial(drift.compare, limit=2))
+    caplog.set_level(logging.INFO, logger="actio.worker")
+    async with open_resources(settings) as resources:
+        limits = UsageLimits(resources.quota, plans_with())
+        for _ in range(3):
+            account = Account(new_id(), is_guest=True)
+            await ended(limits, db, await held(limits, db, account, now=clock.now), now=clock.now)
+
+        await comparing_usage(worker.listed(resources, NO_MODELS, clock=lambda: clock.now)).run()
+
+    assert said_by_the_worker(caplog) == [
+        (
+            logging.INFO,
+            "usage counters compared with the ledger, nothing apart, accounts compared: 2",
+        ),
+        (
+            logging.WARNING,
+            "usage counters compared with the ledger in 2 accounts, as many as a run compares:"
+            " the others weren't looked at",
+        ),
+    ]
+
+
+async def test_a_worker_that_cant_reach_valkey_says_so_when_it_compares_the_usage_counters(
+    settings: Settings, clock: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """It finds no account, and reads nothing of the database: here it was never
+    migrated."""
+    caplog.set_level(logging.INFO, logger="actio.worker")
+    cut_off = settings.model_copy(update={"valkey_url": SecretStr(NOWHERE_VALKEY)})
+
+    async with open_resources(cut_off) as resources, asyncio.timeout(10):
+        await comparing_usage(worker.listed(resources, NO_MODELS, clock=lambda: clock.now)).run()
+
+    assert said_by_the_worker(caplog) == [
+        (
+            logging.INFO,
+            "usage counters compared with the ledger, nothing apart, accounts compared: 0",
+        ),
+        (
+            logging.WARNING,
+            "usage counters compared with the ledger: Valkey didn't answer after 0 accounts,"
+            " and the next run tries again",
+        ),
+    ]
+
+
+async def test_the_worker_compares_the_usage_counters_under_the_keys_the_api_counts_under(
+    scripted: Any, settings: Settings, clock: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A guest's answer is counted by the app. The worker's job, on resources of its own
+    opened from the same settings, finds the guest's counters, and the ledger agrees."""
+    _, browser = await scripted(
+        TextDelta("A derailleur."),
+        Finish(FinishReason.STOP, Usage(input_tokens=40, output_tokens=3)),
+    )
+    question = {"id": str(new_id()), "parts": [{"type": "text", "text": "Name a bike part."}]}
+    answered = await browser.post(
+        f"/api/conversations/{new_id()}/turns", json={"message": question}
+    )
+    caplog.set_level(logging.INFO, logger="actio.worker")
+
+    async with open_resources(settings) as resources:
+        await comparing_usage(worker.listed(resources, NO_MODELS, clock=lambda: clock.now)).run()
+
+    assert answered.status_code == 200
+    assert said_by_the_worker(caplog) == [
+        (
+            logging.INFO,
+            "usage counters compared with the ledger, nothing apart, accounts compared: 1",
+        )
+    ]
 
 
 @pytest.mark.parametrize("told", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])

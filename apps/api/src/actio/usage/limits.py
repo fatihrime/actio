@@ -18,7 +18,8 @@ renews it with **`extend`**.
 
 The ledger comes first on purpose. The counters live in Valkey, which keeps nothing on
 disk: when they are missing, they are rebuilt from the ledger, so nothing may reach the
-counters that the ledger doesn't hold.
+counters that the ledger doesn't hold. How far the two are apart, the worker says every
+hour (`actio.usage.drift`).
 
 The counting is the engine's (`actio_quota`): one Lua script per operation, atomic
 across every process. Time comes in as `now`, so tests can move it.

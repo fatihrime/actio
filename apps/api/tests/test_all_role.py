@@ -45,7 +45,11 @@ from actio.identity import sessions
 pytestmark = pytest.mark.anyio
 
 CONFIG = Path(__file__).resolve().parents[3] / "config"
-NOWHERE_VALKEY = "valkey://127.0.0.1:1/0"  # required by the settings; nothing here uses it
+# Required by the settings, and nothing listens on port 1. A readiness probe finds no
+# Valkey there. Nor does the comparison of the usage counters, which a worker makes at
+# once when it starts in the ten minutes after five past the hour: it then says in the
+# log that Valkey didn't answer, and ends well.
+NOWHERE_VALKEY = "valkey://127.0.0.1:1/0"
 
 
 class Noted:
@@ -550,6 +554,17 @@ def a_free_port() -> int:
         return port
 
 
+async def sent_to_valkey(reader: asyncio.StreamReader) -> list[bytes]:
+    """The next command a Valkey client sent, as its words: on the wire `*1`, `$4`,
+    `PING`, a line each. Raises `ValueError` once the client has hung up."""
+    count = int((await reader.readline())[1:])
+    words = []
+    for _ in range(count):
+        size = int((await reader.readline())[1:])
+        words.append((await reader.readexactly(size + 2))[:-2])
+    return words
+
+
 async def left_in(database_url: str) -> tuple[int, int]:
     """How many guests are in the database, and how many jobs in the queue."""
     async with await psycopg.AsyncConnection.connect(database_url) as connection:
@@ -646,20 +661,37 @@ async def test_the_server_that_the_reloader_started_shuts_the_application_down_w
 
     The SIGINT comes while the server waits for a request it is answering, which is
     when uvicorn would act on it: a readiness probe that takes two seconds, because
-    what stands in for Valkey here takes every connection and never says a word. That
-    request is answered too.
+    what stands in for Valkey here never answers a ping. That request is answered too.
+
+    Only a ping says that the probe is being answered. A worker that starts in the ten
+    minutes after five past the hour compares the usage counters at once, and so
+    connects to Valkey too, perhaps before the probe does: what stands in for Valkey
+    takes its greeting, as it takes the probe's, and its scan finds no keys.
 
     The two processes are in a group of their own, which is ended as one, pass or fail:
     the server holds the pipe that the log is read from."""
     asked = asyncio.Event()
     hold = asyncio.Event()
 
-    async def say_nothing(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        asked.set()
-        await hold.wait()
-        writer.close()
+    async def never_answer_a_ping(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            while True:
+                command = (await sent_to_valkey(reader))[0].upper()
+                if command == b"PING":
+                    asked.set()
+                    await hold.wait()
+                    return
+                # A scan's page: the cursor that ends it, and no keys. Anything else: OK.
+                writer.write(b"*2\r\n$1\r\n0\r\n*0\r\n" if command == b"SCAN" else b"+OK\r\n")
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError, ValueError):
+            pass  # the client hung up
+        finally:
+            writer.close()
 
-    silent = await asyncio.start_server(say_nothing, "127.0.0.1", 0)
+    silent = await asyncio.start_server(never_answer_a_ping, "127.0.0.1", 0)
     port = a_free_port()
     environment = os.environ | {
         "ACTIO_DATABASE_URL": migrated,

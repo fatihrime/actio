@@ -31,7 +31,7 @@ from actio.core import alive, jobs, schema
 from actio.core.resources import Resources, open_resources
 from actio.core.settings import Settings
 from actio.identity import sessions
-from actio.usage import missed
+from actio.usage import drift, missed
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,20 @@ jobs a worker that died left `doing`, takes such workers off the queue's list, a
 deletes the jobs that failed, were cut off or were cancelled once they are `KEPT_FOR`
 old. A job a stop cut off goes back into the queue by itself: this is for the worker
 that died before it could say anything."""
+
+COMPARE_USAGE = "compare-usage"
+"""Compares the usage counters in Valkey with the ledger in Postgres, every hour at five
+past, and says in the log how far apart they are. It repairs nothing: the counters are
+put right when they are next rebuilt from the ledger. Not on the ten-minute marks of
+the other jobs, and five minutes after `COUNT_MISSED` has counted what it could.
+
+Every hour, not every night: a worker that starts more than ten minutes after a
+scheduled time skips it, and an installation on a machine that is off at night would
+never run a nightly job."""
+
+APART_SAID = 10
+"""How many windows that are apart `compare_usage` names in the log at most, one line
+each. The rest it counts, in one more line."""
 
 KEPT_FOR = timedelta(days=7)
 """How long a job that failed, was cut off for the last time or was cancelled stays in
@@ -91,6 +105,7 @@ def listed(resources: Resources, catalog: Catalog, *, clock: Clock) -> list[jobs
             every="*/10 * * * *",
             with_queue=True,
         ),
+        jobs.Job(COMPARE_USAGE, partial(compare_usage, resources, clock), every="5 * * * *"),
         # Deferred once for a conversation, by the first of its turns that completes. A
         # title its model couldn't give for now is asked for again, later.
         jobs.Job(
@@ -252,6 +267,57 @@ async def count_missed_usage(resources: Resources, clock: Clock) -> None:
         logger.warning(
             "usage the counters had missed: Valkey didn't answer, and what is left waits "
             "for the next run"
+        )
+
+
+async def compare_usage(resources: Resources, clock: Clock) -> None:
+    """Compare the usage counters with the ledger, and say in the log how far apart they
+    are: every run says something, so that a run can be told from none. It writes
+    nothing, and commits nothing."""
+    async with resources.database() as db:
+        compared = await drift.compare(db, resources.quota, now=clock())
+    if not compared.apart:
+        logger.info(
+            "usage counters compared with the ledger, nothing apart, accounts compared: %d",
+            compared.accounts,
+        )
+    else:
+        logger.warning(
+            "usage counters compared with the ledger, apart in %d of %d accounts compared, "
+            "in credits: %s",
+            len({found.user_id for found in compared.apart}),
+            compared.accounts,
+            ", ".join(
+                f"{name} {totals.short} short and {totals.over} over"
+                for name, totals in compared.totals().items()
+            ),
+        )
+        for found in compared.apart[:APART_SAID]:
+            logger.warning(
+                "usage counters apart from the ledger: account %s, %s opened at %s, "
+                "counted %d, in the ledger %d",
+                found.user_id,
+                found.window,
+                found.opened_at.isoformat(),
+                found.counters,
+                found.ledger,
+            )
+        if len(compared.apart) > APART_SAID:
+            logger.warning(
+                "usage counters apart from the ledger: %d more windows, not named",
+                len(compared.apart) - APART_SAID,
+            )
+    if compared.more:
+        logger.warning(
+            "usage counters compared with the ledger in %d accounts, as many as a run "
+            "compares: the others weren't looked at",
+            compared.accounts,
+        )
+    if compared.valkey_away:
+        logger.warning(
+            "usage counters compared with the ledger: Valkey didn't answer after %d "
+            "accounts, and the next run tries again",
+            compared.accounts,
         )
 
 
