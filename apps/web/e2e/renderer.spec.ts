@@ -1,10 +1,13 @@
 // An answer is shown as markdown from the moment it is on the page: never first as the
 // marks it was written in, to be swapped a moment later (ADR 0016, revision of
 // 2026-11-21). What only shows in a real browser, with the code that reads markdown
-// fetched over a real network: after a reload, and in the first answer of a visit.
+// fetched over a real network: after a reload, and in the first answer of a visit. And
+// when a first visit asks for that code: once the list of conversations has come
+// (revision of 2026-11-22).
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "./chat";
+import { isAppScript, scriptsNamedIn } from "./scripts";
 
 /** A question whose echo is told apart at once: as written, it holds "##" and "**";
  * as shown, a heading and words in bold. No directive in it, so its lines stay. */
@@ -108,8 +111,8 @@ test("the first answer of a visit is never shown as the marks it was written in"
   await chat.open();
   await expect(chat.box).toBeVisible();
 
-  // Asked at once. The page began to fetch the code that reads markdown when it
-  // learned whose session it has, and the model takes a second and a half to begin:
+  // Asked at once. The page began to fetch the code that reads markdown once the list
+  // of conversations had come, and the model takes a second and a half to begin:
   // the code is here before the answer's first word. Were it fetched only when that
   // word is shown, as it used to be, the word would be shown as written first.
   await chat.ask(SLOW_QUESTION);
@@ -124,4 +127,52 @@ test("the first answer of a visit is never shown as the marks it was written in"
   const seen = await answersSeen(page);
   expect(seen.some((text) => text.includes("saddle"))).toBe(true);
   expect(seen.filter((text) => MARKS.test(text))).toEqual([]);
+});
+
+test("a first visit asks for the code that draws markdown once the list of conversations has come, and not before", async ({
+  chat,
+  page,
+}) => {
+  // Each of the app's scripts that the page asks for, by its path, and whether the
+  // list was still held back then.
+  const asked: { path: string; listHeld: boolean }[] = [];
+  let listHeld = true;
+  page.on("request", (request) => {
+    if (isAppScript(request)) {
+      asked.push({ path: new URL(request.url()).pathname, listHeld });
+    }
+  });
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/conversations*", async (route) => {
+    await released;
+    await route.continue();
+  });
+
+  const response = await page.goto("/");
+  // What the page needs to start is named in it. The code that draws markdown is a
+  // piece apart, which it asks for later.
+  const named = new Set(scriptsNamedIn((await response?.text()) ?? ""));
+  expect(named.size).toBeGreaterThan(1);
+  const apart = (whileListHeld: boolean) =>
+    asked
+      .filter(
+        (script) =>
+          script.listHeld === whileListHeld && !named.has(script.path),
+      )
+      .map((script) => script.path);
+
+  await expect(chat.box).toBeVisible();
+  // Time enough for a page that asked as soon as it knew whose session it has, as it
+  // did before, to have asked.
+  await page.waitForTimeout(500);
+  expect(apart(true)).toEqual([]);
+
+  listHeld = false;
+  release();
+
+  await expect(chat.list.getByText(/No conversations yet/)).toBeVisible();
+  await expect.poll(() => apart(false).length).toBeGreaterThan(0);
 });

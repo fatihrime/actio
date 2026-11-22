@@ -8,13 +8,15 @@ import type Markdown from "./markdown";
 import { usePaced } from "./paced";
 
 // What turns markdown into headings, tables, code and formulas is large, so it is a
-// piece apart from the page: the renderer. A page fetches it once, as soon as it knows
-// whose session it has (`fetchRenderer`, called by ChatApp), or when an answer is shown
-// before that. Once it is here, an answer is shown as markdown from its first render.
-// Until then, and for good if it can't be fetched (the installation was upgraded under
-// an open page), an answer is shown as it was written (ADR 0016, revision of
-// 2026-11-21). So is a piece of an answer whose markdown can't be drawn once it is
-// here (`AsWrittenOnError`).
+// piece apart from the page: the renderer. A page fetches it once: ahead, once it knows
+// whose session it has and the list of conversations is on the page (`fetchRenderer`,
+// called by ChatApp, ADR 0016, revision of 2026-11-22), or at once when something
+// needs it before that: a question being written (chat.tsx), and an answer or a stored
+// conversation that waits for it on the page (`useRenderer`). Once it is here, an answer is shown as markdown from its first
+// render. Until then, and for good if it can't be fetched (the installation was
+// upgraded under an open page), an answer is shown as it was written (ADR 0016,
+// revision of 2026-11-21). So is a piece of an answer whose markdown can't be drawn
+// once it is here (`AsWrittenOnError`).
 
 /** Where this page's renderer stands: on its way, here, or not to be had. Nothing
  * while nobody has asked for it, and on the server. */

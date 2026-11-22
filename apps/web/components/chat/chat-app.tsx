@@ -9,6 +9,7 @@ import { InAppLink } from "@/components/in-app-link";
 import { Notice, NoticeButton } from "@/components/notice";
 import { SessionStatus } from "@/components/session-status";
 import { Sidebar } from "@/components/sidebar/sidebar";
+import { afterPaint } from "@/lib/after-paint";
 import { ApiProblem, getConversation, listModels } from "@/lib/api/client";
 import type { Conversation, Me, Model, ModelList } from "@/lib/api/client";
 import { useConversations } from "@/lib/chat/list";
@@ -116,13 +117,20 @@ export function ChatApp() {
 
   // The code that shows answers as markdown is fetched ahead, so that an answer is
   // never shown first as the marks it was written in. Not before the page knows whose
-  // session it has: the first paint, and the request for the session, don't wait
-  // behind it.
+  // session it has, nor before the list of conversations has been read, or couldn't
+  // be, and the frame that shows it has been painted: the first paint, the request for
+  // the session and the list's rows don't wait behind it. Its code is run as it
+  // arrives, one task of some 115 ms at a quarter of the CPU's speed, which came
+  // before the list's rows were painted (ADR 0016, revision of 2026-11-22). Whatever
+  // needs it sooner asks for it at once itself: a question being written (chat.tsx),
+  // an answer or a stored conversation on the page (`useRenderer`).
+  const listRead = list.items !== null || list.error !== null;
   useEffect(() => {
-    if (known) {
-      fetchRenderer();
+    if (!known || !listRead) {
+      return;
     }
-  }, [known]);
+    return afterPaint(fetchRenderer);
+  }, [known, listRead]);
 
   // In a wide window the list stands beside the chat, unless it was put away. In a
   // narrow one it lies over the chat while it is wanted, and is away otherwise.
@@ -133,9 +141,9 @@ export function ChatApp() {
   const listButton = useRef<HTMLButtonElement>(null);
 
   // The mark on the page's root element says what the switch says, from the page's
-  // start on: the script in the head set it before the first paint (lib/frame.ts),
-  // and the list's place, decided by it, is shown again after a log-out, with no page
-  // loaded in between.
+  // start on: the script at the start of the body set it before the first paint
+  // (lib/frame.ts), and the list's place, decided by it, is shown again after a
+  // log-out, with no page loaded in between.
   useEffect(() => {
     markListAway(putAway);
   }, [putAway]);

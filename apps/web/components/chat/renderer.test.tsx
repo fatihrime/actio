@@ -1,7 +1,8 @@
 // The code that shows a model's words as markdown is a piece apart from the page, which
-// the page fetches ahead, once it knows whose session it has (message.tsx). An answer
-// is never shown first as the marks it was written in, to be swapped for markdown a
-// moment later (ADR 0016, revision of 2026-11-21).
+// the page fetches ahead, once it knows whose session it has, the list of conversations
+// has been read and a frame has shown it (message.tsx). An answer is never shown first
+// as the marks it was written in, to be swapped for markdown a moment later (ADR 0016,
+// revisions of 2026-11-21 and 2026-11-22).
 //
 // The page holds that code for as long as it is open. So each test here opens the app
 // anew, from modules loaded anew: a page that has fetched nothing yet. The code comes
@@ -18,9 +19,11 @@ import {
   GUEST,
   json,
   later,
+  listed,
   question,
   streamed,
 } from "@/tests/fake-api";
+import { holdFrames } from "@/tests/frames";
 import { RECORDED } from "@/tests/recorded";
 
 import type * as MarkdownModule from "./markdown";
@@ -65,6 +68,7 @@ async function newPage() {
   return import("@/tests/open");
 }
 
+const LIST = "GET /api/conversations";
 const CONVERSATION = "GET /api/conversations/*";
 const TURNS = "POST /api/conversations/*/turns";
 
@@ -141,8 +145,20 @@ async function afterAMoment(): Promise<void> {
   );
 }
 
+/** Wait until the page has fetched the code, once, and it has arrived. A test that
+ * ended while it was still on its way would hand it to the next one, whose modules are
+ * loaded anew: the factory above would not be asked again there. */
+async function fetchedOnce(): Promise<void> {
+  await waitFor(() => {
+    expect(code.fetched).toBe(1);
+  });
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+}
+
 describe("the code that shows answers as markdown", () => {
-  it("is fetched once the page knows whose session it has, and not before", async () => {
+  it("is not fetched before the page knows whose session it has", async () => {
     const session = later(() => json(201, GUEST));
     fakeApi().on("POST /api/session/guest", session.answer);
     const { open } = await newPage();
@@ -150,7 +166,9 @@ describe("the code that shows answers as markdown", () => {
     open();
 
     expect(await screen.findByText("Starting…")).toBeInTheDocument();
-    // Whatever the page has begun to fetch has arrived by now.
+    // Frames have been painted meanwhile, and whatever the page has begun to fetch
+    // has arrived by now.
+    await afterAMoment();
     await act(async () => {
       await vi.dynamicImportSettled();
     });
@@ -158,17 +176,116 @@ describe("the code that shows answers as markdown", () => {
 
     session.release();
 
+    // Then it is, once the page has started: this page does ask for it.
     expect(await screen.findByLabelText("Message")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(code.fetched).toBe(1);
-    });
+    await fetchedOnce();
     // Ahead of any answer: there is none.
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
   });
 
+  it("is not fetched while the list of conversations is on its way", async () => {
+    // Its code, run as it arrives, would keep the page from painting the list's rows
+    // (ADR 0016, revision of 2026-11-22).
+    const reading = later(() => json(200, listed([])));
+    fakeApi().on(LIST, reading.answer);
+    const { open } = await newPage();
+
+    open();
+
+    // The page knows whose session it has, and frames are painted meanwhile.
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+    await afterAMoment();
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+    expect(code.fetched).toBe(0);
+
+    reading.release();
+
+    expect(await screen.findByText(/No conversations yet/)).toBeInTheDocument();
+    await fetchedOnce();
+  });
+
+  it("is fetched once a frame has come after the list of conversations, and not before", async () => {
+    // Not in the moment the list arrives: once the browser has painted it. When in
+    // that frame it is asked for is held by lib/after-paint.test.ts: in the task
+    // after the frame's callback, which runs before the frame is painted.
+    const nextFrame = holdFrames();
+    fakeApi();
+    const { open } = await newPage();
+
+    open();
+
+    expect(await screen.findByText(/No conversations yet/)).toBeInTheDocument();
+    // No frame comes, however long the page waits.
+    await afterAMoment();
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+    expect(code.fetched).toBe(0);
+
+    act(() => {
+      nextFrame();
+    });
+
+    await fetchedOnce();
+  });
+
+  it("is fetched when the list of conversations can't be read", async () => {
+    // The page is not left without it because of that.
+    fakeApi().on(LIST, () => {
+      throw new TypeError("fetch failed");
+    });
+    const { open } = await newPage();
+
+    open();
+
+    expect(
+      await screen.findByText("The list couldn’t be read."),
+    ).toBeInTheDocument();
+    await fetchedOnce();
+  });
+
+  it("is fetched when someone begins to write a question while the list of conversations is still on its way", async () => {
+    // The page hasn't asked for it ahead then, and may never: nothing keeps a question
+    // from being written and asked while the list is read. Asked for only once the
+    // answer's first words are on the page, those words would be shown as they were
+    // written first.
+    const reading = later(() => json(200, listed([])));
+    fakeApi()
+      .on(LIST, reading.answer)
+      .on(TURNS, () => streamed("markdown.sse"));
+    const { ask, open } = await newPage();
+    const user = open();
+    const box = await screen.findByLabelText("Message");
+    await afterAMoment();
+    expect(code.fetched).toBe(0);
+    const seen = watchAnswers();
+
+    // At the first letter: nothing is sent yet.
+    await user.type(box, "N");
+    await fetchedOnce();
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+
+    await ask(user, "ame **two bike** parts.");
+
+    // The recorded answer: "Echo: Name **two bike** parts.".
+    expect(await screen.findByText("two bike")).toHaveClass("font-semibold");
+    expect(seen.some((text) => text.includes("Echo: Name"))).toBe(true);
+    expect(seen.filter((text) => text.includes("*"))).toEqual([]);
+
+    // The list comes after all: the page doesn't ask a second time.
+    reading.release();
+    expect(await screen.findByText(/No conversations yet/)).toBeInTheDocument();
+    await afterAMoment();
+    expect(code.fetched).toBe(1);
+  });
+
   it("is fetched for an answer that is on the page before anything else asked for it", async () => {
-    // The page asks when it has a session, before any answer. Should an answer ever
-    // be shown without that, it asks itself, and is not left as written for good.
+    // The page asks once the list of conversations is on the page, before any answer.
+    // Should an answer ever be shown without that, it asks itself, and is not left as
+    // written for good. At once: no frame comes here.
+    holdFrames();
     const { Message } = await import("./message");
 
     render(
