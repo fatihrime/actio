@@ -244,6 +244,57 @@ export function heldAfter(name: string, count: number): Answer {
   };
 }
 
+/** A recorded turn that the test sends by hand: `send(count)` sends its next `count`
+ * events, and `end` the rest of them, after which the stream ends. Nothing arrives
+ * meanwhile, and the page reads on: a test ends the turns it began, or stops them. When
+ * the page gives up, the stream ends as `heldAfter`'s does. For one request. */
+export function sentByHand(name: string): {
+  answer: Answer;
+  send: (count?: number) => void;
+  end: () => void;
+} {
+  const all = events(name)
+    .split("\n\n")
+    .filter((event) => event.trim() !== "");
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const body = new ReadableStream<Uint8Array>({
+    start(given) {
+      controller = given;
+    },
+  });
+  let sent = 0;
+  // Ended, by its last event or by the page giving up: nothing more can be sent.
+  let over = false;
+  function send(count = 1) {
+    if (over) {
+      return;
+    }
+    for (const event of all.slice(sent, sent + count)) {
+      controller?.enqueue(new TextEncoder().encode(`${event}\n\n`));
+    }
+    sent += count;
+    if (sent >= all.length) {
+      over = true;
+      controller?.close();
+    }
+  }
+  return {
+    answer: ({ signal }) => {
+      signal?.addEventListener("abort", () => {
+        if (!over) {
+          over = true;
+          controller?.error(new DOMException("Aborted", "AbortError"));
+        }
+      });
+      return new Response(body, { headers: STREAM_HEADERS });
+    },
+    send,
+    end: () => {
+      send(all.length - sent);
+    },
+  };
+}
+
 function events(name: string, answerId?: string): string {
   const text = recorded(name);
   return answerId === undefined

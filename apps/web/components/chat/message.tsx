@@ -5,6 +5,7 @@ import type { ChatMessage } from "@/lib/chat/messages";
 
 // Its type alone: the code comes apart from the page, below.
 import type Markdown from "./markdown";
+import { usePaced } from "./paced";
 
 // What turns markdown into headings, tables, code and formulas is large, so it is a
 // piece apart from the page: the renderer. A page fetches it once, as soon as it knows
@@ -112,7 +113,8 @@ export const Message = memo(function Message({
 });
 
 /** A model's words, as markdown once the renderer is here, and as written until then,
- * or when they can't be drawn. */
+ * or when they can't be drawn. While they arrive, they are drawn at most every
+ * `DRAWN_EVERY_MS`, and whole once they are complete (`usePaced`). */
 function Words({
   text,
   writing,
@@ -123,12 +125,13 @@ function Words({
   className?: string;
 }) {
   const renderer = useRenderer();
+  const paced = usePaced(text, writing);
   return renderer?.state === "here" ? (
-    <AsWrittenOnError text={text} writing={writing} className={className}>
-      <renderer.Markdown text={text} writing={writing} className={className} />
+    <AsWrittenOnError text={paced} writing={writing} className={className}>
+      <renderer.Markdown text={paced} writing={writing} className={className} />
     </AsWrittenOnError>
   ) : (
-    <AsWritten text={text} className={className} />
+    <AsWritten text={paced} className={className} />
   );
 }
 

@@ -11,15 +11,20 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
+import { clockAt } from "@/tests/clock";
+import type { Clock } from "@/tests/clock";
 import {
   answer,
   conversation,
   fakeApi,
   json,
   question,
+  sentByHand,
   streamed,
 } from "@/tests/fake-api";
-import { recorded, RECORDED } from "@/tests/recorded";
+import { RECORDED } from "@/tests/recorded";
+
+import { DRAWN_EVERY_MS } from "./paced";
 
 const TURNS = "POST /api/conversations/*/turns";
 const CONVERSATION = "GET /api/conversations/*";
@@ -128,48 +133,6 @@ async function afterAMoment(): Promise<void> {
         setTimeout(resolve, 100);
       }),
   );
-}
-
-/** A recorded turn, as the API streams it, which the test sends by hand: `send(count)`
- * sends its next `count` events, and `end` the rest of them, after which the stream
- * ends. A test ends the turns it began: the page reads on after the test otherwise. */
-function sentByHand(name: string): {
-  answer: () => Response;
-  send: (count?: number) => void;
-  end: () => void;
-} {
-  const events = recorded(name)
-    .split("\n\n")
-    .filter((event) => event.trim() !== "");
-  let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-  const body = new ReadableStream<Uint8Array>({
-    start(given) {
-      controller = given;
-    },
-  });
-  let sent = 0;
-  function send(count = 1) {
-    for (const event of events.slice(sent, sent + count)) {
-      controller?.enqueue(new TextEncoder().encode(`${event}\n\n`));
-    }
-    sent += count;
-    if (sent >= events.length) {
-      controller?.close();
-    }
-  }
-  return {
-    answer: () =>
-      new Response(body, {
-        headers: {
-          "content-type": "text/event-stream; charset=utf-8",
-          "x-vercel-ai-ui-message-stream": "v1",
-        },
-      }),
-    send,
-    end: () => {
-      send(events.length - sent);
-    },
-  };
 }
 
 // The recorded answer of `answer.sse`, as it arrives: "Echo: ", then a word at a time.
@@ -354,5 +317,61 @@ describe("an answer's reasoning and its words", () => {
     expect(shown.getByText(fails).textContent).toBe(fails);
     expect(shown.queryByText(`Drawn: ${fails}`)).not.toBeInTheDocument();
     expect(reports).not.toEqual([]);
+  });
+});
+
+// Words shown as written arrive at the pace of any answer (ADR 0016, revision "an
+// arriving answer is drawn at most every 50 ms"): as written, a long answer is one long
+// paragraph, which the browser lays out again at each change.
+describe("an answer that is shown as written while it arrives", () => {
+  /** The first of its words are on the page at once. The next two pieces aren't while
+   * the test's clock stands still, however long, and are once it has moved on. Whole
+   * when it ends. */
+  async function keepsThePace(
+    turn: ReturnType<typeof sentByHand>,
+    clock: Clock,
+  ): Promise<void> {
+    turn.send(BEFORE_THE_TEXT + 1);
+    await shows("Echo: ");
+    turn.send(2);
+    await afterAMoment();
+    expect(newestAnswer().textContent).toBe("Echo: ");
+
+    clock.advance(DRAWN_EVERY_MS);
+
+    await shows("Echo: Why is ");
+    turn.end();
+    await screen.findByRole("button", { name: "Send" });
+    await shows(WHOLE);
+  }
+
+  it("keeps the pace of an arriving answer when its markdown can't be drawn", async () => {
+    watchReports();
+    const clock = clockAt();
+    drawing.fails = (text) => text.startsWith("Echo: ");
+    const turn = sentByHand("answer.sse");
+    fakeApi().on(TURNS, turn.answer);
+    const { ask, user } = await openWithRenderer();
+
+    await ask(user, "Why is the sky blue?");
+
+    await keepsThePace(turn, clock);
+  });
+
+  it("keeps the pace of an arriving answer when the code that draws markdown can't be had", async () => {
+    const clock = clockAt();
+    vi.doMock("./markdown", () => {
+      drawing.fetched += 1;
+      throw new Error("Failed to load chunk");
+    });
+    const turn = sentByHand("answer.sse");
+    fakeApi().on(TURNS, turn.answer);
+    // The fetch of that code is over, and failed: answers are shown as written.
+    const { ask, user } = await openWithRenderer();
+
+    await ask(user, "Why is the sky blue?");
+
+    await keepsThePace(turn, clock);
+    expect(drawing.given).toEqual([]);
   });
 });
