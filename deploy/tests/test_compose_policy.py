@@ -8,6 +8,7 @@ fake model as one more container: the stack it makes is held to every rule again
 what the end-to-end tests drive is locked down like what people run.
 """
 
+import fnmatch
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from actio.api import problems, ui_stream
 from actio.api.turns import MAX_QUESTION_CHARS
 from actio.chat.running import GRACE, LAST_WORDS
 from actio.cli import WAITS_FOR_REQUESTS_S
@@ -339,6 +341,25 @@ def caddy_block(caddyfile: str, opening: str) -> str:
     raise AssertionError(f"{opening!r} is never closed")
 
 
+def without_comments(caddyfile: str) -> str:
+    """The Caddyfile without its comments. Caddy takes a `#` that begins a word for the
+    start of one, which lasts to the end of its line."""
+    return "\n".join(re.sub(r"(?:^|\s)#.*", "", line) for line in caddyfile.splitlines())
+
+
+def caddy_directives(block: str) -> list[list[str]]:
+    """The directives in a block that `caddy_block` gave, each as its words, without
+    the brace that opens a block of its own, nor what is inside that. One directive a
+    line, as the Caddyfile is written."""
+    directives: list[list[str]] = []
+    depth = 0
+    for line in block.splitlines():
+        if depth == 0 and line.split():
+            directives.append([word for word in line.split() if word != "{"])
+        depth += line.count("{") - line.count("}")
+    return directives
+
+
 def test_the_proxy_takes_every_request_the_api_would_and_refuses_much_larger_ones() -> None:
     """The API reads a request's body whole before it can say that it is too large.
     So the proxy refuses a body over a size of its own, for the API's routes, first.
@@ -371,6 +392,60 @@ def test_the_proxy_takes_every_request_the_api_would_and_refuses_much_larger_one
     assert "header Content-Type application/problem+json" in refusal
     assert set(problem) == {"type", "title", "status", "detail"}
     assert (problem["type"], problem["status"]) == ("about:blank", 413)
+
+
+def test_the_proxy_compresses_the_apis_json_and_never_an_answers_stream() -> None:
+    """What the API answers as JSON goes out compressed, with gzip, to a client that
+    takes it: a conversation, which the page reads whole, is about three times smaller.
+
+    An answer's stream must stay as it is. Compressed, every event the proxy passes on
+    at once costs gzip a few bytes, so a stream came out larger than it was, to a client
+    that takes gzip alone; and each stream holds a compressor for as long as its answer
+    is written, which took the proxy's memory to its limit with 80 answers at once
+    (with zstd). Caddy's `encode` without a `match` of its own takes `text/*`, and so
+    the stream. So the match takes a response by its `Content-Type`, takes JSON, and
+    leaves out the stream's media type, bare and as the API sends it. It leaves out the
+    API's errors too, problem documents, which are small and stay as they were.
+
+    gzip alone: zstd made the JSON 5 to 6 % smaller, and held more of the proxy's memory.
+    And on the API's routes alone: the web app's files are compressed by Next itself.
+    See ADR 0004, revision of 2026-11-22."""
+    caddyfile = without_comments((ROOT / "deploy/caddy/Caddyfile").read_text())
+    api_routes = caddy_block(caddyfile, "handle @api {")
+    openings = [
+        line.rstrip() for line in re.findall(r"^[ \t]*encode\b.*", api_routes, flags=re.MULTILINE)
+    ]
+
+    # One, on the API's routes: the web app's own routes are its own.
+    assert len(re.findall(r"(?<![\w-])encode(?![\w-])", caddyfile)) == 1
+    assert len(openings) == 1, "the API's routes compress"
+    [opening] = openings
+    assert opening.endswith("{"), "with a match of its own: Caddy's own list takes text/*"
+    encode = caddy_block(api_routes, opening)
+    directives = caddy_directives(encode)
+    formats = opening.split()[1:-1] + [
+        words[0] for words in directives if words[0] not in {"match", "minimum_length"}
+    ]
+    assert formats == ["gzip"]
+    assert [words for words in directives if words[0] == "match"] == [["match"]]
+    conditions = caddy_directives(caddy_block(encode, "match {"))
+    assert conditions
+    assert all(
+        len(words) == 3 and [words[0], words[1].lower()] == ["header", "content-type"]
+        for words in conditions
+    )
+    types = [words[2] for words in conditions]
+
+    def compressed(content_type: str) -> bool:
+        # Caddy's header matcher takes a `*` at a value's start or end for anything, and
+        # `fnmatch` reads such a pattern the same way: enough for these.
+        return any(fnmatch.fnmatchcase(content_type, pattern) for pattern in types)
+
+    assert compressed("application/json")  # what the API's JSON answers carry
+    assert not compressed(ui_stream.MEDIA_TYPE)
+    # As the API sends it: Starlette adds the charset to a text type.
+    assert not compressed(f"{ui_stream.MEDIA_TYPE}; charset=utf-8")
+    assert not compressed(problems.MEDIA_TYPE)
 
 
 def test_the_proxy_runs_the_config_it_was_built_with(stack: dict[str, Any]) -> None:

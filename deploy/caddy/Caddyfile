@@ -17,6 +17,20 @@
 		request_body {
 			max_size 2MB
 		}
+		# What the API answers as JSON goes out compressed, to a client that takes gzip:
+		# a conversation is about three times smaller. Matched by the response's type, so
+		# that nothing else is: an answer's stream (text/event-stream) passes as it is.
+		# Compressed, every event that is passed on at once costs gzip a few bytes, and
+		# each stream would hold a compressor for as long as its answer is written.
+		# gzip alone: zstd held more of the proxy's memory, for JSON 5 to 6 % smaller. A
+		# body under 512 bytes, Caddy's minimum, goes out as it is.
+		# deploy/tests/test_compose_policy.py holds the match to the stream's media type.
+		# See docs/adr/0004-local-development-stack.md, revision of 2026-11-22.
+		encode gzip {
+			match {
+				header Content-Type application/json*
+			}
+		}
 		reverse_proxy {$ACTIO_API_UPSTREAM} {
 			flush_interval -1 # pass streamed tokens (server-sent events) through at once
 		}
