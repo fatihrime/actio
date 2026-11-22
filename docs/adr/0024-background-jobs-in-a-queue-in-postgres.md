@@ -593,3 +593,14 @@ The worker has a fifth job, `write-title` (`titles.WRITE_TITLE`), and the first 
 - **a queueing lock,** which keeps a second job of a kind out while one waits;
 - **more than one job at a time;**
 - **a provider's own "retry after"** (`RateLimitedError.retry_after_s`): a job's waits are the ones its listing gives.
+
+### 2026-11-22: a fifth scheduled job, every hour, which compares the usage counters with the ledger
+
+The worker has a sixth job, `compare-usage` (`worker.COMPARE_USAGE`), and the fifth with a schedule: it compares the usage counters in Valkey with the ledger in Postgres, and says in its log how far apart they are. Why and how is in [ADR 0020](0020-usage-limits-on-turns.md), revision "the counters are compared with the ledger".
+
+- **The first that isn't on the ten-minute marks:** `5 * * * *`, every hour at five past. Not at the moment of the other four, and five minutes after the job that counts what the counters missed.
+- **Every hour, not every day,** as [ADR 0006](0006-usage-limits-engine.md) had it ("a nightly job"). A worker that starts runs the scheduled time that has just passed only if it was less than ten minutes ago, as "Schedules" says above: read in Procrastinate 3.11.0's own source, `MAX_DELAY = 60 * 10` in its `periodic.py`, and the docstring of `periodic_defaults` in its `app.py`, a time overdue by more is left for the next one. So a daily job's time, missed while the worker was down, is lost until the next day, and on a machine that is off at night, every day. An hourly one loses an hour.
+- **A worker that starts** between five and a quarter past runs it at once, for the time that has just passed, as it runs the other four for their last ten-minute mark.
+- **What it needs:** the database and the engine, as the job that counts what was missed. It still reads no plans file: it compares the windows the counters have stored.
+- **It writes nothing,** so it is safe to repeat and to run beside itself, as every handler has to be (revision "the queue looks after what its workers leave behind").
+- **What the log gets:** Procrastinate's three lines for each run, 72 a day, and the job's own: one line at every run at least, so that a run can be told from none, and warnings when something is apart.

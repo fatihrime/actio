@@ -373,3 +373,95 @@ The third is chosen.
 - **Eighteen mistakes were planted,** one at a time, in a scratch copy of the tree: a count or a time taken as it comes, each bound left out or moved by one, the rule about nothing written dropped or applied to every answer, an answer taken to have words whenever it has parts, a dropped count kept all the same, the log's lines left out. Each fails a test.
 
 **Still open:** a count that is wrong and can be recorded is believed. A server that reported a hundred million tokens for an answer would have its account charged for them, and nothing takes a row of the ledger back: changing what an account has used comes with the admin pages, as "Not done yet" says of granting credits.
+
+### 2026-11-22: the counters are compared with the ledger
+
+"A nightly comparison will say how far the two are apart", under "Not done yet", and "the nightly comparison of the two stores", still open in the revision "the counters catch up", are done. Every hour, not every night, the worker compares each account's counters with the ledger, window by window, and says in its log how far apart they are. It repairs nothing. Nothing in the engine's scripts changed for it: it gained two reads ([ADR 0006](0006-usage-limits-engine.md), revision of the same day).
+
+Options considered:
+
+**Which accounts:**
+
+1. **Those in the ledger,** walking its rows. Most of them have nothing to compare: an account whose counters are missing has them rebuilt from the ledger when they are next needed. And an account whose counters hold credits that the ledger has no row for, in a window where it has none, is never found.
+2. **Those that have counters,** found in Valkey. Each has something to compare, and the counters that hold what the ledger doesn't are found with the rest.
+
+**How often:**
+
+1. **Every night,** as ADR 0006 and "Not done yet" foresaw. But a worker that starts more than ten minutes after a scheduled time skips that time ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md), revision of the same day): on a machine that is off at night, as a laptop is, a nightly job would never run.
+2. **Every hour.** A worker that was down misses an hour, and a run is cheap (see "Measured").
+
+**Where the result goes:**
+
+1. **The log.**
+2. **A table,** a row a run. A migration, and something to clear it out.
+3. **A route,** `/metrics`, as ADR 0006 foresaw: "export the drift as a metric". There is no such route yet, and no metric to put beside it.
+
+**What it does with a difference:**
+
+1. **Says it.**
+2. **Repairs it,** changing the counters by the difference. But only the engine's scripts change the counters, and a repair would be a write racing the answers that end meanwhile: a repair made from a moment that has passed can be wrong by the time it lands. The next rebuild repairs what is short anyway, from the ledger.
+
+Chosen: the accounts that have counters, every hour, the log, and saying only.
+
+**The job** (`compare-usage`, `worker.COMPARE_USAGE`, running `actio.usage.drift.compare`):
+
+- **Every hour at five past** (`5 * * * *`): not on the ten-minute marks of the worker's other four scheduled jobs, and five minutes after the job that counts what the counters missed has counted what it could.
+- **The accounts** are those with counters under the installation's prefix, found by a SCAN of Valkey for their `meta` keys, a page of 500 keys at a time (`users`, in the engine): in no particular order, and 2,000 at most a run (`drift.ACCOUNTS`). Not those of another installation on the same Valkey, nor a key under the prefix whose id can't be an account's, not being a UUID as the API writes one: that one is left out with a warning, and the rest are compared. Whether an account of an id still exists is not asked: a guest's is deleted after a day, and its counters and its rows of the ledger stay.
+- **The windows** are those the counters have stored, as they are (`buckets`, in the engine), and only those still open: a window is open while its moment to start over is still to come, the session's and the week's alike. So the worker needs no plans file, and has none: what the counters stored is what admitted the account's answers.
+
+**The rule, for one account,** in this order, which is what makes it sound while answers end meanwhile:
+
+1. **Its stored windows are read.** Without counters, it isn't compared. With none still open, it is compared, nothing is apart, and the database isn't asked.
+2. **Its rows of the ledger are read,** since the earliest of its open windows opened, each with whether its note (`usage_uncounted`) is still there: one `SELECT`, the ledger joined to the notes, on the ledger's index by account and time. A row is written after the window that admitted it opened, by one clock, which is what a rebuild rests on too: a row dated before its window opened would be left out, and its credits called over.
+3. **For each open window,** with the rows it admitted: `total`, their credits, and `told`, the credits of those whose note is gone.
+    - **The counters hold more than `total`: they are over** by the difference. This needs no second look. The ledger is written before the counters are told, so whatever the counters held when they were read had been committed before, and the ledger's read, which comes after, sees it.
+    - **They hold less than `told`: they may be short.** A row whose note is gone was answered by the counters before the ledger was read, but perhaps after the counters were: an answer that ended in between. So the counters are read once more, once for the account. If the window is still stored, with the same opening, and still holds less than `told`, it is short by what it lacks then. If it is gone, or has opened anew, nothing is said.
+    - Otherwise nothing is apart.
+
+**Every statement reads anew:** the session is READ COMMITTED, Postgres's default. A run that read the whole ledger as it stood at its first statement would find an account over, when its answer ended after that statement and before its counters were read.
+
+**What is not a difference:**
+
+- **a row whose note is still there.** It waits to be counted, by its own process or by the job that counts what was missed, and the counters may have it or not. A settle that Valkey missed is not apart, before that job counts it and after; neither is one that reached the counters while its note couldn't be taken away;
+- **an account without counters, and a window that is over.** What was missed in a window that has closed stays missed, and is no longer seen.
+
+**What it is there for:** an answer that was being written while the account's counters were lost and rebuilt. "Requests in flight at that moment go uncounted: in the user's favour, and still recorded in the ledger" ([ADR 0006](0006-usage-limits-engine.md)). Its settle is answered `unknown`, its note goes, and the counters miss it, in each window that admitted it, until they are next rebuilt. Then nothing is apart.
+
+**A limit:** when that answer was the account's first of the week, the rebuild stores no window at all, since the ledger had nothing yet. No window is open to compare, and nothing is seen, until the account's next answer opens them again. Then the week is short, and the session is not: the answer belongs to a session the counters no longer know, and usage counts toward the window that admitted it.
+
+**What it says,** in the worker's log, at every run, so that a run can be told from none. Ids, times and numbers, never what people wrote:
+
+- **nothing apart:** one line at the info level, with how many accounts were compared, also when that is none: `usage counters compared with the ledger, nothing apart, accounts compared: 12`;
+- **something apart:** a warning with how many of how many accounts are apart, and for each window's name the credits short and over, never added up over the names, since a row the counters missed is short in the session and in the week: `usage counters compared with the ledger, apart in 1 of 12 accounts compared, in credits: session 200 short and 0 over, week 200 short and 0 over`. Then a warning for each window apart, ten at most, with the account's id, the window, when it opened, and both numbers: `usage counters apart from the ledger: account 01900000-…, week opened at 2026-11-09T00:00:00+00:00, counted 150, in the ledger 350`. Then how many more there are;
+- **more accounts than a run compares:** a warning with the number;
+- **Valkey didn't answer:** a warning that says after how many accounts, and that the next run tries again. The run stops there, without failing, and keeps what it compared, without the account it was at. Only what the engine's own reads raise is taken for Valkey: a database error fails the job, whatever its kind, as for the other jobs.
+
+**It writes nothing,** to the database or to Valkey: not even when the counters' keys expire, which every write of the engine pushes back. It commits nothing, and is safe to run again and beside itself.
+
+**What it costs:**
+
+- **one SCAN of every key in Valkey an hour,** a page at a time, so that Valkey is never held for long;
+- **for each account with an open window,** one or two reads of its counters and one statement; for one without, one read;
+- **in the log,** Procrastinate's three lines a run and at least one of the job's own: 96 lines a day at least.
+
+**Still open:**
+
+- **no `/metrics` route exists yet.** When it does, this job's result is its figure;
+- **an installation with more than 2,000 accounts with counters** has the rest not looked at: each run starts its scan over, and stops after about the same accounts;
+- **nothing repairs what is short** before the counters are next rebuilt. An account whose counters live on keeps the credits it wasn't charged, in its favour, until its window closes.
+
+**Measured,** on a MacBook Pro (M1 Pro, 16 GB), 2026-11-22, against a Postgres and a Valkey from the pinned images:
+
+- **A run,** with 5,000 accounts whose counters are as a rebuild writes them, each with 100 rows in a ledger of 500,000, 30 of them in the open week and 5 in the open session, and 110,012 keys in Valkey: 2,000 accounts, as many as a run compares, took 2.9 to 3.0 s, and all 5,000 took 7.3 s, twice each: 1.5 ms an account. The worker runs one job at a time, and gives the job in hand 15 seconds at a stop.
+- **The scan alone** found the 5,000 among those keys in 107 to 112 ms, three times. The braces of the pattern needed no escaping, and neither a neighbour prefix (`<prefix>:x`) nor a stray key `<prefix>:rl:{u:fake}:meta` was matched.
+- **The statement:** 0.07 ms for an account's 30 rows of that ledger, on the index by account and time, as `EXPLAIN ANALYZE` says it.
+- **The rule was tried as a throwaway before it was built,** on the same two servers. A settle Valkey missed (used 100, `told` 100, `total` 200) and a row settled whose note couldn't be taken away yet (used 100, `told` 0, `total` 100) were not apart. An account with one answer of 100 credits counted, a second written while its counters were lost and rebuilt by a third question, and the second then ended: 100 short in the session and in the week, and nothing apart once the counters were next rebuilt. The same when the second was the account's first answer of the week: nothing apart until the account's next answer, then the week 100 short, and the session not. An answer that ended between the read of the counters and the read of the ledger was not apart. The moments the keys expire were the same before and after.
+- **In containers,** the stack of the end-to-end tests, after its 55 tests, with the job deferred by hand instead of waiting for five past:
+    - **with a new guest's first answer counted, for 36 credits:** `usage counters compared with the ledger, nothing apart, accounts compared: 62`;
+    - **the guest asked for a second answer,** which the fake model writes a word a second. Four seconds in, 2,200 credits were held for it, and the guest's six keys were deleted in Valkey. Reading the usage rebuilt the counters from the ledger: 36 used, nothing held. The answer ended nineteen seconds later, for 68 credits: its row is in the ledger, no note was left, and the usage still said 36;
+    - **the worker then said,** as warnings: `usage counters compared with the ledger, apart in 1 of 62 accounts compared, in credits: session 68 short and 0 over, week 68 short and 0 over`, and a line each for the account's session and its week, `counted 36, in the ledger 104`;
+    - **the keys were deleted once more, and the usage read:** 104 used. The worker: `nothing apart, accounts compared: 62`.
+- **On an installation in use,** its ledger at 172 rows of 62 accounts: `nothing apart, accounts compared: 82`. More accounts have counters than rows: a guest who only reads the usage gets counters too. At five past the next hour its worker ran the job by its schedule, and so did the end-to-end stack's: 82 accounts and 62, each in 0.07 s.
+- **Fifty-one mistakes were planted,** one at a time, in a scratch copy of the tree: in the comparison (which windows are open and from which moment, since when the ledger is read, which rows count as told and which as all, the second read of the counters and what it is held against, the limit and whether more is said, which ids are accounts', Valkey's errors and the database's, what is kept when Valkey stops answering, what the result carries); in the engine's two reads and the reference model's; and in the job (not listed, another schedule, each line it says, the keys it compares under, the clock it goes by). Each fails a test but one, which is no mistake: a page of the scan of one key instead of 500 changes the round trips and nothing else. Eight failed nothing at first, and got a test: the very moment a window starts over; a row dated at the very moment its window opened; counters that are lost, or start a window anew, between the two reads; what is short said as the counters stand at the second read; what is over said against all the ledger's rows; an account whose counters vanish after the scan found them; and one at whose second read Valkey stops answering.
+- **The review found** that an error of the system raised by a database call would have been taken for Valkey not answering, since one `except` stood around the whole run. Now only what the engine's own reads raise is taken for that. And that a key under the prefix that holds other bytes than text would have ended the scan: it is given as an id, and left out as any id that can't be an account's.
+- **One older test rested on something this job changed.** The test of a Ctrl-C under the reloader took the first connection to its stand-in for Valkey for the readiness probe's. A worker that starts in the ten minutes after five past the hour now connects too, to compare. With the job's line set to every minute in a scratch copy, that first connection was the job's, three times of three. The stand-in now takes a client's greeting, answers a scan with no keys, and takes only a ping for the probe. With the job due at every start of a worker, every test of the API passed but the one that holds the job's line, 1,089 of them, and those that start real processes eight times more.

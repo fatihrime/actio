@@ -95,3 +95,12 @@ Still to come: the nightly comparison of the two stores, and repeating a count t
 - **`collect_expired` is in use:** reading an account's usage first gives back the holds that ran out, so that they aren't shown as held.
 
 Still to come: the nightly comparison of the two stores.
+
+### 2026-11-22: the two stores are compared
+
+"The nightly comparison of the two stores", still to come in the revision above, is done, every hour rather than every night ([ADR 0020](0020-usage-limits-on-turns.md), revision "the counters are compared with the ledger"). "Two stores can drift. A nightly job will compare them and export the drift as a metric", under "Consequences": the worker compares them, and says in its log how far apart they are, in each window, short and over.
+
+- **The engine gained two reads, and no Lua changed.** `users` gives the ids of the users that have counters, by a SCAN of Valkey for their `meta` keys, a page at a time, so that a caller can stop where it likes. `buckets` gives a user's stored windows as they are, without a plan, as `snapshot` reads them with one. Neither writes, nor pushes back when a user's keys expire. The reference model has both, and the rule tests run them on both engines.
+- **"How to reverse it"** names the engine's interface: the two reads are part of it now.
+
+Still to come: exporting that as a metric, once there is a route to export it from.
