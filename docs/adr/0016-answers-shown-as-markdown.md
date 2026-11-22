@@ -478,3 +478,85 @@ Each answer was as long on the page in the end as before, and ended when its str
 #### Why now, and not at the start
 
 The page was first measured with long answers in the performance runs of 2026-11-20. This is the second half of what they showed about long conversations and long answers, the first being [ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md)'s revision "a long conversation opens newest first".
+
+### 2026-11-22: the renderer is fetched once the list of conversations is on the page
+
+#### Context
+
+Since the revision "the renderer is fetched ahead, and a stored answer waits for it", `ChatApp` (`components/chat/chat-app.tsx`) asked for the renderer as soon as the page knew whose session it has. The list of conversations is asked for at the same moment. On a fast connection the renderer's code arrived about ten milliseconds after the list's answer, and its evaluation, one task of 111 to 122 ms at a quarter of the CPU's speed, ran before the frame with the list's rows was painted.
+
+Measured on 2026-11-22 in Chromium, in a wide window, on localhost, for a guest with 40 conversations, with the CPU at a quarter of its speed. Seven visits each, the builds swapped back to back, and each build first checked to wait for the list, or not, with the list's answer held back at a route; medians, the range in brackets.
+
+A first visit, with nothing in the browser's cache:
+
+| When the renderer is asked for | The list's first row is on the page after |
+|---|---|
+| At the first answer, before it was fetched ahead (`b63af23`) | 399 ms (390 to 442) |
+| Once the page knows whose session it has (`4e77c01`) | 542 ms (502 to 746) |
+| In the effect that runs once the list was read, with no frame awaited (a throwaway) | 422 ms (414 to 598) |
+| Once the list was read and the frame that shows it has been painted (as built), two rounds | 417 ms (406 to 435) and 421 ms (412 to 455) |
+
+A returning visitor, with the app's files in the browser's cache:
+
+| When the renderer is asked for | The list's first row is on the page after |
+|---|---|
+| Once the page knows whose session it has (`4e77c01`) | 246 ms (231 to 251) |
+| In the effect that runs once the list was read, with no frame awaited (a throwaway) | 196 ms (184 to 248): four visits at 184 to 196 ms, three at 215 to 248 ms |
+| Once the list was read and the frame that shows it has been painted (as built) | 185 ms (169 to 204) |
+
+On a first visit the code takes some 40 ms to arrive, and the rows were painted by then with or without the frame awaited. From the cache it is there two milliseconds after it was asked for: as built it was asked for 10 to 17 ms after the row was on the page, in each of the seven visits; with no frame awaited, which of the two came first differed from visit to visit.
+
+At the CPU's full speed, on a first visit: 109, 119, 113 and 116 ms for the four, and no long task.
+
+An earlier round of the same day, in which the first two rows read 391 and 532 ms, tried `requestIdleCallback` in place of a rule: 422 ms (398 to 428).
+
+#### Options considered
+
+1. **Once the session is known, as it was.**
+    - Con: the list's first row 143 ms later on a first visit than before the renderer was fetched ahead, and 61 ms later for a returning visitor than as built.
+2. **In the effect that runs once the list was read.**
+    - Pro: on a first visit as good as the third.
+    - Con: the order is left to how long the code takes to arrive. From the browser's cache that is two milliseconds, and in three of seven visits the rows came 20 to 60 ms late.
+3. **Once the list was read and the frame that shows it has been painted.** A frame's callback (`requestAnimationFrame`) runs before that frame is painted, and a task begun from it runs after.
+    - Pro: the order holds by the rule itself, whatever the connection and the cache: the code is asked for after the rows are on the page.
+    - Con: the renderer is here later: on a first visit at a quarter of the CPU's speed its code was in at 453 ms, where it was in at 390 ms with no frame awaited. And a page that paints no frames doesn't ask ahead (below).
+4. **When the browser is idle, with `requestIdleCallback`.**
+    - Con: no better, and WebKit 27.2 doesn't have it: `typeof requestIdleCallback` is "undefined" there, and "function" in Chromium 158 and Firefox 159. One rule for every browser was wanted.
+
+#### Decision
+
+The third. **The page asks for the renderer once it knows whose session it has, the list of conversations has been read for the first time, or could not be, and the frame that shows that has been painted.**
+
+- **In `ChatApp`:** an effect waits until the page knows whose session it has, and the list has items or an error (`list.items !== null || list.error !== null`, from `useConversations` in `lib/chat/list.ts`). It then calls `fetchRenderer` after the next paint, and calls that off when it is undone.
+- **After the next paint** is a function of its own, `afterPaint` in `lib/after-paint.ts`: `requestAnimationFrame`, and in its callback a `setTimeout(…, 0)` that calls what it was given. It hands back a function that cancels both.
+- **A list that can't be read** doesn't leave the page without the renderer.
+- **Unchanged: whatever needs the renderer before that asks for it at once,** through `useRenderer` in `message.tsx`: an answer on the page, and a stored conversation that waits for it. That path waits for no frame. So a stored conversation opened by its address asks for the renderer as it did, side by side with the conversation, and still waits `RENDERER_WAIT_MS` for it at the most.
+- **New: the first letter of a question asks for it too** (the box's change, in `components/chat/chat.tsx`). Nothing keeps a question from being written and asked while the list is still read, and a list's request can take long or never answer. An answer's words ask for the renderer only once they are on the page, so without this the first words of such an answer were shown as they were written until the code had come: what the revision "the renderer is fetched ahead" was made to end. The review of this change found it by reading, and a probe then showed it in Chromium, in six visits of six. Asking when the question is sent was tried first and is too late for a model that begins at once: Firefox still showed the first words as written (below).
+
+**Tests:**
+
+- in the page's component tests (`components/chat/renderer.test.tsx`), each from modules loaded anew: the renderer is not asked for before the session is known; nor while the list's first reading is on its way, although the session is known and the box is there; nor after the list has arrived until a frame has come, with the frames in the test's hands (`holdFrames` in `tests/frames.ts`); it is asked for when the list can't be read; it is asked for at the first letter of a question written while the list is still on its way, before anything is sent, and that question's answer is then never seen as written; and an answer on the page before any of that asks for it at once, with no frame coming. The test "is fetched once the page knows whose session it has, and not before" was changed on purpose: it is "is not fetched before the page knows whose session it has" now, and what comes after the session is held by the tests that follow it;
+- in the tests of `afterPaint` (`lib/after-paint.test.ts`): nothing is called before the next frame, nor in the frame's callback; it is called once, in the task after it; and nothing is called once it is called off, before the frame or between the frame and that task;
+- end to end, in a real browser (`e2e/renderer.spec.ts`): on a first visit, with the list held back at a route, no script that the document doesn't name is asked for in the half second after the box is there; once the list has come, one is. It failed on the code before this revision.
+
+#### Measured
+
+On the code as built, in Playwright's Chromium 158, Firefox 159 and WebKit 27.2, with every change of an answer watched from inside the page:
+
+- **A stored conversation opened by its address,** three visits a browser: never shown as written. Its answers were on the page after 220 to 309 ms in Chromium, 230 to 252 in Firefox and 245 to 254 in WebKit, where the code before this revision took 216 to 231, 228 to 241 and 241 to 253 ms: that path was not changed. On the slow phone of [ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md)'s revision of 2026-11-22, in Chromium, after 3.66 s, where it took 3.85 s.
+- **The first answer of a visit,** once a browser: never shown as written.
+- **A question written while the list never answers,** its first letters typed over a third of a second, four visits a browser, and three in Chromium at a quarter of the CPU's speed: never shown as written, in 15 visits of 15. Before the first letter asked for the renderer, the same probe saw the answer as written in Chromium in six visits of six.
+- **The same question pasted and sent in the same instant,** with the test model, which begins its answer within some tens of milliseconds: never shown as written in Chromium and WebKit, four visits each; in Firefox the answer's first words were seen as written once, in three visits of four. The code came later than the words there.
+
+#### Consequences
+
+- **The renderer's download begins later,** by the list's reading and a frame. An answer that arrives before the renderer is here is shown as written until it is, as before.
+- **One case is worse than it was:** while the list of conversations has not answered, a question that is pasted and sent in one instant, to a model that begins at once, can show its first words as written for a frame, as measured in Firefox. Before this revision the renderer was asked for when the session was known, and was here by then. Someone who writes a question, or takes a moment between pasting and sending, doesn't see it. What would end it for good is an arriving answer that waits for the renderer as a stored one does, a step of its own.
+- **A page that isn't shown, as in a tab in the background, paints no frames,** and asks for the renderer only once it is shown, unless something on it needs the renderer before.
+- **A component test that holds the frames** decides when the renderer is asked for ahead; one that doesn't gets the simulated browser's own frames, and the renderer a frame after the list.
+
+**What no longer holds:** in the revision "the renderer is fetched ahead, and a stored answer waits for it", that `ChatApp` asks for the renderer as soon as the page knows whose session it has. The rest of it stands.
+
+#### Why now, and not at the start
+
+The revision that fetched the renderer ahead measured the largest paint, the time the page's scripts kept it busy and the first answer, not when the list's rows were on the page. A performance run after the steps of that week compared the page's first visit with the build before them, back to back, and found the rows later than before.

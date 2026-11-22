@@ -412,3 +412,63 @@ The 100-exchange conversation was each run's first opening after a page load, wh
 - **How long a frame takes is held by no test.** It was measured by hand, in three browsers, and would have to be again after a change to how a conversation comes onto the page.
 
 **Why now, and not at the start:** the page was first measured with long conversations in the performance runs of 2026-11-20. The frame at the top was found while measuring this step, and the scrolls lost in Firefox and WebKit while measuring its first build.
+
+### 2026-11-22: the frame's script stands at the start of the body
+
+#### Context
+
+The revision "the page's frame is there before the session" put one script into the page's head (`app/layout.tsx`): it marks `<html>` before the first paint when the list of conversations was put away. In the HTML that Next.js sends, that script comes after the stylesheet's `<link>`, so the browser's parser stops at it until the stylesheet is in. While the parser stood there, Chromium asked for only one of the page's scripts at a time, which Next.js marks `async`.
+
+Seen directly, on 2026-11-22, in Playwright 1.65 with Chromium 158, Firefox 159 and WebKit 27.2, every script of the app's and the stylesheet held back at a route:
+
+- **with the script in the head,** Chromium asked for 1 of the 7 scripts the document names while they were held; Firefox and WebKit for 7 of 7;
+- **with the script as the body's first child,** Chromium asked for 7 of 7 too, within 10 ms.
+
+What it costs, in Chromium, on an emulated phone of 390×844 with the CPU at a quarter of its speed and "slow 4G" (150 ms latency, 1.6 Mbit/s). Five visits each, the builds swapped back to back; medians, the range in brackets:
+
+| | Before the script existed (`b63af23`) | The script in the head (`4e77c01`) | The script at the start of the body |
+|---|---|---|---|
+| The box can be typed into | 1,869 ms (1,855 to 1,926) | 2,017 ms (2,005 to 2,035) | 1,852 ms (1,838 to 1,860) |
+| The same, at a sixth of the CPU's speed | 1,940 ms | 2,120 ms | 1,936 ms |
+| The same, over HTTPS with HTTP/2 | 1,853 ms | 2,023 ms | 1,855 ms |
+| The first paint: "Starting…" and the frame | 584 ms | 468 ms | 572 ms |
+
+The third column was measured on a throwaway that held this change alone. The code as built was timed against `4e77c01` once more, back to back, five visits each: the box can be typed into at 1,861 ms (1,853 to 1,873) against 2,023 ms (2,006 to 2,035), at a sixth of the CPU's speed at 1,928 ms, and the first paint comes at 588 ms against 472 ms.
+
+Over HTTPS, with a proxy and a throwaway certificate in front, the difference stays: it is not a matter of HTTP/1.1. With the script in the head, the first of the document's scripts was in at 678 ms instead of 500 ms, the last at 1,729 instead of 1,585 ms, for the same bytes (247,625 against 246,687). The first paint came sooner with the script in the head: with the scripts held back, the stylesheet had the line to itself.
+
+Which rule inside Chromium does this was not read in its source. What is written here is what was measured.
+
+#### Options considered
+
+1. **The script in the head, as it was.**
+    - Con: on the slow phone the box can be typed into 148 ms later than before the script existed.
+2. **The script before the stylesheet, in the head.**
+    - Con: React and Next.js place the stylesheet first, and the app can't order them.
+3. **An external script that blocks rendering,** in place of one written into the page.
+    - Con: a request more, before the first paint. And `blocking="render"`, which would make an external script hold the paint without holding the parser, is not in every browser.
+4. **The script as the body's first child.**
+    - Con: the first paint comes about as late as before the script existed.
+
+#### Decision
+
+The fourth.
+
+- **The script is the first child of `<body>`** (`app/layout.tsx`), before the page's content. The layout renders no `<head>` of its own any more: Next.js writes the head, with the stylesheet, the page's scripts and the icon's links. In the HTML it sends, React puts a hidden `<div>` of its own before the script; the script still comes before the header and everything else of the frame.
+- **The parser waits at it until the stylesheet is in,** as it did in the head. By then it has read the whole head, and Chromium asked for all of the page's scripts at once.
+- **It still runs before anything of the frame has been read,** so the mark is on `<html>` before the frame's first paint. The frame does not move: the frame's probe said "nothing moved" in 18 of 18 cases, in the three browsers, in a wide window, a wide window with the list put away and a narrow one, at `/` and at a stored conversation's address. And it hydrates without a complaint in production.
+- **Firefox and WebKit ask for all of the page's scripts at once either way.**
+- Everything else of the revision "the page's frame is there before the session" holds: the one script the app writes into a page, a constant, its one use of `dangerouslySetInnerHTML`, `suppressHydrationWarning` on `<html>`, and what a Content-Security-Policy will have to allow.
+
+**Tests:**
+
+- `app/layout.test.tsx` held the script in the head, and was changed on purpose: the page holds one script, the head none, and it is the body's first element, before the page's content. It fails when the script is put back in the head, and when something is rendered before it in the body.
+- End to end, in a real browser (`e2e/first-load.spec.ts`): every script and stylesheet of the app's held back at a route, the scripts that the document names are read from its own source, without the one marked `nomodule`, and each of them has to be asked for while all are still held; then they are let through, and the box can be typed into. On the code before this revision Chromium asked for one of the seven, and the test failed when its wait was over. The end-to-end tests run Chromium alone ([ADR 0017](0017-end-to-end-tests-on-the-real-stack.md)), which is where it showed.
+
+#### Consequences
+
+- **On the slow phone the box can be typed into about 160 ms sooner** than with the script in the head, and no later than before the script existed: 1,861 ms as built, against 2,023 ms, and 1,869 ms before.
+- **The first paint is where it was before the script existed:** 588 ms on the slow phone as built, against 472 ms with the script in the head and 584 ms before it. That is what was given up.
+- **What the frame's script does is unchanged,** and so is the frame from its first paint.
+
+**Why now, and not at the start:** the script came in with the revision "the page's frame is there before the session", whose measurements were of the frame: whether it moves when the session arrives. A performance run after the steps of that week compared the slow phone's first visit with the build before them, back to back, and found the box later than before.
