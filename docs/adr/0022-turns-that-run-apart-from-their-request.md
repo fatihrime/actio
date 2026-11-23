@@ -452,3 +452,38 @@ A test starts `actio --role all --reload` for real, and sends its server a SIGTE
 ### 2026-11-20: a hold that ran out is no longer shown as held
 
 "A hold that ran out still shows as held in `GET /api/usage` until the account's next question", still not done in the two revisions above, is done where the usage is read: reading it first gives back the holds that have run out ([ADR 0020](0020-usage-limits-on-turns.md), revision "the counters catch up"). Nothing changed for it in how a turn runs, is given up on, or keeps its draft.
+
+### 2026-11-23: a turn that ends after it was given up on says so
+
+**What was wrong:** a turn whose process is only slow can be given up on while it is still being written: someone looks at its conversation a minute after its last beat reached the database, or the worker does (revisions "the worker gives up on turns nobody looks at" and "what a dead process had written is kept"). Its record is then what giving up wrote: `interrupted`, with its draft as its answer, no counts, and nothing paid. When the process's answer ended after that, `finish` found the turn no longer `running` and left it as it was (`left`), as decided. But the turn's readers were told otherwise. Its stream ended with `finish`, which said `completed`, with the model's counts and, since the same day, how much of the window the conversation takes. (It named no credits: a turn given up on was never paid for.) The page reads a conversation again only after a stream that ended any other way than well ([ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md)), so it showed the whole answer, what it took and the meter's figure, none of which the server has, until it next read the conversation. A turn whose conversation was deleted meanwhile, by a process of the API that doesn't write the turn and so can't stop it first, ended the same way (`gone`): nothing of it was left to record anything in, and its stream said `completed`, with its counts and what it had cost.
+
+**What is done:**
+
+- **What became of a turn's outcome is said with its end:** `Ended.recorded` in `actio.chat.answering`, `finish`'s own answer, `recorded`, `left` or `gone`. `_write` in `actio.api.turns` decides by it.
+- **A stream never says what wasn't recorded.** When the outcome wasn't recorded, the readers get no `finish` and no `message-metadata`: after the answer's last part, an `error` chunk with words for a person, and `[DONE]`, as a stream that was lost ends. For a turn given up on, "This answer was given up on before it ended. The conversation shows what was kept of it." (`ui_stream.GIVEN_UP`). For one whose conversation was deleted, "This conversation was deleted while its answer was being written." (`ui_stream.GONE`).
+- **It goes through the turn's stream of events,** like everything a reader is told, so a reader who joined while the turn ran is told the same, byte for byte.
+- **The page reads the conversation** after a stream that ends in an error, as after any other (`resync`), and shows what is kept: the draft as the answer, the record's outcome under it in the page's own words, and the meter's figure from before. Nothing changed in the page for it.
+- **The warning in the log stays:** "it ended after it had been given up on".
+
+**Giving up stays final.** The answer that ends late isn't kept, and isn't paid for, as decided in the two revisions named above. Once a turn is given up on, its conversation can move on: whoever looked has been shown the draft as the answer, and may have asked again after it, or asked for another answer. An answer that took its place afterwards would be slipped in behind their backs, and the hold on its credits ran out with its beat.
+
+**Options considered, and not built:**
+
+1. **Record the late outcome over the given-up one:** the answer that arrived whole takes the draft's place, `completed`, and is paid for.
+    - Con: a record that changes after it was final, under a conversation that may have moved on, as above.
+2. **Read the record back, and send it as the stream's last metadata,** as a failed turn's outcome goes before its error.
+    - Con: a read at the turn's last moment, for what the page reads anyway once the stream ends in an error. And the record's turn would stand on a message that is not the record's: the stream has given the reader the whole answer, and the record keeps the draft.
+
+**Why it surfaced only now:** it was found by reading the code when a turn's record gained how much of the window its conversation takes ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md), revision "a turn says how much of the window its conversation takes"): the stream said a figure that no record held. It takes a process that is silent for a minute and goes on after it. The tests of a turn that ends after it was given up on held what is kept and what is paid, and that whoever read along saw the words arrive: not how their stream ended.
+
+**Tests:**
+
+- in `test_turns_running_api.py`: a turn given up on with its draft, which then ends, read along by the request that started it and by a reader who joined while it ran: no `finish`, no metadata but the `start` chunk's, an error in `GIVEN_UP`'s words, and `[DONE]`, the same bytes for both; the conversation as giving up left it, the draft its answer, no counts and no figure; nothing counted or held. And a turn whose conversation was deleted as another process deletes it, with no stop first: the same ending, in `GONE`'s words. Both failed on the code before, where the stream ended with `finish-step` and `finish`;
+- a recorded stream of a turn given up on and then ended (`given_up.sse`, `test_turn_fixtures.py`), which the real `ai` package reads as an error, with no ending of its own (`tests/contract/turn-stream.test.ts`). Nothing else changed in the recorded files;
+- in the page's component tests (`components/chat/chat-app.test.tsx`): after that stream, in which the whole answer arrived, the page reads the conversation, and shows the kept draft, shorter than what arrived, with the record's outcome under it and "Try again", no line of what a completed turn took under it, and the meter's figure from before.
+
+**What it leaves:**
+
+- **A usage warning that such a turn was the first to earn isn't sent.** A turn whose conversation was deleted meanwhile is still counted, and can be the one that takes its account past 75 % or 90 % of a limit. The notice of that goes out beside a turn's ending, which this stream no longer has. The counts themselves are right whenever the usage is read; only that one notice is missed.
+- **A turn whose conversation was deleted by another process is still counted** for what it used, as before, and as an answer that a delete stops first is.
+- **The page's words for an interrupted turn** are "The server was restarted while this answer was being written.", which a turn given up on while its process was only slow doesn't bear out.

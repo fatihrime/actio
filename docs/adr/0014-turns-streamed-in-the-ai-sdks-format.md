@@ -257,7 +257,7 @@ Also checked in the code: `GET /api/models` already gives each model's `context_
 
 - **The split by characters is a guess.** A provider that said how many of the tokens it wrote were reasoning would make it exact, and the rule would take that count where there is one.
 - **A stopped answer isn't counted.** Its model's server never said what it read and wrote, so the figure the page shows stays the one from before it, a little under what the conversation takes.
-- **A turn that ends after it was given up on says more in its stream than its record keeps.** That is older than this member, and holds for the turn's status and its counts too: the stream's last chunk says how the answer ended, and the record, written by whoever gave up on the turn, says `interrupted`, with no counts and so no figure. Seen in the code, not reproduced. The page shows the stream's figure until it reads the conversation again.
+- **A turn that ended after it was given up on said more in its stream than its record keeps,** its status and counts as well as this figure, until the same day, when [ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "a turn that ends after it was given up on says so", ended that.
 
 **Measured on the built code,** the same day, with the same model on the same stack: four more conversations of the same shape, each with one answer that thought, the last three asked through the page in Chromium, Firefox and WebKit.
 
