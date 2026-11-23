@@ -54,6 +54,14 @@ kind = "ollama"
 # max_output_tokens  the most tokens one answer may have, reasoning included
 # thinking           for an "openai-compatible" server only: whether the model can reason
 #                    before it answers (true or false). Ollama says so itself.
+#
+# Several models on one Ollama: it keeps in memory what it decides it has room for, and
+# was seen to unload one model to load another on a machine with room for both. The page
+# asks for the model that answers to be loaded ahead, so with two models in use their
+# loads push each other out, and a question that follows the other model's load waits
+# for its own model again. To avoid it, offer one model on an Ollama; or lower how
+# often an account may ask for a load, ACTIO_LIMIT_WARM_UPS_PER_USER. See
+# docs/adr/0026-models-loaded-ahead-of-the-first-question.md.
 
 [models.standard]
 title = "Qwen 3.5 4B"
