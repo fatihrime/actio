@@ -428,7 +428,8 @@ class ScriptedModel:
     """A model that says exactly what a test tells it to, and remembers what it was asked.
 
     The script is a list of what to do in order: an event to yield, an error to raise,
-    or an `asyncio.Event` to wait for, which lets a test hold the answer half-way.
+    an `asyncio.Event` to wait for, which lets a test hold the answer half-way, or a
+    function to call, such as one that moves the test's `clock` between two events.
 
     `closes_when` makes closing its stream take a while, as closing the connection to a
     real model's server does: the stream ends only once that event is set.
@@ -459,6 +460,8 @@ class ScriptedModel:
                     self.waiting.set()
                     await item.wait()
                     self.waiting.clear()
+                elif callable(item):
+                    item()
                 else:
                     yield item
         finally:

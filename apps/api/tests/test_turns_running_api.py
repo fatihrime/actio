@@ -1,7 +1,8 @@
 """Turns that run apart from their request: read along with again, stopped, kept alive
 while they are written, and ended by a shutdown. And how many run at once: turns that
 wait at the gate in front of a model's server, the answers one account may have being
-written at once, and the readers it may have open.
+written at once, and the readers it may have open. And when a turn's first word came,
+however it ended.
 
 The app runs in process, and a request's response comes back whole, once its stream has
 ended. So a test starts a request as a task, does what it is about while the model is
@@ -14,7 +15,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -1879,6 +1880,240 @@ async def test_a_reader_whose_response_could_send_nothing_is_given_back(valkey_u
     with pytest.raises(turn_readers.TooManyReadersError):
         readers.join(account)
     assert len(places) == 6
+
+
+# --- When the first word came ---------------------------------------------------------
+#
+# The model's script moves the test's clock between the question, its pieces and the
+# end (`clock.advance`), so that each moment is told apart from the others.
+
+
+def moments(turn: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """When a turn, as the API says it, began, had its first word, and ended."""
+    return turn["started_at"], turn["first_word_at"], turn["finished_at"]
+
+
+async def test_a_turn_says_when_its_first_word_came_not_when_it_began_or_ended(
+    scripted: Any, clock: Any
+) -> None:
+    """An empty piece is no word. The stream's first chunk knows of none yet, and the
+    conversation, read afterwards, says the moment its last chunk said."""
+    _, browser = await scripted(
+        TextDelta(""),
+        lambda: clock.advance(seconds=2),
+        TextDelta("The "),
+        lambda: clock.advance(seconds=3),
+        TextDelta("saddle."),
+        lambda: clock.advance(seconds=1),
+        DONE,
+    )
+    chat = Chat(browser)
+
+    [answered] = await ended(chat.asking())
+
+    finished = chunk(answered, "finish")["messageMetadata"]["turn"]
+    assert moments(finished) == (
+        "2026-11-10T12:00:00Z",
+        "2026-11-10T12:00:02Z",
+        "2026-11-10T12:00:06Z",
+    )
+    assert chunk(answered, "start")["messageMetadata"]["turn"]["first_word_at"] is None
+    stored = (await chat.read())["messages"][1]["metadata"]["turn"]
+    assert stored["first_word_at"] == finished["first_word_at"]
+
+
+async def test_reasoning_that_comes_first_is_the_first_word(scripted: Any, clock: Any) -> None:
+    """The first sign that the model is at it, whatever kind of piece it is."""
+    _, browser = await scripted(
+        lambda: clock.advance(seconds=1),
+        ReasoningDelta("Something to sit on."),
+        lambda: clock.advance(seconds=4),
+        TextDelta("The saddle."),
+        DONE,
+    )
+
+    [answered] = await ended(Chat(browser).asking())
+
+    turn = chunk(answered, "finish")["messageMetadata"]["turn"]
+    assert moments(turn)[1] == "2026-11-10T12:00:01Z"
+
+
+async def test_a_turn_whose_model_failed_before_a_word_has_no_first_word(
+    scripted: Any, clock: Any
+) -> None:
+    _, browser = await scripted(
+        lambda: clock.advance(seconds=1), ProviderUnavailableError("the server went away")
+    )
+    chat = Chat(browser)
+
+    [answered] = await ended(chat.asking())
+
+    turn = chunk(answered, "message-metadata")["messageMetadata"]["turn"]
+    assert turn["status"] == "failed"
+    assert moments(turn) == ("2026-11-10T12:00:00Z", None, "2026-11-10T12:00:01Z")
+    assert (await chat.read())["unanswered"]["first_word_at"] is None
+
+
+async def test_a_turn_stopped_while_it_waited_for_its_models_server_has_no_first_word(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, clock: Any
+) -> None:
+    assert migrated
+    gate, hold = Gate(1), asyncio.Event()
+    first = lineup.add(
+        "standard", TextDelta("The first "), hold, TextDelta("answer."), DONE, gate=gate
+    )
+    lineup.add("second", TextDelta("Never written."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    one, two = Chat(browser), Chat(browser)
+    asked_first = one.asking()
+    await held(first)
+    asked_second = two.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+    clock.advance(seconds=5)
+
+    stopped = await asyncio.wait_for(two.stop(await two.running_turn()), PATIENCE_S)
+    hold.set()
+    await ended(asked_first, asked_second)
+
+    assert stopped.json()["status"] == "stopped"
+    assert moments(stopped.json()) == ("2026-11-10T12:00:00Z", None, "2026-11-10T12:00:05Z")
+    assert (await two.read())["unanswered"]["first_word_at"] is None
+
+
+@pytest.mark.parametrize("ending", ["stopped", "failed"])
+async def test_a_turn_that_ends_after_its_first_words_keeps_when_they_came(
+    scripted: Any, clock: Any, ending: str
+) -> None:
+    """Stopped by whoever asked, or failed by its model, after some words."""
+    hold = asyncio.Event()
+    rest = (
+        [ProviderUnavailableError("the server went away")]
+        if ending == "failed"
+        else [TextDelta("that nobody will read."), DONE]
+    )
+    model, browser = await scripted(
+        lambda: clock.advance(seconds=1), TextDelta("Half an "), hold, *rest
+    )
+    chat = Chat(browser)
+    asked = chat.asking()
+    await held(model)
+    clock.advance(seconds=5)
+
+    if ending == "stopped":
+        await chat.stop(await chat.running_turn())
+    else:
+        hold.set()
+    await ended(asked)
+
+    turn = (await chat.read())["messages"][1]["metadata"]["turn"]
+    assert turn["status"] == ending
+    assert moments(turn) == (
+        "2026-11-10T12:00:00Z",
+        "2026-11-10T12:00:01Z",
+        "2026-11-10T12:00:06Z",
+    )
+
+
+async def test_an_answer_a_shutdown_interrupted_keeps_when_its_first_word_came(
+    open_app: Any, offer: Any, settings: Settings, db: AsyncSession, clock: Any
+) -> None:
+    never = asyncio.Event()
+    model, catalog = offer(lambda: clock.advance(seconds=1), TextDelta("Half an "), never, DONE)
+    async with open_app(settings, catalog=catalog) as browser:
+        await browser.post("/api/session/guest")
+        asked = Chat(browser).asking()
+        await held(model)
+        clock.advance(seconds=5)
+        # Leaving the block is the shutdown: it halts the turn.
+    await ended(asked)
+
+    turn = await the_turn(db)
+    noon = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+    assert (turn.status, turn.first_word_at, turn.finished_at) == (
+        "interrupted",
+        noon + timedelta(seconds=1),
+        noon + timedelta(seconds=6),
+    )
+
+
+async def test_a_turn_cancelled_from_outside_keeps_when_its_first_word_came(
+    scripted: Any, clock: Any
+) -> None:
+    """Without a halt: a process going down faster than it can say so."""
+    never = asyncio.Event()
+    model, browser = await scripted(
+        lambda: clock.advance(seconds=1), TextDelta("Half an "), never, DONE
+    )
+    chat = Chat(browser)
+    asked = chat.asking()
+    await held(model)
+    task = writing(await chat.running_turn())
+    clock.advance(seconds=5)
+
+    task.cancel()
+    await recorded(task)
+    asked.cancel()  # its stream never got its last event: nothing would end it
+
+    turn = (await chat.read())["messages"][1]["metadata"]["turn"]
+    assert turn["status"] == "interrupted"
+    assert moments(turn) == (
+        "2026-11-10T12:00:00Z",
+        "2026-11-10T12:00:01Z",
+        "2026-11-10T12:00:06Z",
+    )
+
+
+async def test_a_turn_that_failed_inside_actio_keeps_when_its_first_word_came(
+    scripted: Any, clock: Any
+) -> None:
+    """A mistake of Actio's own after some words, and not the model's: recorded as a
+    failure like any other, with what had come and when."""
+    _, browser = await scripted(
+        lambda: clock.advance(seconds=1),
+        TextDelta("Half an "),
+        lambda: clock.advance(seconds=5),
+        RuntimeError("something of Actio's own"),
+    )
+    chat = Chat(browser)
+
+    await ended(chat.asking())
+
+    turn = (await chat.read())["messages"][1]["metadata"]["turn"]
+    assert (turn["status"], turn["error"]) == ("failed", "internal_error")
+    assert moments(turn) == (
+        "2026-11-10T12:00:00Z",
+        "2026-11-10T12:00:01Z",
+        "2026-11-10T12:00:06Z",
+    )
+
+
+async def test_a_turn_given_up_on_says_nothing_of_its_first_word(
+    scripted: Any, db: AsyncSession, clock: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its process noted when the first word came, and then fell silent: what it noted
+    went with it. Its beats saved what the answer held, and nothing of that moment."""
+    monkeypatch.setattr(turns, "BEAT", timedelta(milliseconds=10))
+    hold = asyncio.Event()
+    model, browser = await scripted(
+        lambda: clock.advance(seconds=1), TextDelta("Sorry, "), hold, TextDelta("I'm late."), DONE
+    )
+    chat = Chat(browser)
+    asked = chat.asking()
+    await held(model)
+    clock.advance(seconds=20)
+    await beaten(lambda: said_alive_at(db, clock.now))  # with what was written by then
+
+    async def lost(*_: Any, **__: Any) -> None:
+        """A beat that doesn't reach the database."""
+
+    monkeypatch.setattr(turns, "still_alive", lost)
+    clock.advance(seconds=60)
+    given_up_on = (await chat.read())["messages"][1]["metadata"]["turn"]
+    hold.set()
+    await ended(asked)
+
+    assert given_up_on["status"] == "interrupted"
+    assert moments(given_up_on) == ("2026-11-10T12:00:00Z", None, "2026-11-10T12:01:21Z")
 
 
 # --- The description ------------------------------------------------------------------

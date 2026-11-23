@@ -95,6 +95,7 @@ async def test_finishing_a_turn_writes_the_answer_and_what_it_cost(db: AsyncSess
         finish_reason="stop",
         usage=Usage(input_tokens=11, output_tokens=3, cached_input_tokens=6),
         timings=Timings(load_ms=1800, prompt_ms=120, generation_ms=75, total_ms=2000),
+        first_word_at=NOON + timedelta(seconds=1),
     )
 
     recorded = await turns.finish(
@@ -106,6 +107,7 @@ async def test_finishing_a_turn_writes_the_answer_and_what_it_cost(db: AsyncSess
     assert recorded == "recorded"
     assert (turn.status, turn.finish_reason, turn.error) == ("completed", "stop", None)
     assert (turn.answer_id, turn.finished_at) == (answer_id, later)
+    assert turn.first_word_at == NOON + timedelta(seconds=1)
     assert (turn.input_tokens, turn.cached_input_tokens, turn.output_tokens) == (11, 6, 3)
     assert (turn.load_ms, turn.prompt_ms, turn.generation_ms) == (1800, 120, 75)
     answer = await db.get(Message, answer_id)
@@ -171,6 +173,8 @@ async def test_a_turn_is_given_up_on_only_after_a_minute_of_silence(db: AsyncSes
     await db.refresh(begun.turn)
 
     assert (before, begun.turn.status) == ("running", "interrupted")
+    # Whoever gives up on a turn doesn't know when its first word came, if one did.
+    assert begun.turn.first_word_at is None
 
 
 async def test_a_turn_that_says_it_is_alive_is_not_given_up_on_however_long_it_takes(

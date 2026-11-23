@@ -127,6 +127,10 @@ class Ending:
     error: str | None = None
     usage: Usage | None = None
     timings: Timings | None = None
+    first_word_at: datetime | None = None
+    """When the first piece of the answer came, its reasoning included. `None` when the
+    model wrote nothing, and for a turn that is given up on: its process said nothing of
+    it."""
 
 
 class Draft(BaseModel):
@@ -572,8 +576,9 @@ async def _end(
     `finish`, and giving up.
 
     The answer is a message under `answer_id`, shown by the conversation, and dated
-    `answered_at`, or `now` when that isn't given. The turn ends at `now`. Its draft is
-    emptied in the statement that writes the outcome."""
+    `answered_at`, or `now` when that isn't given. The turn ends at `now`, with the
+    moment its first word came, if the ending has one. Its draft is emptied in the
+    statement that writes the outcome."""
     if ending.parts:
         assert answer_id is not None  # noqa: S101 - whoever has parts has their message's id
         await tree.append(
@@ -597,6 +602,7 @@ async def _end(
         turn.load_ms = ending.timings.load_ms
         turn.prompt_ms = ending.timings.prompt_ms
         turn.generation_ms = ending.timings.generation_ms
+    turn.first_word_at = ending.first_word_at
     turn.credits = credits
     turn.draft = None
     turn.finished_at = now

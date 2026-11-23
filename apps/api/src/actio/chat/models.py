@@ -185,4 +185,9 @@ class Turn(Base):
     """What the answer holds so far, saved with each beat, and the id its message will
     have: see `actio.chat.turns.Draft`. Empty until something is written, and once the
     turn has ended. A turn whose process died is given up on with it as its answer."""
+    first_word_at: Mapped[datetime | None]
+    """When the first piece of the model's answer came, its reasoning included, by the
+    clock of the process that wrote the turn: written with the turn's outcome. Empty
+    while the turn runs, when the model wrote nothing, and for a turn that was given up
+    on, whose process said nothing of it."""
     finished_at: Mapped[datetime | None]

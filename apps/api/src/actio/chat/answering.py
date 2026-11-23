@@ -11,6 +11,10 @@ Whatever happens on the way, the turn doesn't stay `running`:
   `interrupted`, when the process is shutting down. Either way with what had arrived.
   Halting closes the connection to the model, which stops generating.
 
+However it ends, a turn that got some of the model's answer says when the first piece
+came, by the clock it is given: what the person waited for the first word, from the
+moment they asked, the wait at the gate below included (`Ending.first_word_at`).
+
 Nobody has to be listening. A turn runs apart from the request that started it
 (`actio.chat.running`), and a reader who leaves ends nothing. So while a turn runs, it
 says every few seconds that it is alive, saves what it has written so far, and renews
@@ -271,6 +275,8 @@ async def answer(
     """
     collected = Answer()
     ending: Ending | None = None
+    # When the first piece of the answer was taken: noted once, before it is handed on.
+    first_word: datetime | None = None
     beats = asyncio.create_task(
         _beat(open_session, turn_id, answer_id, collected, clock, usage, reserved, on_beat)
     )
@@ -286,7 +292,10 @@ async def answer(
                 aclosing(offered.chat.stream(request)) as events,
             ):
                 async for event in events:
-                    for step in collected.take(event):
+                    steps = collected.take(event)
+                    if first_word is None and any(isinstance(step, Wrote) for step in steps):
+                        first_word = clock()
+                    for step in steps:
                         with anyio.CancelScope(shield=True):
                             await emit(step)
         if collected.finish is not None:
@@ -296,25 +305,26 @@ async def answer(
                 finish_reason=collected.finish.reason.value,
                 usage=_believed(collected.finish.usage, collected.parts, reserved, turn_id),
                 timings=_kept(collected.finish.timings, turn_id),
+                first_word_at=first_word,
             )
         elif halt.reason is not None:
-            ending = Ending(halt.reason, collected.parts)
+            ending = Ending(halt.reason, collected.parts, first_word_at=first_word)
             for step in collected.close():
                 await emit(step)
         else:
             raise StreamInterruptedError("the model's answer ended without saying why")
     except LLMError as error:
         logger.warning("turn %s: the model failed (%s: %s)", turn_id, type(error).__name__, error)
-        ending = Ending("failed", collected.parts, error=code_for(error))
+        ending = Ending("failed", collected.parts, error=code_for(error), first_word_at=first_word)
         for step in collected.close():
             await emit(step)
     except Exception:
-        ending = Ending("failed", collected.parts, error="internal_error")
+        ending = Ending("failed", collected.parts, error="internal_error", first_word_at=first_word)
         raise
     except BaseException:
         # Cancelled from outside, without a `Halt`: the process is going down faster
         # than it could say so.
-        ending = Ending("interrupted", collected.parts)
+        ending = Ending("interrupted", collected.parts, first_word_at=first_word)
         raise
     finally:
         beats.cancel()

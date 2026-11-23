@@ -678,6 +678,7 @@ def _ended(running: TurnOut, ended: Ended) -> TurnOut:
             "prompt_ms": timings.prompt_ms if timings else None,
             "generation_ms": timings.generation_ms if timings else None,
             "credits": ended.credits,
+            "first_word_at": ending.first_word_at,
             "finished_at": ended.at,
         }
     )

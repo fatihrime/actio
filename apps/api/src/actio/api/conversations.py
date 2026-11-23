@@ -103,6 +103,11 @@ class TurnOut(BaseModel):
     """Whether a usage limit left the answer less room than the model allows. With the
     `finish_reason` `length`, that is why the answer was cut."""
     started_at: datetime
+    first_word_at: datetime | None
+    """When the first piece of the answer came, its reasoning included, by the server's
+    clock. From `started_at`, that is how long the first word took: the wait for the
+    model's server included. Empty while the turn runs, when the model wrote nothing,
+    and for a turn that was given up on."""
     finished_at: datetime | None
 
     @classmethod
@@ -123,6 +128,7 @@ class TurnOut(BaseModel):
             credits=turn.credits,
             capped_by_usage=turn.capped_by_usage,
             started_at=turn.created_at,
+            first_word_at=turn.first_word_at,
             finished_at=turn.finished_at,
         )
 

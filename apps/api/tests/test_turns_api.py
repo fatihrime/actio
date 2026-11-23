@@ -175,6 +175,8 @@ async def test_a_question_is_answered_as_a_stream(chat: Chat, server_ids: Any) -
         "credits": len(TODAY.content.split()) + 2 + 3,
         "capped_by_usage": False,
         "started_at": "2026-11-10T12:00:00Z",
+        # The test's clock stands still: every moment of the turn is the same one.
+        "first_word_at": "2026-11-10T12:00:00Z",
         "finished_at": "2026-11-10T12:00:00Z",
     }
 

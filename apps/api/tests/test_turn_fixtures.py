@@ -37,7 +37,7 @@ from actio.api import turns as turn_routes
 from actio.api import ui_stream
 from actio.chat import events
 from actio.core.settings import Settings
-from actio_llm import Finish, FinishReason, TextDelta, Usage
+from actio_llm import Finish, FinishReason, TextDelta, Timings, Usage
 
 pytestmark = pytest.mark.anyio
 
@@ -115,6 +115,49 @@ async def test_an_answer_cut_off_at_the_limit_streams_what_was_recorded(scripted
     response = await turn(browser, "Count to a hundred.")
 
     as_recorded("cut_off.sse", response.text)
+
+
+async def test_an_answer_that_says_what_it_took_streams_what_was_recorded(
+    scripted: Any, clock: Any
+) -> None:
+    """Every figure the page shows under an answer: a model that says how long it took
+    to write, as Ollama does, and a clock that moves between the question, the first
+    word and the end. The numbers are worded at a glance:
+
+    - 34 tokens written in the model's own 4 seconds: "8.5 tokens a second". By the
+      clock, 2 seconds from the first word to the end, it would be 17: the page takes
+      the model's time first;
+    - the first word 1.2 seconds after the question: "first word after 1.2 s";
+    - 1,200 tokens read and 34 written, at a credit a token: "1,234 credits".
+    """
+    _, browser = await scripted(
+        lambda: clock.advance(seconds=1.2),
+        TextDelta("Thirty-four tokens, "),
+        TextDelta("in four seconds."),
+        lambda: clock.advance(seconds=2),
+        Finish(
+            FinishReason.STOP,
+            Usage(input_tokens=1_200, output_tokens=34),
+            Timings(load_ms=10, prompt_ms=300, generation_ms=4_000, total_ms=4_310),
+        ),
+    )
+
+    response = await turn(browser, "How fast was that?")
+
+    as_recorded("figures.sse", response.text)
+
+
+async def test_an_answer_of_no_words_that_was_counted_streams_what_was_recorded(
+    scripted: Any,
+) -> None:
+    """A model that answered with nothing, and said what it had read: the turn completes,
+    and costs what was read. For the web app, which says what an answer took under its
+    words: here there are none to say it under."""
+    _, browser = await scripted(Finish(FinishReason.STOP, Usage(input_tokens=30, output_tokens=0)))
+
+    response = await turn(browser, "Say nothing.")
+
+    as_recorded("no_words.sse", response.text)
 
 
 async def test_an_answer_that_passes_half_of_a_usage_limit_streams_what_was_recorded(

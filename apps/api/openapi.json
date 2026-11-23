@@ -1821,6 +1821,18 @@
             "format": "date-time",
             "title": "Started At"
           },
+          "first_word_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Word At"
+          },
           "finished_at": {
             "anyOf": [
               {
@@ -1851,6 +1863,7 @@
           "credits",
           "capped_by_usage",
           "started_at",
+          "first_word_at",
           "finished_at"
         ],
         "title": "TurnOut",
