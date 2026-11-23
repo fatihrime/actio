@@ -734,3 +734,55 @@ The last of each: **the reader chooses System, the default, Light or Dark, under
 - **Not heard with a screen reader,** and not seen with a system's own contrast theme, only with Chromium's emulation of forced colours. The tests find the group by its role and name, and the chosen radio button by its state, in the simulated page and through Playwright in Chromium.
 
 **Why now, and not at the start:** the page was dark from its first step for a reader whose system is set so, which was enough to build the chat on. A choice of one's own came with the rest of what the page says and offers of its own accord, in the steps of this week. And that the code's colours hang on Tailwind's `dark` variant only matters once the choice and the system can differ.
+
+### 2026-11-23: with forced colours, what stood apart by its ground has a line
+
+#### Context
+
+Where a system's own few colours take the place of the page's (`forced-colors`, as Windows' contrast themes do), the browser gives every ground on the page the system's one ground, and every word and line one of its few colours. The revision before this one met that at the choice of a theme, underlined the chosen one there, and named two more places, as they were. The page was then looked at: the chat with two conversations, the question before deleting, and the form for logging in. The review of this revision read the classes of what the markdown library draws as well, and found the last two of the list below, which were then looked at too.
+
+Seen on 2026-11-23, on the code of that revision, in Playwright 1.65 with Chromium 158 told that colours are forced (`forcedColors`), under a light and a dark system, from pictures and from the styles as the browser computed them:
+
+- **The current conversation's row in the list** had the ground of every other row, and was told from them by its heavier letters alone.
+- **The usage meter's bars and the context meter's bar** were not seen: the bar and what fills it both had the page's ground, and neither a line. What was left were the words beside them.
+- **A question** had lost its bubble: its ground was the page's, and it had no line. It was words at the right of the page.
+- **Two buttons were words alone:** "Delete" in the question before deleting, beside a "Cancel" that kept its line, and the forms' main button, "Log in", "Sign up" and the account page's. Each is a filled ground without a border. Send, as filled, kept a line: the border it has since the revision "the box is as large with Stop in it as with Send", which nobody sees with the page's own colours, the system colours there.
+- **The button that opens a link** was words and an icon alone too, beside a "Copy link" that kept its line: in the dialog that holds a link until the reader has seen its address ([ADR 0016](0016-answers-shown-as-markdown.md)), which is the markdown library's own.
+- **The dots between an answer's figures** were not seen in Chromium: a dot is a ground in the colour of the words around it, and got the page's ground. Firefox left them their colour.
+- **What had a line kept it:** the notices, the box to write in, every button with a border, a block of code, the question before deleting.
+
+#### Options considered
+
+1. **The system's colours for what is chosen** (`Highlight` and `HighlightText`), with the browser told to leave them (`forced-color-adjust: none`).
+    - Con: a ground is what the system takes away there, on purpose, and two more colours by name, for one state, where the page's colours have names by role.
+2. **A border that is always there,** of no colour with the page's own colours, as Send has.
+    - Con: it makes each of these two pixels larger for everybody, and it can't tell the current row from the others: every row would have it, and the system colours them all.
+3. **A line only where colours are forced,** and for what is a ground and nothing else, the colour of the words.
+
+#### Decision
+
+The third, in the styles alone (`forced-colors:` in each component's classes, the rule said once in `app/globals.css`):
+
+- **A line around what stood apart by its ground alone** (`forced-colors:border`, which the system colours): the current conversation's row, a question's bubble, each meter's bar, "Delete" in the question before deleting, and the forms' main button.
+- **The button that opens a link gets its line from the app's stylesheet,** by a rule for that dialog where colours are forced (`app/globals.css`): the dialog's classes are the library's, and the page can't write them.
+- **What is a ground and nothing else is in the colour of the words:** what fills a meter's bar, and the dot between an answer's figures (`forced-colors:bg-foreground`, the role whose colour is the system's own for text). The system leaves a colour of its own as it is, and gives any other ground the page's: so nothing more is asked of the browser. A class that told it to leave the ground alone (`forced-color-adjust-none`) was built first and taken out: planted as a mistake, its absence failed nothing, and Chromium and Firefox fill the bar in the colour of the words without it.
+- **Nothing changes with the page's own colours:** no line is drawn there, and nothing is a pixel larger.
+- **Left as they are:**
+    - **a level that is close to its limit** has the colour of every other level there. Its share, in figures beside it, is what still says how close;
+    - **the rows move by two pixels when another conversation becomes the current one,** there: its line makes the current row that much taller, and a line on every row would tell none apart;
+    - **"Delete" is no longer told from "Cancel" by a colour.** Its word says it;
+    - **code within a line and the place of a picture that isn't fetched** lose their ground and keep their letters;
+    - **the grounds under the pointer** are gone, as every ground is;
+    - **the two buttons that are words with the page's own colours too,** "Show older conversations" and a password's "Show", stay words.
+
+**Tests:** end to end (`e2e/forced-colours.spec.ts`), with the browser told that colours are forced. Two conversations, the second on the page: the question, the current row and both meters' bars each have a line, and the other row has none; each bar's filling and the dot between the answer's figures are in the colour of the page's words, which a bar's own ground is not; "Delete" in the question before deleting and "Log in" in its form have a line; and once the browser is told that colours are no longer forced, none of these lines is drawn, "Delete" has none either, and neither a bar nor the dot is in the colour of the words. And an answer with a link: in the dialog that shows its address, the button that opens it has a line, as "Copy link" has, and none once colours are no longer forced, where "Copy link" keeps its own. The simulated page lays nothing out and applies no styles, so there is no component test.
+
+**Measured on what was built,** on 2026-11-23, on a stack of its own built from this change: in Chromium 158 and Firefox 159, under a light and a dark system in Chromium, each had its line in a colour of the system's, and each bar and dot the colour of the words on the page's ground. Playwright's WebKit says that colours are forced when told so, and forces none: Safari has no such mode. The mistakes planted to see the tests fail, one at a time in a stack built from a copy of the change: 15, each of which failed one.
+
+#### Consequences
+
+- **With forced colours, what has a line is two pixels larger** than with the page's own, the line being there only then: the current row, a question and the three buttons. A meter's bar keeps its size, and what fills it is two pixels thinner.
+- **A new thing that stands apart by its ground alone needs its line too.** `AGENTS.md` says so; nothing but looking finds one that was forgotten.
+- **Not seen with a system's own contrast theme,** only with the browsers' emulation of forced colours.
+
+**Why now, and not at the start:** the page was never looked at with forced colours until the choice of a theme was, on this day. The review of that step asked whether its chosen one could still be told there; it couldn't, and the rest of the page was then looked at the same way.
