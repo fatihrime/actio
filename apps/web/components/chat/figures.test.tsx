@@ -206,7 +206,8 @@ describe("what an answer took", () => {
 
   it("is not said of an answer that has no words, though its turn was counted", async () => {
     // Its model answered with nothing, and said what it had read: that is paid for.
-    // The line says what an answer took under its words, and here there are none.
+    // An answer with nothing in it isn't drawn, so there is nothing to say it under:
+    // the page says that the model gave no answer.
     expect(recordedTurn("no_words.sse")).toMatchObject({
       status: "completed",
       credits: 30,
@@ -216,11 +217,10 @@ describe("what an answer took", () => {
 
     await ask(user, "Say nothing.");
 
-    const shown = await screen.findByRole("article", { name: "Actio" });
-    // The answer is over: the box sends again.
-    expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
-    await afterAMoment();
-    expect(shown.textContent).toBe("");
+    expect(await screen.findByText("The model gave no answer.")).toBeVisible();
+    expect(
+      screen.queryByRole("article", { name: "Actio" }),
+    ).not.toBeInTheDocument();
     expect(line()).not.toBeInTheDocument();
   });
 

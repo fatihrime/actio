@@ -33,6 +33,22 @@ export function textOf(message: ChatMessage): string {
     .join("");
 }
 
+/** Whether a message says anything: some text that isn't blank. What a model thought
+ * before it answered is no answer. */
+export function hasWords(message: ChatMessage): boolean {
+  return textOf(message).trim() !== "";
+}
+
+/** Whether a message has nothing in it to read: no text and no reasoning but blank
+ * space. A model can write that, a line break and no more, and the server stores it. */
+export function isBlank(message: ChatMessage): boolean {
+  return !message.parts.some(
+    (part) =>
+      (part.type === "text" || part.type === "reasoning") &&
+      part.text.trim() !== "",
+  );
+}
+
 /** Whether a message has anything to show yet: some text, or some reasoning. */
 export function hasContent(message: ChatMessage): boolean {
   return message.parts.some(

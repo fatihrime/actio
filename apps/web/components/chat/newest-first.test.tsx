@@ -509,7 +509,11 @@ describe("a long stored conversation", () => {
     const { ask, user, SUSPENDED } = await openStored(api, messages, {
       suspense: true,
       // The model failed, so the page reads the conversation again: it holds the
-      // question now, and the turn that failed to answer it.
+      // question now, and the turn that failed to answer it. Here the conversation
+      // says something else of that turn than its stream did, which a server never
+      // would: the answer the page held for the failed turn had nothing in it and
+      // isn't drawn, so nothing else on the page tells what was read again from
+      // what the stream left.
       afterwards: [
         () =>
           json(
@@ -520,7 +524,7 @@ describe("a long stored conversation", () => {
                 ...messages,
                 question(posted(api).message?.id ?? "", ASKED, "a24"),
               ],
-              turn({ status: "failed", error: "model_unavailable" }),
+              turn({ status: "failed", error: "model_missing" }),
             ),
           ),
       ],
@@ -531,15 +535,12 @@ describe("a long stored conversation", () => {
 
     await ask(user, ASKED);
 
-    // As the server has it, still from the same message on: the answer the page held
-    // for the failed turn, which had nothing in it, is gone.
-    await waitFor(() => {
-      expect(onThePage()).toEqual([...newest, ASKED]);
-    });
-    expect(api.to(CONVERSATION)).toHaveLength(2);
+    // As the server has it, still from the same message on.
     expect(
-      await screen.findByText(/can't be reached, or is too busy/),
+      await screen.findByText("The model isn't on its server."),
     ).toBeInTheDocument();
+    expect(onThePage()).toEqual([...newest, ASKED]);
+    expect(api.to(CONVERSATION)).toHaveLength(2);
     expect(screen.queryByText(SUSPENDED)).not.toBeInTheDocument();
 
     arrive();

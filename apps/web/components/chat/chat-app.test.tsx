@@ -3,7 +3,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import type { Conversation } from "@/lib/api/client";
+import type { Conversation, StoredMessage } from "@/lib/api/client";
 import { isId } from "@/lib/ids";
 import {
   answer,
@@ -32,6 +32,8 @@ const CONVERSATION = "GET /api/conversations/*";
 const LIST = "GET /api/conversations";
 const USAGE = "GET /api/usage";
 const SECOND_ANSWER = "01900000-0000-7000-8000-000000000004";
+/** What the page says of a turn that completed, and left no answer. */
+const NO_ANSWER = "The model gave no answer.";
 
 /** What the page posted to start a turn. */
 interface Posted {
@@ -439,6 +441,151 @@ describe("an answer that doesn't arrive whole", () => {
       thinking: false,
     });
     expect(screen.queryByText(/too busy/)).not.toBeInTheDocument();
+  });
+
+  it("says when the model gave no answer, and asks it again when asked", async () => {
+    // The model answered with nothing, and ended as a finished answer does. The
+    // server stores no answer then, and the question stands open.
+    const api = fakeApi();
+    api.on(
+      TURNS,
+      () => streamed("no_words.sse"),
+      () => streamed("answer.sse"),
+    );
+    const user = open();
+
+    await ask(user, "Why is the sky blue?");
+
+    expect(await screen.findByText(NO_ANSWER)).toBeVisible();
+    // An answer with nothing in it isn't drawn: the question stands alone.
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    expect(posted(api.to(TURNS)[1])).toEqual({
+      answer_to: sentQuestion(api),
+      thinking: false,
+    });
+    // An answer that has words says nothing of the sort, and isn't asked for again:
+    // looked at once it is over, since nothing of the kind is said while one arrives.
+    expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
+    expect(screen.queryByText(NO_ANSWER)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Try again" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says the same of a stored question whose turn completed without an answer", async () => {
+    const api = fakeApi();
+    api
+      .on(CONVERSATION, () =>
+        json(
+          200,
+          conversation(
+            RECORDED.conversation,
+            [question(RECORDED.question, "Why is the sky blue?")],
+            turn({ output_tokens: 0, first_word_at: null }),
+          ),
+        ),
+      )
+      .on(TURNS, () => streamed("answer.sse"));
+    const user = open(`/c/${RECORDED.conversation}`);
+
+    expect(await screen.findByText(NO_ANSWER)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    expect(posted(api.to(TURNS)[0])).toEqual({
+      answer_to: RECORDED.question,
+      thinking: false,
+    });
+  });
+
+  it("says so too when the model thought, and then gave no answer", async () => {
+    const thought: StoredMessage = {
+      ...answer(RECORDED.answer, "", RECORDED.question),
+      parts: [{ type: "reasoning", text: "Something to sit on." }],
+    };
+    const api = fakeApi();
+    api
+      .on(CONVERSATION, () =>
+        json(
+          200,
+          conversation(RECORDED.conversation, [
+            question(RECORDED.question, "Why is the sky blue?"),
+            thought,
+          ]),
+        ),
+      )
+      .on(TURNS, () => streamed("answer.sse"));
+
+    const user = open(`/c/${RECORDED.conversation}`);
+
+    expect(await screen.findByText(NO_ANSWER)).toBeVisible();
+    // What it thought is there to read.
+    expect(screen.getByText("Thought before answering")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    // Another answer to the same question, beside the one that only thought.
+    expect(
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    expect(posted(api.to(TURNS)[0])).toEqual({
+      answer_to: RECORDED.question,
+      thinking: false,
+    });
+  });
+
+  it("takes an answer of nothing but blank space for no answer, and doesn't draw it", async () => {
+    // A model can write a line break and no more, and the server stores that.
+    fakeApi().on(CONVERSATION, () =>
+      json(
+        200,
+        conversation(RECORDED.conversation, [
+          question(RECORDED.question, "Why is the sky blue?"),
+          answer(RECORDED.answer, "\n\n", RECORDED.question),
+        ]),
+      ),
+    );
+
+    open(`/c/${RECORDED.conversation}`);
+
+    expect(await screen.findByText(NO_ANSWER)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    // Nothing to read in it: only the question is on the page.
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+  });
+
+  it("offers another try when the model reached its length limit before a word", async () => {
+    fakeApi().on(CONVERSATION, () =>
+      json(
+        200,
+        conversation(
+          RECORDED.conversation,
+          [question(RECORDED.question, "Count to five.")],
+          turn({
+            finish_reason: "length",
+            output_tokens: 0,
+            first_word_at: null,
+          }),
+        ),
+      ),
+    );
+
+    open(`/c/${RECORDED.conversation}`);
+
+    expect(
+      await screen.findByText(/reached the model's length limit/),
+    ).toBeVisible();
+    expect(screen.queryByText(NO_ANSWER)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
   it("keeps the beginning of an answer that broke off", async () => {

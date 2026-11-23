@@ -2,7 +2,7 @@ import { Component, memo, useEffect, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 
 import { figuresOf } from "@/lib/chat/figures";
-import { hasContent, turnOf } from "@/lib/chat/messages";
+import { isBlank, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
 
 // Its type alone: the code comes apart from the page, below.
@@ -189,7 +189,9 @@ export const Message = memo(function Message({
  *
  * What the answer took comes under it, after its article, once its words are shown and
  * its turn has ended, as its record says (`Figures`): nothing of it while the answer
- * arrives. */
+ * arrives.
+ *
+ * An answer that is over and has nothing in it to read draws nothing at all. */
 function Answer({
   message,
   writing,
@@ -201,11 +203,15 @@ function Answer({
     (part) => part.type === "text" || part.type === "reasoning",
   );
   const waits = useWaitsForRenderer(shown.length > 0);
+  if (!writing && isBlank(message)) {
+    // An answer that is over and has nothing in it to read: nothing arrived, because
+    // its turn failed before a word or completed with none, or nothing but blank
+    // space did. There is nothing to draw, or to say under it. Why no answer came is
+    // said in its place (`outcomeOf`, chat.tsx).
+    return null;
+  }
   const turn = turnOf(message);
-  const figures =
-    !writing && !waits && turn !== null && hasContent(message)
-      ? figuresOf(turn)
-      : [];
+  const figures = !writing && !waits && turn !== null ? figuresOf(turn) : [];
   // The article is the model's words and nothing else. What the page says about the
   // answer stands after it, as the notice of how a turn ended does (chat.tsx).
   return (

@@ -19,8 +19,11 @@ const FAILURES: Record<string, string> = {
 };
 
 /** Why a turn left no answer, or not all of one. Nothing when it went well, or is
- * still running. */
-export function outcomeOf(turn: Turn): string | null {
+ * still running. `answered` says whether the conversation has an answer of the turn's
+ * with words in it: a turn can complete without one, when its model wrote nothing, or
+ * thought and then wrote nothing. The server stores no empty answer, and the turn's
+ * record alone doesn't say. */
+export function outcomeOf(turn: Turn, answered: boolean): string | null {
   switch (turn.status) {
     case "failed":
       return (
@@ -33,7 +36,7 @@ export function outcomeOf(turn: Turn): string | null {
       return "The server was restarted while this answer was being written.";
     case "completed":
       if (turn.finish_reason !== "length") {
-        return null;
+        return answered ? null : "The model gave no answer.";
       }
       // Near a usage limit an answer is given less room than the model allows
       // (ADR 0020). When it ran out of that, the limit is why it stops.
@@ -45,9 +48,14 @@ export function outcomeOf(turn: Turn): string | null {
   }
 }
 
-/** Whether a turn left its question open for another try. */
-export function canRetry(turn: Turn): boolean {
-  return turn.status !== "completed" && turn.status !== "running";
+/** Whether a turn left its question open for another try: it ended any other way than
+ * completed, or it completed and left no answer with words in it (`answered`, as for
+ * `outcomeOf`). */
+export function canRetry(turn: Turn, answered: boolean): boolean {
+  if (turn.status === "running") {
+    return false;
+  }
+  return turn.status !== "completed" || !answered;
 }
 
 /** What went wrong with a request, as far as the page can tell. */

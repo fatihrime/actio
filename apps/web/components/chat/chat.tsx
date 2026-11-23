@@ -16,7 +16,7 @@ import { Notice, NoticeButton } from "@/components/notice";
 import { LimitReached, UsagePassed } from "@/components/usage/limit";
 import { ApiProblem, cancelTurn, getConversation } from "@/lib/api/client";
 import type { Conversation, Model, Turn } from "@/lib/api/client";
-import { fromStored, hasContent, turnOf } from "@/lib/chat/messages";
+import { fromStored, hasContent, hasWords, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
 import {
   canRetry,
@@ -550,7 +550,12 @@ export function Chat({
 
   const last = messages.at(-1);
   const turn = last?.role === "assistant" ? turnOf(last) : open;
-  const outcome = answering || turn === null ? null : outcomeOf(turn);
+  // Whether that turn left an answer that says anything. A question that stands open
+  // has none, and neither has an answer of which nothing arrived, or only thoughts:
+  // a turn can complete that way, and the page says so (`outcomeOf`).
+  const saidSomething = last?.role === "assistant" && hasWords(last);
+  const outcome =
+    answering || turn === null ? null : outcomeOf(turn, saidSomething);
   const unready = model === null ? null : notReady(model);
   const blocked = isSessionEnd(problem)
     ? "Your session has ended."
@@ -636,7 +641,7 @@ export function Chat({
             {outcome !== null && turn !== null && (
               <Notice
                 actions={
-                  canRetry(turn) &&
+                  canRetry(turn, saidSomething) &&
                   blocked === null && (
                     <NoticeButton onClick={retry}>Try again</NoticeButton>
                   )
