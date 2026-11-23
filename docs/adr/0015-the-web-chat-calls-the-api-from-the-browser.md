@@ -786,3 +786,43 @@ The third, in the styles alone (`forced-colors:` in each component's classes, th
 - **Not seen with a system's own contrast theme,** only with the browsers' emulation of forced colours.
 
 **Why now, and not at the start:** the page was never looked at with forced colours until the choice of a theme was, on this day. The review of that step asked whether its chosen one could still be told there; it couldn't, and the rest of the page was then looked at the same way.
+
+### 2026-11-23: an answer waits for the model until it has words
+
+**What was wrong.** An answer said "Waiting for the model…" until its first piece began, and then drew that piece. But a piece begins a moment before its first words: the stream says `text-start`, and then the first `text-delta`. When the two reached the page apart, the text was drawn from its beginning, empty, in the wait's place, and its first words were handed to the renderer only when the pace allowed, 50 ms later ([ADR 0016](0016-answers-shown-as-markdown.md), revision "an arriving answer is drawn at most every 50 ms"). Meanwhile the answer was an article with nothing in it.
+
+- **It showed as a flicker:** the wait line went, nothing stood there, then the words came. In a conversation longer than the screen, the conversation got 20 px shorter and then 24 px longer.
+- **And it cost a reader their place.** Someone at the end who turned the wheel up a few pixels at that moment was moved up to the new end by the browser when the conversation got shorter. When it got longer again, Chromium put them back where the wheel had left them, by itself, a few frames later. The page took that for the reader scrolling down to the end, and followed the answer again, over the wheel they had just turned.
+
+**How it was found.** The end-to-end test of the page following a long answer failed once in a run of the whole suite. It turns the wheel 6 px up, and waits for the button that leads back to the end. Run alone it then passed 60 times of 60, and the whole suite 17 times of 17, on the code before the step that was being checked and after it. Beside eight busy processes it failed 2 times in 30 on each. A probe then noted every wheel, every scroll, every move the page made itself and every frame around the wheel: the four runs of 32 in which the button never came all showed the conversation 20 px shorter for a few frames right after the wheel, and the reader back at their place when it was longer again. A second probe, frame by frame, found what got shorter: the answer's article, from the wait line's 20 px to nothing, and then to its first line.
+
+- **The test turned its wheel at that moment by a mistake of its own:** it waited for the conversation to be longer than the screen "some seconds into the answer", and the question it asks is as long as the answer, so the wait was over when the question was on the page.
+
+**What changed:**
+
+- **A piece of text that has begun and has no words yet draws nothing** (`Answer` in `components/chat/message.tsx`), and neither does one of blank space alone. Until something of the answer is drawn, the answer goes on saying that it waits for the model. So its first words are the first thing drawn of them, at once, and the pace counts from there. A thought that has begun is drawn as before: it says "Thinking…" by itself.
+- **A thought stays open until the text after it has words,** and folds away as they come, in the same draw. It folded when the text began: a moment with the folded thought alone, and nothing yet of the answer. The piece that can still be arriving is the last one that is drawn.
+- **A move of the browser's own isn't the reader scrolling down** (`useFollow` in `components/chat/follow.ts`). When what is shown gets shorter and the browser moves the reader up to its new end, the hook keeps where they were. A scroll down that goes no further than that place, to within a pixel, with nothing done by the reader in between, is the browser putting them back, and the end isn't followed again for it. Whatever the reader does that scrolls, a wheel, a key, a finger, a scrollbar taken hold of, makes the next scroll theirs, and so does a scroll past that place.
+- **The end-to-end test waits for the answer's own words,** a few hundred of them, before it looks and turns its wheel.
+
+**Measured** on 2026-11-23, on the machine of this record's other measurements, on a stack of `make e2e` built from the code before and after:
+
+| | Before | After |
+|---|---|---|
+| A frame found the answer empty between the wait line and its first words: Chromium, Firefox, WebKit, 12 runs each with nothing else running | 8, 2 and 5 runs, for up to 50 ms | 0, 0 and 0 |
+| The same beside eight busy processes: 16 runs each before, 32 each after | 13, 2 and 6 runs, for up to 50 ms | 0, 0 and 0 |
+| An answer that thinks first, 16 runs each beside eight busy processes: a frame found its thought folded with nothing yet of the answer | 10, 4 and 7 runs, for up to 50 ms | 0, 0 and 0 |
+| The wheel turned 6 px up as the answer begins, beside eight busy processes, Chromium: runs in which the button to the newest message never came | 4 of 32 | 0 of 192: 64 with the first change alone, 128 with all of them |
+
+- **With a real wheel and real keys, in each engine, the page follows as before:** left where they are after the wheel far up, followed again after the wheel back down to the end, left after 6 px up, followed again after the End key, and after the button.
+- **No engine puts a reader back by itself in the ordinary case.** Made on purpose in each, a second after the wheel, and in Chromium also 40 ms after it: the conversation 30 px shorter for a few frames, and as long as before again. The reader stayed at the end they had been moved up to, in Chromium, Firefox and WebKit. What was recorded is a race in Chromium, within a few frames of the wheel, on a busy device.
+- **The hook's rule is held by a replay of what was recorded,** with a page whose sizes the test makes up (`components/chat/follow.test.tsx`): the wait line's place is no longer empty, so the end-to-end test meets nothing that gets shorter at that moment.
+
+**What it leaves:**
+
+- **The wait line is 20 px high and a first line 24:** the conversation still gets 4 px longer when the first words come.
+- **An answer that thought first still gets shorter as its first words come:** its thought folds away then, once, with the words in its place. A reader near the end is moved up by the browser as before, and the hook's rule holds for them too.
+- **A reader the browser moved up to the end, and didn't put back, stays there,** and isn't followed: the button to the newest message comes once the answer has gone on for 48 px.
+- **Seen on the way, and older than this:** WebKit reported "ResizeObserver loop completed with undelivered notifications" as an error of the page in 1 run of 144 before these changes and in 1 of 84 after them, with nothing else running. The revision "the page is laid out before its sizes are watched" ended the one at every page load; what brings this rare one about isn't known.
+
+**Why now, and not at the start:** the wait line and the pace were built in different steps, and each was tested with the events that begin an answer arriving together, as they do in the recorded streams the component tests read. The empty answer lasted 50 ms; nobody looked for it. The test that met it had passed in every run until then.

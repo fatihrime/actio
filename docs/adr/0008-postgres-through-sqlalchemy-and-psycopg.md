@@ -145,3 +145,13 @@ The revision above left one thing not done: the character Postgres can't hold. M
 - **A character that a model sends in two pieces,** one half in each, becomes two marks: each piece is looked at as it comes, since it is streamed as it comes.
 - **Not looked through:** what comes in a request's address. The one string there is the list's cursor. It is read as base64, which passes over a character that isn't base64's, so a cursor with U+0000 added to it is the cursor without: a test holds that. Only a time and an id come out of a cursor, never text.
 - **A refusal of a body says where it is wrong, and never repeats what was sent.** So a string below the sixteen levels, which was not looked at, isn't written into a response either.
+
+### 2026-11-23: the line a failed turn leaves names its model's error by its kind
+
+A turn whose model fails leaves one warning in the log. It now reads `turn …: the model failed (ProviderError), recorded as model_error`: the error's kind, and the code the turn is recorded with (`actio.chat.answering`).
+
+- **What it was:** the kind and the error's text. The text of a model client's error can quote what was received: up to 200 characters of a line of the answer that couldn't be read, a tool call's arguments, or whatever the model's server wrote of a request it refused. That is what a model wrote, or what a server says of what people wrote, and it stood in the log.
+- **The rule is the one of 2026-11-20 above,** and of the titles a model writes ([ADR 0025](0025-titles-written-by-a-model.md)): what people wrote stays out of the log, so a line about a model's error names its kind. The line of a failed turn is older than that rule, and was written the other way on purpose: "the server's own words stay in its log", as a test's comment said. The titles' job and the load of a model ahead ([ADR 0026](0026-models-loaded-ahead-of-the-first-question.md)) follow the rule; the turn's line didn't.
+- **Why only now:** the review of the load ahead read a sentence that said every such line names the kind alone, and found the one that didn't.
+- **The cost:** the log no longer says what a model's server answered: the status of a refusal, or the sizes in "the prompt is longer than the window". The turn's record has the code, and the reader is told in words. Whoever needs the server's own words reads the server's own log. For a model on Ollama, the model client's command line asks it again and prints the error: `uv run actio-llm chat <the model's name on the server> "<prompt>" --context <its context window>`.
+- **Held by a test** whose model fails with an error that quotes a line: the log has the kind and the code, and not the line.

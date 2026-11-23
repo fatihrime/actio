@@ -103,3 +103,12 @@ The record above was written from measurements on one model, in the GGUF format,
 | Download | 3.3 GB | 4.0 GB |
 
 Reasoning, tool calls and Turkish were as good in both. So Actio's default will name the GGUF build: the speed is the same, and its memory is known in advance, which matters on a machine that also runs a browser and Docker. The MLX build is what a plain `ollama pull` gives a Mac, so it stays supported and tested.
+
+### 2026-11-23: an answer that can't be unpacked is the provider's failure
+
+The decision promised typed errors: whatever goes wrong with a model call reaches the caller as one of the adapter's own. One of the HTTP client's errors got past that.
+
+- **What was wrong.** A body that says it is compressed (`Content-Encoding: gzip`) and can't be unpacked raises `httpx2.DecodingError`. That is none of the client's errors of the connection (`TransportError`), which were the ones the adapters caught where a body is read (`actio_llm.wire`).
+- **What it did.** Reproduced by tests written first, which failed with the client's own error: a chat let it out as it was, before an answer's first line and after it, and so did a small call, and the reading of a refusal's body; and so did the catalog's question about a model. The route that lists the models has nothing to catch it, so the whole list failed, where a server that answers nonsense should count as `unreachable`. A turn records an error that isn't the model client's as `internal_error`, a mistake of Actio's, with a trace in the log.
+- **What changed:** it is caught by its own name wherever a body is read. Before the first line of an answer, and in the small calls, it is a `ProviderError`, the provider sending something that isn't its protocol. After the first line it is a `StreamInterruptedError`: what had arrived is real, and the answer broke off.
+- **Why only now:** nothing had sent a body that couldn't be unpacked. The build of the load ahead ([ADR 0026](0026-models-loaded-ahead-of-the-first-question.md)) read the client's errors closely enough to see that this one descends from another branch.
