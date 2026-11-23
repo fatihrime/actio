@@ -36,7 +36,8 @@ ollama pull qwen3.5:4b-q4_K_M
 
 Then open <http://localhost:8080> and ask something. No account is needed: a first visit starts a guest session, which lasts a day.
 
-- **The answer appears as it is written.** The first one takes a few seconds longer, while the model loads. **Stop** ends an answer early and keeps what was written.
+- **The answer appears as it is written.** **Stop** ends an answer early and keeps what was written.
+- **The model is loaded before you ask.** Ollama keeps a model in memory for five minutes after its last request, and loading it again takes a few seconds. So the page has Ollama load it as soon as the page opens, and again while you write a question, once a minute at most. Measured on a MacBook Pro (M1 Pro, 16 GB): the first word then came after 0.3 to 0.45 s, where it had taken 2 to 4 s. A question sent within a second or two of opening the page can find the model still loading, and waits for the rest of the load. A visit that asks nothing keeps the model in memory for those five minutes too ([ADR 0026](adr/0026-models-loaded-ahead-of-the-first-question.md)).
 - **Only Stop ends an answer.** Reloading the page, closing it or losing the connection doesn't: the answer is written to its end at the server, and is there when you come back: still arriving, if it isn't done yet, with Stop beside it. A second window that opens the conversation while the answer is being written shows it arriving too ([ADR 0022](adr/0022-turns-that-run-apart-from-their-request.md)). An answer you no longer want still counts against your usage limits unless you stop it.
 - **Ollama writes one answer at a time.** A question asked while another answer is being written, in another conversation or by someone else on the same Actio, waits its turn: the page shows the question and the wait for the first words, and they come once the other answer is done. Answers are taken in the order they were asked. **Stop** ends one that waits too; it has written nothing then, and costs nothing ([ADR 0023](adr/0023-answers-that-wait-their-turn.md)).
 - **Answers are formatted:** headings, tables, code in colour with a button to copy it, formulas, and diagrams. Try "derive the quadratic formula", or "draw a mermaid flowchart of making tea".
@@ -171,13 +172,15 @@ ACTIO_PUBLIC_URL=https://chat.example.com
 
 The API accepts changes only from pages at that address, and over HTTPS it marks the session cookie `Secure`. See [ADR 0009](adr/0009-sessions-in-the-database.md).
 
-New guests, sign-ups and password attempts are rate-limited. A limit is written as a count per `second`, `minute`, `hour` or `day`: `30/hour` allows 30 at once, then one more every two minutes. These are the defaults:
+New guests, sign-ups and password attempts are rate-limited, and so is what one account asks of the models. A limit is written as a count per `second`, `minute`, `hour` or `day`: `30/hour` allows 30 at once, then one more every two minutes. These are the defaults:
 
 ```sh
 ACTIO_LIMIT_GUESTS_PER_ADDRESS=30/hour   # new guests from one address
 ACTIO_LIMIT_SIGNUPS_PER_ADDRESS=10/hour  # sign-up attempts from one address
 ACTIO_LIMIT_LOGINS_PER_ADDRESS=30/hour   # login attempts from one address
 ACTIO_LIMIT_LOGINS_PER_EMAIL=10/hour     # password attempts for one account, from anywhere
+ACTIO_LIMIT_TURNS_PER_USER=120/hour      # messages one account, a guest included, sends to a model
+ACTIO_LIMIT_WARM_UPS_PER_USER=120/hour   # requests of one account to have a model loaded ahead
 ```
 
 Everyone behind one router shares an address. With Docker Desktop, every browser on your machine does. Raise the first limit for a classroom; lower it, to `3/day` say, for a public demo. See [ADR 0011](adr/0011-rate-limits-as-token-buckets-in-valkey.md).
