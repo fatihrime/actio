@@ -11,14 +11,14 @@ that define database tables.
 from typing import Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel
 
 from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Models, Now
+from actio.api.described import Described
 
 router = APIRouter(tags=["models"], responses=NO_SESSION)
 
 
-class ModelOut(BaseModel):
+class ModelOut(Described):
     id: str
     """The name to ask for it by, such as `standard`."""
     title: str
@@ -35,7 +35,7 @@ class ModelOut(BaseModel):
     """Whether it can reason before it answers. False while its server can't be asked."""
 
 
-class ModelList(BaseModel):
+class ModelList(Described):
     default: str
     """The `id` of the model that is used when a request names none."""
     models: list[ModelOut]

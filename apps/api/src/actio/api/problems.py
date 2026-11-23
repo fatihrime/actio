@@ -20,13 +20,15 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict
 from starlette.exceptions import HTTPException
+
+from actio.api.described import Described
 
 MEDIA_TYPE = "application/problem+json"
 
 
-class ProblemDocument(BaseModel):
+class ProblemDocument(Described):
     """An error, as RFC 9457 problem details. Every error this API answers looks like
     this. Some carry more members: `errors` (422: what is wrong with the request, and
     where), `retry_after` (429: seconds to wait), `window`, `resets_at` and

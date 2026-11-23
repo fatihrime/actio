@@ -10,9 +10,9 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel
 
 from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now, Usage
+from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.usage.limits import Account, UsageUnavailableError
 
@@ -21,13 +21,13 @@ router = APIRouter(tags=["usage"], responses=NO_SESSION)
 UNAVAILABLE = "Usage can't be counted right now. Try again in a moment."
 
 
-class PlanOut(BaseModel):
+class PlanOut(Described):
     id: str
     title: str
     """What to call it, such as `Free`."""
 
 
-class WindowOut(BaseModel):
+class WindowOut(Described):
     """One limit: so many credits, until the window starts over."""
 
     name: Literal["session", "week"]
@@ -44,7 +44,7 @@ class WindowOut(BaseModel):
     open: the next question that costs something opens it."""
 
 
-class UsageOut(BaseModel):
+class UsageOut(Described):
     plan: PlanOut
     windows: list[WindowOut]
     """The limits of the plan, each of which a question has to fit in. A plan without

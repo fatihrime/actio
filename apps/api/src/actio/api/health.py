@@ -20,12 +20,12 @@ from collections.abc import Callable
 from typing import Literal
 
 from fastapi import APIRouter, Request, Response
-from pydantic import BaseModel
 from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy.exc import SQLAlchemyError
 from valkey.exceptions import ValkeyError
 
 from actio import __version__
+from actio.api.described import Described
 from actio.core import schema
 from actio.core.resources import Resources
 
@@ -36,12 +36,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
 
 
-class Health(BaseModel):
+class Health(Described):
     status: Literal["ok"]
     version: str
 
 
-class Readiness(BaseModel):
+class Readiness(Described):
     """What is missing, by name. Never why: a failure's details go to the log, because
     they can name hosts and users.
 

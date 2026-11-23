@@ -20,10 +20,11 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import Field, StringConstraints
 
 from actio.api.body import Body
 from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now, Runner
+from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.chat import context, conversations, titles, tree, turns
 from actio.chat.conversations import TITLE_MAX, Cursor
@@ -42,14 +43,14 @@ NO_SUCH: dict[int | str, dict[str, Any]] = {
 }
 
 
-class ConversationSummary(BaseModel):
+class ConversationSummary(Described):
     id: uuid.UUID
     title: str | None
     """Empty until the conversation is named."""
     title_pending: bool
     """Whether a model was asked for the conversation's title a moment ago, and none has
     come yet: the list is worth reading again shortly. False again after 15 seconds at
-    most, whatever became of the title (`actio.chat.titles.on_its_way`)."""
+    most, whatever became of the title."""
     created_at: datetime
     last_active_at: datetime
     """When a message was last added. The list is ordered by it."""
@@ -65,13 +66,13 @@ class ConversationSummary(BaseModel):
         )
 
 
-class ConversationList(BaseModel):
+class ConversationList(Described):
     items: list[ConversationSummary]
     next_cursor: str | None
     """Pass it back as `cursor` for the next page. Empty on the last page."""
 
 
-class TurnOut(BaseModel):
+class TurnOut(Described):
     """One attempt to answer a question: which model was asked, and how it ended."""
 
     id: uuid.UUID
@@ -82,7 +83,7 @@ class TurnOut(BaseModel):
     status: TurnStatus
     """`running` while the answer is written. Then `completed`; `stopped`, because
     whoever asked stopped it; `failed`, because the model did; or `interrupted`, because
-    the server that was writing it shut down, or is gone."""
+    the server that was writing it was restarted, or stopped answering."""
     finish_reason: str | None
     """Why the model stopped, when it did by itself: `stop`, or `length` when it ran
     into the limit on an answer's size."""
@@ -104,9 +105,10 @@ class TurnOut(BaseModel):
     prompt_ms: int | None
     generation_ms: int | None
     credits: int | None
-    """What the turn cost you, in credits: see `GET /api/usage`. Empty while it runs,
-    and for a turn that cost nothing: one that failed, was interrupted, or produced
-    nothing."""
+    """What the turn cost you, in credits: see `GET /api/usage`. `0` for a model that
+    costs nothing. Empty while it runs, and when nothing was counted for it: a turn that
+    failed or was interrupted, or one that wrote nothing and whose model's server
+    counted nothing."""
     capped_by_usage: bool
     """Whether a usage limit left the answer less room than the model allows. With the
     `finish_reason` `length`, that is why the answer was cut."""
@@ -147,7 +149,7 @@ class TurnOut(BaseModel):
         )
 
 
-class MessageMetadata(BaseModel):
+class MessageMetadata(Described):
     parent_id: uuid.UUID | None
     """The message this one follows. Empty for a first message."""
     created_at: datetime
@@ -158,7 +160,7 @@ class MessageMetadata(BaseModel):
     """For an answer: the turn that wrote it."""
 
 
-class MessageOut(BaseModel):
+class MessageOut(Described):
     """A message, in the shape the web app's chat library reads: `id`, `role`, `parts`,
     and everything of Actio's own under `metadata`."""
 

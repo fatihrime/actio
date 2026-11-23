@@ -12,8 +12,9 @@ a `Body`, or a test fails.
 
 from typing import Any
 
-from pydantic import BaseModel, model_validator
+from pydantic import model_validator
 
+from actio.api.described import Described
 from actio.core.text import storable
 
 LOOKED_THROUGH = 16
@@ -25,7 +26,7 @@ The refusal of a body says where it is wrong and never repeats what was sent
 (`actio.api.problems`), so what wasn't looked at isn't written into a response."""
 
 
-class Body(BaseModel):
+class Body(Described):
     """The body of a request. Every string in it can be stored."""
 
     @model_validator(mode="before")

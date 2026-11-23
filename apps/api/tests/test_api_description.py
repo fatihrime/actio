@@ -15,14 +15,21 @@ To record both again, after a change to the API that is meant:
 and review the difference in the files.
 """
 
+import importlib
+import inspect
 import json
 import os
+import pkgutil
 import uuid
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from pydantic import BaseModel
+
+import actio.api
+from actio.api.described import Described
 
 pytestmark = pytest.mark.anyio
 
@@ -72,6 +79,38 @@ async def test_operations_are_named_after_their_routes(description: dict[str, An
     assert names["GET /api/models"] == "list_models"
     assert names["GET /api/usage"] == "get_usage"
     assert len(set(names.values())) == len(names)
+
+
+async def test_a_member_is_described_by_the_words_under_it(description: dict[str, Any]) -> None:
+    """What a member means is written under it in the code, and that is what the
+    description says of it (`actio.api.described`): for a member of an answer, of a
+    request's body, and of a part of one."""
+    schemas = description["components"]["schemas"]
+
+    of_an_answer = schemas["TurnOut"]["properties"]["context_tokens"]["description"]
+    assert of_an_answer.startswith("About how many tokens of the model's context window")
+    # As it is written, on its lines, without the code's indentation.
+    assert "\n " not in of_an_answer
+    of_a_body = schemas["TurnRequest"]["properties"]["answer_to"]["description"]
+    assert of_a_body == "Instead of `message`: a question that is already there, to answer again."
+    of_a_part = schemas["NewMessage"]["properties"]["id"]["description"]
+    assert of_a_part.startswith("Chosen by the sender.")
+
+
+def test_every_model_of_the_api_is_a_described_one() -> None:
+    """A model that isn't keeps what its members mean from whoever reads the API's
+    description. Every model defined in `actio.api` is looked at, whether a route uses
+    it by itself or as a part of another."""
+    models: dict[str, type[BaseModel]] = {}
+    for found in pkgutil.iter_modules(actio.api.__path__):
+        module = importlib.import_module(f"actio.api.{found.name}")
+        for name, made in inspect.getmembers(module, inspect.isclass):
+            if made.__module__ == module.__name__ and issubclass(made, BaseModel):
+                models[f"{found.name}.{name}"] = made
+    del models["described.Described"]
+
+    assert len(models) >= 20
+    assert {name for name, made in models.items() if not issubclass(made, Described)} == set()
 
 
 async def test_every_error_is_described_as_a_problem_document(

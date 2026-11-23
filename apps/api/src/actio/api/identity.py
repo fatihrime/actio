@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Response
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import EmailStr, Field, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
 from actio.api.body import Body
@@ -32,6 +32,7 @@ from actio.api.dependencies import (
     clear_session_cookie,
     set_session_cookie,
 )
+from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.api.rate_limits import Limits
 from actio.chat import conversations
@@ -50,7 +51,7 @@ TOO_MANY: dict[int | str, dict[str, Any]] = {
 }
 
 
-class Me(BaseModel):
+class Me(Described):
     """Who the session belongs to."""
 
     id: uuid.UUID

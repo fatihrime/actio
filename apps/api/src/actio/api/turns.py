@@ -47,7 +47,7 @@ from typing import Any, Self
 
 from fastapi import APIRouter, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import Receive, Scope, Send
 
@@ -68,6 +68,7 @@ from actio.api.dependencies import (
     Runner,
     Usage,
 )
+from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.api.rate_limits import Limits, in_words
 from actio.api.usage import UNAVAILABLE
@@ -116,7 +117,7 @@ NOT_READY = {
 
 # A part of a turn's request, not a body itself: `TurnRequest` is the `Body` that is
 # looked through, and this with it.
-class NewMessage(BaseModel):
+class NewMessage(Described):
     """A question, as its sender made it."""
 
     model_config = ConfigDict(extra="forbid")

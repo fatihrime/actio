@@ -171,8 +171,9 @@ class Turn(Base):
     """Where the time went, for providers that say: loading the model, reading the
     prompt, writing the answer."""
     credits: Mapped[int | None] = mapped_column(BigInteger)
-    """What the turn cost its account, as the usage ledger has it. Empty for a turn
-    that cost nothing: one that failed, or produced nothing."""
+    """What the turn cost its account, as the usage ledger has it: 0 for a model that
+    costs nothing. Empty when nothing was counted for the turn: it failed or was
+    interrupted, or it wrote nothing and its model's server counted nothing."""
     capped_by_usage: Mapped[bool] = mapped_column(server_default=false())
     """Whether the answer was given less room than the model allows, because a usage
     limit was near. With the finish reason `length`, that is why it was cut."""

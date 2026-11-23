@@ -1101,7 +1101,8 @@
                 "type": "null"
               }
             ],
-            "title": "Next Cursor"
+            "title": "Next Cursor",
+            "description": "Pass it back as `cursor` for the next page. Empty on the last page."
           }
         },
         "type": "object",
@@ -1127,11 +1128,13 @@
                 "type": "null"
               }
             ],
-            "title": "Title"
+            "title": "Title",
+            "description": "Empty until the conversation is named."
           },
           "title_pending": {
             "type": "boolean",
-            "title": "Title Pending"
+            "title": "Title Pending",
+            "description": "Whether a model was asked for the conversation's title a moment ago, and none has\ncome yet: the list is worth reading again shortly. False again after 15 seconds at\nmost, whatever became of the title."
           },
           "created_at": {
             "type": "string",
@@ -1141,7 +1144,8 @@
           "last_active_at": {
             "type": "string",
             "format": "date-time",
-            "title": "Last Active At"
+            "title": "Last Active At",
+            "description": "When a message was last added. The list is ordered by it."
           },
           "current_leaf_id": {
             "anyOf": [
@@ -1153,14 +1157,16 @@
                 "type": "null"
               }
             ],
-            "title": "Current Leaf Id"
+            "title": "Current Leaf Id",
+            "description": "The last message of the branch that is shown."
           },
           "messages": {
             "items": {
               "$ref": "#/components/schemas/MessageOut"
             },
             "type": "array",
-            "title": "Messages"
+            "title": "Messages",
+            "description": "That branch, from its first message to its last."
           },
           "unanswered": {
             "anyOf": [
@@ -1170,7 +1176,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "When the branch ends with a question: the last turn that tried to answer it. It\nsays whether an answer is still being written, or why none came. Otherwise empty."
           }
         },
         "type": "object",
@@ -1202,11 +1209,13 @@
                 "type": "null"
               }
             ],
-            "title": "Title"
+            "title": "Title",
+            "description": "Empty until the conversation is named."
           },
           "title_pending": {
             "type": "boolean",
-            "title": "Title Pending"
+            "title": "Title Pending",
+            "description": "Whether a model was asked for the conversation's title a moment ago, and none has\ncome yet: the list is worth reading again shortly. False again after 15 seconds at\nmost, whatever became of the title."
           },
           "created_at": {
             "type": "string",
@@ -1216,7 +1225,8 @@
           "last_active_at": {
             "type": "string",
             "format": "date-time",
-            "title": "Last Active At"
+            "title": "Last Active At",
+            "description": "When a message was last added. The list is ordered by it."
           }
         },
         "type": "object",
@@ -1318,7 +1328,8 @@
                 "type": "null"
               }
             ],
-            "title": "Parent Id"
+            "title": "Parent Id",
+            "description": "The message this one follows. Empty for a first message."
           },
           "created_at": {
             "type": "string",
@@ -1331,7 +1342,8 @@
               "format": "uuid"
             },
             "type": "array",
-            "title": "Versions"
+            "title": "Versions",
+            "description": "Every version of this message, oldest first, itself included: the messages\nthat follow the same one. Show another with `PUT …/branch`."
           },
           "turn": {
             "anyOf": [
@@ -1341,7 +1353,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "For an answer: the turn that wrote it."
           }
         },
         "type": "object",
@@ -1392,7 +1405,8 @@
         "properties": {
           "default": {
             "type": "string",
-            "title": "Default"
+            "title": "Default",
+            "description": "The `id` of the model that is used when a request names none."
           },
           "models": {
             "items": {
@@ -1413,7 +1427,8 @@
         "properties": {
           "id": {
             "type": "string",
-            "title": "Id"
+            "title": "Id",
+            "description": "The name to ask for it by, such as `standard`."
           },
           "title": {
             "type": "string",
@@ -1425,11 +1440,13 @@
               "ollama",
               "openai-compatible"
             ],
-            "title": "Provider"
+            "title": "Provider",
+            "description": "What kind of server runs it."
           },
           "model": {
             "type": "string",
-            "title": "Model"
+            "title": "Model",
+            "description": "Its name on that server: for Ollama, what `ollama pull` takes."
           },
           "context_window": {
             "type": "integer",
@@ -1446,11 +1463,13 @@
               "missing",
               "unreachable"
             ],
-            "title": "Status"
+            "title": "Status",
+            "description": "`ready`: its server has it. `missing`: the server answers, but hasn't got this\nmodel. `unreachable`: the server doesn't answer."
           },
           "thinking": {
             "type": "boolean",
-            "title": "Thinking"
+            "title": "Thinking",
+            "description": "Whether it can reason before it answers. False while its server can't be asked."
           }
         },
         "type": "object",
@@ -1471,7 +1490,8 @@
           "id": {
             "type": "string",
             "format": "uuid",
-            "title": "Id"
+            "title": "Id",
+            "description": "Chosen by the sender. Sending the same message again doesn't ask twice."
           },
           "parts": {
             "items": {
@@ -1538,7 +1558,8 @@
           },
           "title": {
             "type": "string",
-            "title": "Title"
+            "title": "Title",
+            "description": "What to call it, such as `Free`."
           }
         },
         "type": "object",
@@ -1696,11 +1717,13 @@
           },
           "model": {
             "type": "string",
-            "title": "Model"
+            "title": "Model",
+            "description": "The model's name in `GET /api/models`."
           },
           "thinking": {
             "type": "boolean",
-            "title": "Thinking"
+            "title": "Thinking",
+            "description": "Whether the model was asked to reason before answering."
           },
           "status": {
             "type": "string",
@@ -1711,7 +1734,8 @@
               "failed",
               "interrupted"
             ],
-            "title": "Status"
+            "title": "Status",
+            "description": "`running` while the answer is written. Then `completed`; `stopped`, because\nwhoever asked stopped it; `failed`, because the model did; or `interrupted`, because\nthe server that was writing it was restarted, or stopped answering."
           },
           "finish_reason": {
             "anyOf": [
@@ -1722,7 +1746,8 @@
                 "type": "null"
               }
             ],
-            "title": "Finish Reason"
+            "title": "Finish Reason",
+            "description": "Why the model stopped, when it did by itself: `stop`, or `length` when it ran\ninto the limit on an answer's size."
           },
           "error": {
             "anyOf": [
@@ -1733,7 +1758,8 @@
                 "type": "null"
               }
             ],
-            "title": "Error"
+            "title": "Error",
+            "description": "For a failed turn, what went wrong, as a code: `model_unavailable`,\n`model_missing`, `context_overflow`, `model_refused`, `answer_interrupted`,\n`model_error`, `internal_error`."
           },
           "input_tokens": {
             "anyOf": [
@@ -1777,7 +1803,8 @@
                 "type": "null"
               }
             ],
-            "title": "Context Tokens"
+            "title": "Context Tokens",
+            "description": "About how many tokens of the model's context window the conversation takes after\nthis turn: what the model was shown, and the words it answered with. What it only\nthought isn't kept for the next question, and isn't counted: where it thought and\nthen answered, the words' share of what it wrote is a guess, by characters. Empty\nwhile the turn runs, and when the model's server counted nothing, as for a stopped\nor failed turn."
           },
           "load_ms": {
             "anyOf": [
@@ -1821,11 +1848,13 @@
                 "type": "null"
               }
             ],
-            "title": "Credits"
+            "title": "Credits",
+            "description": "What the turn cost you, in credits: see `GET /api/usage`. `0` for a model that\ncosts nothing. Empty while it runs, and when nothing was counted for it: a turn that\nfailed or was interrupted, or one that wrote nothing and whose model's server\ncounted nothing."
           },
           "capped_by_usage": {
             "type": "boolean",
-            "title": "Capped By Usage"
+            "title": "Capped By Usage",
+            "description": "Whether a usage limit left the answer less room than the model allows. With the\n`finish_reason` `length`, that is why the answer was cut."
           },
           "started_at": {
             "type": "string",
@@ -1842,7 +1871,8 @@
                 "type": "null"
               }
             ],
-            "title": "First Word At"
+            "title": "First Word At",
+            "description": "When the first piece of the answer came, its reasoning included, by the server's\nclock. From `started_at`, that is how long the first word took: the wait for the\nmodel's server included. Empty while the turn runs, when the model wrote nothing,\nand for a turn that was given up on."
           },
           "finished_at": {
             "anyOf": [
@@ -1891,7 +1921,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "A new question to add and answer."
           },
           "parent_id": {
             "anyOf": [
@@ -1903,7 +1934,8 @@
                 "type": "null"
               }
             ],
-            "title": "Parent Id"
+            "title": "Parent Id",
+            "description": "With `message`: the answer it follows. Left out for a first question."
           },
           "answer_to": {
             "anyOf": [
@@ -1915,7 +1947,8 @@
                 "type": "null"
               }
             ],
-            "title": "Answer To"
+            "title": "Answer To",
+            "description": "Instead of `message`: a question that is already there, to answer again."
           },
           "model": {
             "anyOf": [
@@ -1927,11 +1960,13 @@
                 "type": "null"
               }
             ],
-            "title": "Model"
+            "title": "Model",
+            "description": "A model's `id` from `GET /api/models`. Left out: the default one."
           },
           "thinking": {
             "type": "boolean",
             "title": "Thinking",
+            "description": "Ask the model to reason before it answers, if it can.",
             "default": false
           }
         },
@@ -1949,7 +1984,8 @@
               "$ref": "#/components/schemas/WindowOut"
             },
             "type": "array",
-            "title": "Windows"
+            "title": "Windows",
+            "description": "The limits of the plan, each of which a question has to fit in. A plan without\nlimits has none."
           }
         },
         "type": "object",
@@ -1971,15 +2007,18 @@
           },
           "limit": {
             "type": "integer",
-            "title": "Limit"
+            "title": "Limit",
+            "description": "How many credits the window allows."
           },
           "used": {
             "type": "integer",
-            "title": "Used"
+            "title": "Used",
+            "description": "How many are used up. It can pass `limit` by a little: an answer is counted for\nwhat it really used, which is known only when it has been written."
           },
           "reserved": {
             "type": "integer",
-            "title": "Reserved"
+            "title": "Reserved",
+            "description": "How many are held for answers that are being written right now. They are not\navailable either, until those answers end and are counted."
           },
           "resets_at": {
             "anyOf": [
@@ -1991,7 +2030,8 @@
                 "type": "null"
               }
             ],
-            "title": "Resets At"
+            "title": "Resets At",
+            "description": "When the window starts over, with nothing used. Empty for a session that isn't\nopen: the next question that costs something opens it."
           }
         },
         "type": "object",
@@ -2010,10 +2050,12 @@
         "description": "An error, as RFC 9457 problem details. Every error this API answers looks like\nthis. Some carry more members: `errors` (422: what is wrong with the request, and\nwhere), `retry_after` (429: seconds to wait), `window`, `resets_at` and\n`alternatives` (429: the usage limit that is reached, when it starts over, and the\nmodels that cost nothing), `at_once` (429: how many answers the plan allows to be\nwritten at once), `model` and `model_status` (503: the model that can't answer),\n`turn_id` and `turn_status` (409: the turn in the way).",
         "properties": {
           "type": {
+            "description": "Always `about:blank`: the status says what kind of problem it is.",
             "title": "Type",
             "type": "string"
           },
           "title": {
+            "description": "The status in words, such as `Not Found`.",
             "title": "Title",
             "type": "string"
           },
@@ -2022,6 +2064,7 @@
             "type": "integer"
           },
           "detail": {
+            "description": "What happened this time, in words a person can act on.",
             "title": "Detail",
             "type": "string"
           }

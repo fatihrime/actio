@@ -387,7 +387,10 @@ export interface components {
         ConversationList: {
             /** Items */
             items: components["schemas"]["ConversationSummary"][];
-            /** Next Cursor */
+            /**
+             * Next Cursor
+             * @description Pass it back as `cursor` for the next page. Empty on the last page.
+             */
             next_cursor: string | null;
         };
         /** ConversationOut */
@@ -397,9 +400,17 @@ export interface components {
              * Format: uuid
              */
             id: string;
-            /** Title */
+            /**
+             * Title
+             * @description Empty until the conversation is named.
+             */
             title: string | null;
-            /** Title Pending */
+            /**
+             * Title Pending
+             * @description Whether a model was asked for the conversation's title a moment ago, and none has
+             *     come yet: the list is worth reading again shortly. False again after 15 seconds at
+             *     most, whatever became of the title.
+             */
             title_pending: boolean;
             /**
              * Created At
@@ -409,12 +420,23 @@ export interface components {
             /**
              * Last Active At
              * Format: date-time
+             * @description When a message was last added. The list is ordered by it.
              */
             last_active_at: string;
-            /** Current Leaf Id */
+            /**
+             * Current Leaf Id
+             * @description The last message of the branch that is shown.
+             */
             current_leaf_id: string | null;
-            /** Messages */
+            /**
+             * Messages
+             * @description That branch, from its first message to its last.
+             */
             messages: components["schemas"]["MessageOut"][];
+            /**
+             * @description When the branch ends with a question: the last turn that tried to answer it. It
+             *     says whether an answer is still being written, or why none came. Otherwise empty.
+             */
             unanswered: components["schemas"]["TurnOut"] | null;
         };
         /** ConversationSummary */
@@ -424,9 +446,17 @@ export interface components {
              * Format: uuid
              */
             id: string;
-            /** Title */
+            /**
+             * Title
+             * @description Empty until the conversation is named.
+             */
             title: string | null;
-            /** Title Pending */
+            /**
+             * Title Pending
+             * @description Whether a model was asked for the conversation's title a moment ago, and none has
+             *     come yet: the list is worth reading again shortly. False again after 15 seconds at
+             *     most, whatever became of the title.
+             */
             title_pending: boolean;
             /**
              * Created At
@@ -436,6 +466,7 @@ export interface components {
             /**
              * Last Active At
              * Format: date-time
+             * @description When a message was last added. The list is ordered by it.
              */
             last_active_at: string;
         };
@@ -478,15 +509,23 @@ export interface components {
         };
         /** MessageMetadata */
         MessageMetadata: {
-            /** Parent Id */
+            /**
+             * Parent Id
+             * @description The message this one follows. Empty for a first message.
+             */
             parent_id: string | null;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
-            /** Versions */
+            /**
+             * Versions
+             * @description Every version of this message, oldest first, itself included: the messages
+             *     that follow the same one. Show another with `PUT …/branch`.
+             */
             versions: string[];
+            /** @description For an answer: the turn that wrote it. */
             turn?: components["schemas"]["TurnOut"] | null;
         };
         /**
@@ -511,23 +550,33 @@ export interface components {
         };
         /** ModelList */
         ModelList: {
-            /** Default */
+            /**
+             * Default
+             * @description The `id` of the model that is used when a request names none.
+             */
             default: string;
             /** Models */
             models: components["schemas"]["ModelOut"][];
         };
         /** ModelOut */
         ModelOut: {
-            /** Id */
+            /**
+             * Id
+             * @description The name to ask for it by, such as `standard`.
+             */
             id: string;
             /** Title */
             title: string;
             /**
              * Provider
+             * @description What kind of server runs it.
              * @enum {string}
              */
             provider: "ollama" | "openai-compatible";
-            /** Model */
+            /**
+             * Model
+             * @description Its name on that server: for Ollama, what `ollama pull` takes.
+             */
             model: string;
             /** Context Window */
             context_window: number;
@@ -535,10 +584,15 @@ export interface components {
             max_output_tokens: number;
             /**
              * Status
+             * @description `ready`: its server has it. `missing`: the server answers, but hasn't got this
+             *     model. `unreachable`: the server doesn't answer.
              * @enum {string}
              */
             status: "ready" | "missing" | "unreachable";
-            /** Thinking */
+            /**
+             * Thinking
+             * @description Whether it can reason before it answers. False while its server can't be asked.
+             */
             thinking: boolean;
         };
         /**
@@ -549,6 +603,7 @@ export interface components {
             /**
              * Id
              * Format: uuid
+             * @description Chosen by the sender. Sending the same message again doesn't ask twice.
              */
             id: string;
             /** Parts */
@@ -566,7 +621,10 @@ export interface components {
         PlanOut: {
             /** Id */
             id: string;
-            /** Title */
+            /**
+             * Title
+             * @description What to call it, such as `Free`.
+             */
             title: string;
         };
         /**
@@ -662,18 +720,36 @@ export interface components {
              * Format: uuid
              */
             id: string;
-            /** Model */
+            /**
+             * Model
+             * @description The model's name in `GET /api/models`.
+             */
             model: string;
-            /** Thinking */
+            /**
+             * Thinking
+             * @description Whether the model was asked to reason before answering.
+             */
             thinking: boolean;
             /**
              * Status
+             * @description `running` while the answer is written. Then `completed`; `stopped`, because
+             *     whoever asked stopped it; `failed`, because the model did; or `interrupted`, because
+             *     the server that was writing it was restarted, or stopped answering.
              * @enum {string}
              */
             status: "running" | "completed" | "stopped" | "failed" | "interrupted";
-            /** Finish Reason */
+            /**
+             * Finish Reason
+             * @description Why the model stopped, when it did by itself: `stop`, or `length` when it ran
+             *     into the limit on an answer's size.
+             */
             finish_reason: string | null;
-            /** Error */
+            /**
+             * Error
+             * @description For a failed turn, what went wrong, as a code: `model_unavailable`,
+             *     `model_missing`, `context_overflow`, `model_refused`, `answer_interrupted`,
+             *     `model_error`, `internal_error`.
+             */
             error: string | null;
             /** Input Tokens */
             input_tokens: number | null;
@@ -681,7 +757,15 @@ export interface components {
             cached_input_tokens: number | null;
             /** Output Tokens */
             output_tokens: number | null;
-            /** Context Tokens */
+            /**
+             * Context Tokens
+             * @description About how many tokens of the model's context window the conversation takes after
+             *     this turn: what the model was shown, and the words it answered with. What it only
+             *     thought isn't kept for the next question, and isn't counted: where it thought and
+             *     then answered, the words' share of what it wrote is a guess, by characters. Empty
+             *     while the turn runs, and when the model's server counted nothing, as for a stopped
+             *     or failed turn.
+             */
             context_tokens: number | null;
             /** Load Ms */
             load_ms: number | null;
@@ -689,31 +773,58 @@ export interface components {
             prompt_ms: number | null;
             /** Generation Ms */
             generation_ms: number | null;
-            /** Credits */
+            /**
+             * Credits
+             * @description What the turn cost you, in credits: see `GET /api/usage`. `0` for a model that
+             *     costs nothing. Empty while it runs, and when nothing was counted for it: a turn that
+             *     failed or was interrupted, or one that wrote nothing and whose model's server
+             *     counted nothing.
+             */
             credits: number | null;
-            /** Capped By Usage */
+            /**
+             * Capped By Usage
+             * @description Whether a usage limit left the answer less room than the model allows. With the
+             *     `finish_reason` `length`, that is why the answer was cut.
+             */
             capped_by_usage: boolean;
             /**
              * Started At
              * Format: date-time
              */
             started_at: string;
-            /** First Word At */
+            /**
+             * First Word At
+             * @description When the first piece of the answer came, its reasoning included, by the server's
+             *     clock. From `started_at`, that is how long the first word took: the wait for the
+             *     model's server included. Empty while the turn runs, when the model wrote nothing,
+             *     and for a turn that was given up on.
+             */
             first_word_at: string | null;
             /** Finished At */
             finished_at: string | null;
         };
         /** TurnRequest */
         TurnRequest: {
+            /** @description A new question to add and answer. */
             message?: components["schemas"]["NewMessage"] | null;
-            /** Parent Id */
+            /**
+             * Parent Id
+             * @description With `message`: the answer it follows. Left out for a first question.
+             */
             parent_id?: string | null;
-            /** Answer To */
+            /**
+             * Answer To
+             * @description Instead of `message`: a question that is already there, to answer again.
+             */
             answer_to?: string | null;
-            /** Model */
+            /**
+             * Model
+             * @description A model's `id` from `GET /api/models`. Left out: the default one.
+             */
             model?: string | null;
             /**
              * Thinking
+             * @description Ask the model to reason before it answers, if it can.
              * @default false
              */
             thinking: boolean;
@@ -721,7 +832,11 @@ export interface components {
         /** UsageOut */
         UsageOut: {
             plan: components["schemas"]["PlanOut"];
-            /** Windows */
+            /**
+             * Windows
+             * @description The limits of the plan, each of which a question has to fit in. A plan without
+             *     limits has none.
+             */
             windows: components["schemas"]["WindowOut"][];
         };
         /**
@@ -734,13 +849,28 @@ export interface components {
              * @enum {string}
              */
             name: "session" | "week";
-            /** Limit */
+            /**
+             * Limit
+             * @description How many credits the window allows.
+             */
             limit: number;
-            /** Used */
+            /**
+             * Used
+             * @description How many are used up. It can pass `limit` by a little: an answer is counted for
+             *     what it really used, which is known only when it has been written.
+             */
             used: number;
-            /** Reserved */
+            /**
+             * Reserved
+             * @description How many are held for answers that are being written right now. They are not
+             *     available either, until those answers end and are counted.
+             */
             reserved: number;
-            /** Resets At */
+            /**
+             * Resets At
+             * @description When the window starts over, with nothing used. Empty for a session that isn't
+             *     open: the next question that costs something opens it.
+             */
             resets_at: string | null;
         };
         /**
@@ -754,13 +884,22 @@ export interface components {
          *     `turn_id` and `turn_status` (409: the turn in the way).
          */
         Problem: {
-            /** Type */
+            /**
+             * Type
+             * @description Always `about:blank`: the status says what kind of problem it is.
+             */
             type: string;
-            /** Title */
+            /**
+             * Title
+             * @description The status in words, such as `Not Found`.
+             */
             title: string;
             /** Status */
             status: number;
-            /** Detail */
+            /**
+             * Detail
+             * @description What happened this time, in words a person can act on.
+             */
             detail: string;
         } & {
             [key: string]: unknown;
