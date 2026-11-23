@@ -32,6 +32,11 @@ const CONVERSATION = "GET /api/conversations/*";
 const LIST = "GET /api/conversations";
 const USAGE = "GET /api/usage";
 const SECOND_ANSWER = "01900000-0000-7000-8000-000000000004";
+/** An exchange before the recorded one, in a stored conversation. */
+const EARLIER = {
+  question: "01900000-0000-7000-8000-0000000000b1",
+  answer: "01900000-0000-7000-8000-0000000000b2",
+};
 /** What the page says of a turn that completed, and left no answer. */
 const NO_ANSWER = "The model gave no answer.";
 
@@ -615,6 +620,71 @@ describe("an answer that doesn't arrive whole", () => {
     expect(
       screen.getByRole("button", { name: "Try again" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows what the server kept of an answer that arrived whole after the server had given up on it", async () => {
+    // Its process was only slow, and the server gave up on the turn: the answer as its
+    // last save held it is kept, and the turn was interrupted. What arrived after that
+    // isn't the server's, so the stream ends in an error in place of `finish`.
+    const api = fakeApi();
+    const earlier = [
+      question(EARLIER.question, "Name a bike part."),
+      answer(
+        EARLIER.answer,
+        "The saddle.",
+        EARLIER.question,
+        turn({ context_tokens: 3_214 }),
+      ),
+    ];
+    const givenUp = turn({
+      status: "interrupted",
+      finish_reason: null,
+      input_tokens: null,
+      cached_input_tokens: null,
+      output_tokens: null,
+      credits: null,
+      first_word_at: null,
+    });
+    api
+      .on(TURNS, () => streamed("given_up.sse"))
+      .on(
+        CONVERSATION,
+        () => json(200, conversation(RECORDED.conversation, earlier)),
+        () =>
+          json(
+            200,
+            conversation(RECORDED.conversation, [
+              ...earlier,
+              question(sentQuestion(api), "Are you there?", EARLIER.answer),
+              answer(RECORDED.answer, "Sorry, ", sentQuestion(api), givenUp),
+            ]),
+          ),
+      );
+    const user = open(`/c/${RECORDED.conversation}`);
+    await screen.findByText("The saddle.");
+
+    await ask(user, "Are you there?");
+
+    expect(
+      await screen.findByText(
+        "The server was restarted while this answer was being written.",
+      ),
+    ).toBeVisible();
+    expect(api.to(CONVERSATION)).toHaveLength(2);
+    const [before, kept] = screen.getAllByRole("article", { name: "Actio" });
+    // The answer as it was kept, shorter than what arrived.
+    expect(kept).toHaveTextContent(/^Sorry,$/);
+    expect(screen.queryByText(/I'm late/)).not.toBeInTheDocument();
+    // What the earlier answer took is said under it, and nothing under this one: its
+    // turn counted nothing. The window holds what it held before it.
+    const took = screen.getAllByRole("list", { name: "What this answer took" });
+    expect(took).toHaveLength(1);
+    expect(before?.nextElementSibling).toBe(took[0]);
+    expect(screen.getByRole("meter", { name: "Context" })).toHaveAttribute(
+      "aria-valuetext",
+      "39% full: 3,214 of 8,192 tokens",
+    );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
   it("says when an answer ran into the model's length limit", async () => {

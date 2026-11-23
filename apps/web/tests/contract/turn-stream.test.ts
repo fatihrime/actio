@@ -315,6 +315,20 @@ describe("a recorded turn, read by the ai package", () => {
     expect(states.flatMap((state) => state.parts)).toEqual([]);
   });
 
+  it("reports an answer that ended after the server gave up on it as an error, and no ending of its own", async () => {
+    // What arrived isn't what the server kept: the page reads the conversation.
+    const { states, errors } = await replay("given_up.sse");
+
+    expect(errors).toEqual([
+      "This answer was given up on before it ended. The conversation shows what was kept of it.",
+    ]);
+    expect(
+      (await chunksOf("given_up.sse")).map((chunk) => chunk.type),
+    ).not.toContain("finish");
+    // The metadata is the turn as it started, and says nothing of how it ended.
+    expect(last(states).metadata?.turn.status).toBe("running");
+  });
+
   it("keeps the part of an answer that arrived before it broke off", async () => {
     const { states, errors } = await replay("broke_off.sse");
 
