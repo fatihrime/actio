@@ -215,3 +215,59 @@ The decision above records what a turn cost: its tokens, "and the time spent loa
     - **the turns there were before:** nothing had noted the moment.
 - **Why Actio's clock, and not the provider's times.** The record already has the time a model's server says it took to load the model and read the prompt (`load_ms`, `prompt_ms`). Only Ollama reports them: an OpenAI-compatible server and the fake model report none. And they leave out what came before the model was asked: the wait at the gate ([ADR 0023](0023-answers-that-wait-their-turn.md)), which can be minutes, and what Actio does first. What a person waited for is the time from their question to the first word. Read from the turns of the maintainer's own stack on 2026-11-22 (Qwen 3.5 4B through Ollama): the last eleven answers had `load_ms` 1 to 21 and `prompt_ms` 140 to 244, and one answer before them, to a model that had to be loaded first, `load_ms` 5038. And where both are known they agree: by Actio's clock the time from the first word to the end was within 13 ms of Ollama's own `generation_ms` in four answers of two to eight seconds (ADR 0015, revision "an answer says what it took").
 - **Where it is said:** `TurnOut.first_word_at`, empty while the turn runs: in the stream's `start` chunk (empty), its `finish` chunk and the conversation read. Every recorded stream's turn has the member now, and nothing else of them changed. One recording was added: a turn with every figure the page shows, from a model that says how long it took to write and a clock that moves between the question, the first word and the end (`figures.sse`). And one of a model that answered with nothing and said what it had read: its turn completes, is paid for, and has no first word (`no_words.sse`).
+
+### 2026-11-23: a turn says how much of the window its conversation takes
+
+The page now says, under the box where a question is written, how full the model's context window is in the conversation ([ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md), revision "the page says how full the model's window is"). What a conversation takes of the window follows from what the server sends back to a model, and the decision above sends back the text of each answer and not its reasoning. A turn's record had the tokens its model read and wrote, and nothing that says what is left of them for the next question. It says that now.
+
+- **What is said:** `TurnOut.context_tokens`, about how many tokens of the model's window the conversation takes after the turn: what the model was shown, and of what it wrote, what goes back to a model with the next question. Every place that says a turn says it, worked out the same way: the stream's `finish` chunk, and the `message-metadata` chunk before an error; `GET /api/conversations/{id}`, for each answer's turn and for `unanswered`; and the answer of `POST …/turns/{turn_id}/cancel`. Empty while the turn runs, and when the model's server counted nothing: a stopped turn, since a stream that is closed never sends the counts, and a failed one.
+- **The rule,** `tokens_after` in `actio.chat.context`, from the turn's two counts and its answer's parts:
+    - either count missing: none;
+    - nothing of the answer goes back to a model, because there is no answer or no text in it that isn't blank, which is exactly when `for_model` sends it no more: `input_tokens`;
+    - words, and no reasoning: `input_tokens + output_tokens`;
+    - words and reasoning: `input_tokens`, and the words' share of `output_tokens` by characters, words over words and reasoning, rounded to a whole token. Never more than the two counts together.
+- **The server says the figure, and the page never adds a turn's counts.** What a conversation takes of the window follows from how the server builds the prompt: what goes back to a model and what doesn't. The page doesn't know that rule, and must not copy it: a copy would go wrong without a word the day the rule changes, and a summary of old messages is planned for a later phase.
+- **The figure is what the conversation holds after the turn, not the turn's peak.** `input_tokens + output_tokens` is what the window held when the answer ended, its thought included. Shown as the meter, it would fall from 17 % to 2 % after the next plain answer in the measurement below.
+- **No column and no migration: the figure is worked out where a turn's record is built,** from what is stored, the two counts and the answer's parts, by one function beside `for_model`. So the turns there were before have it too. And `for_model` and `tokens_after` take what goes back to a model from one helper (`_goes_back`): when that changes, the figure changes with it, in the same module. The conversation read parses each message's parts once, for the message and for its turn; the cancel route reads the turn's answer for it.
+- **Where a thought and words share `output_tokens`, the split is a guess, by characters.** No provider Actio talks to says how many of the tokens it wrote were reasoning: Ollama's `eval_count` is one number. So the member's description says "about".
+
+**Measured before it was built,** on the maintainer's stack, with the real model (`qwen3.5:4b-q4_K_M` through Ollama 0.40.16, a window of 8,192), one conversation of five questions through Actio's API, on 2026-11-23:
+
+| Turn | Thinking | `input_tokens` | `output_tokens` | Sum | Next prompt minus this sum |
+|---|---|---|---|---|---|
+| 1 | no | 64 | 8 | 72 | +16 (a question of 27 characters) |
+| 2 | no | 88 | 8 | 96 | +19 (52 characters) |
+| 3 | yes | 115 | 1,299 | 1,414 | −1,264 (46 characters) |
+| 4 | no | 150 | 21 | 171 | +17 (35 characters) |
+| 5 | no | 188 | 6 | 194 | |
+
+Turn 3's answer was 61 characters of words after 5,284 characters of reasoning. So after an answer that didn't think, the turn's two counts together are what the next question finds in the window: the difference is the new question, and the chat template around it. After one that thought, they overstate it nearly tenfold, 1,414 against the 150 the next prompt held, because Actio never sends a thought back (`for_model`). The rule gives 115 + 15 = 130 for turn 3; the next prompt of 150, less a question of that size (16 to 19 tokens above), leaves 131 to 134.
+
+Also checked in the code: `GET /api/models` already gives each model's `context_window`; a stopped turn's record has no counts, nor has a failed one; with Ollama an answer that fills the window ends with the `finish_reason` `length`, and a prompt that doesn't fit fails the turn with `context_overflow` ([ADR 0007](0007-local-models-through-ollamas-native-api.md)); nothing refuses a turn beforehand for its length.
+
+**Options considered, and not built:**
+
+1. **The page adds the two counts,** with no change to the API.
+    - Con: overstates the window nearly tenfold after an answer that thought, as measured. And the page would need the server's rule for what goes back to tell the cases apart.
+2. **A column,** the figure written with the turn's outcome.
+    - Con: a migration, and the turns there were before would have none. And the figure would stay what it was written as when the rule for what goes back changes, as it will with a summary of old messages.
+3. **Worked out where the record is built,** from what is stored. Chosen.
+
+**What it leaves:**
+
+- **The split by characters is a guess.** A provider that said how many of the tokens it wrote were reasoning would make it exact, and the rule would take that count where there is one.
+- **A stopped answer isn't counted.** Its model's server never said what it read and wrote, so the figure the page shows stays the one from before it, a little under what the conversation takes.
+- **A turn that ends after it was given up on says more in its stream than its record keeps.** That is older than this member, and holds for the turn's status and its counts too: the stream's last chunk says how the answer ended, and the record, written by whoever gave up on the turn, says `interrupted`, with no counts and so no figure. Seen in the code, not reproduced. The page shows the stream's figure until it reads the conversation again.
+
+**Measured on the built code,** the same day, with the same model on the same stack: four more conversations of the same shape, each with one answer that thought, the last three asked through the page in Chromium, Firefox and WebKit.
+
+| the answer that thought: read | wrote | the two counts together | the figure | the next prompt held |
+|---|---|---|---|---|
+| 115 | 730 (73 characters of words after 3,066 of reasoning) | 845 | 132 | 152 |
+| 116 | 506 | 622 | 134 | 153 |
+| 115 | 1,146 | 1,261 | 130 | 150 |
+| 115 | 2,048, the most an answer may have, all of it thought | 2,163 | 115 | 133 |
+
+The next question was the same each time, of 46 characters. After the answer that never got to its words, where nothing goes back and the figure is what was read, the next prompt held 18 tokens more than the figure; after the three whose words' share was guessed, 19 or 20 more. So the guess was a token or two under. After the plain answers of those conversations the figure was the two counts together, and the next prompt held 16 to 19 tokens more. The figure itself takes 0.24 ms for 300 answers of 2,000 characters of words after 4,000 of reasoning, beside the 0.33 ms it takes to read their stored parts, which the conversation's read does once for both.
+
+**Tests:** the rule, case by case, with the rounding, the counts missing, and a property test that the figure lies between what was read and the two counts together; and what holds it to `for_model`: an answer of which nothing is sent back adds nothing, and one whose text goes back whole adds all that was written (`test_answering.py`). The stream's last chunk and the conversation read right after it say the same figure, for words alone, a thought and words, a thought alone and a model that wrote nothing; a failed turn has none (`test_turns_api.py`); a stopped one has none, in the stream, the stop's answer and the conversation; a stop that comes after the end answers with the figure the stream said (`test_turns_running_api.py`). Every recorded stream's turn has the member now, and nothing else of them changed.
