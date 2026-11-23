@@ -361,6 +361,197 @@ test.each([
   },
 );
 
+// What is shown can get shorter for a moment under a reader who is a few pixels above
+// its end: the browser moves them up to the new end. Seen in Chromium on a busy
+// device, a few frames after a wheel was turned: when it got longer again, the browser
+// put the reader back where the wheel had left them, by itself.
+
+test("a reader the browser puts back after what is shown got shorter isn't scrolling down", () => {
+  // As recorded, with the sizes of this page: the wheel, the browser saying that the
+  // reader scrolled, shorter by 20, longer by 24 with the reader put back, and on.
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+
+  page.resize(1980); // the browser moves the reader up to the new end, 1480
+  page.resize(2004);
+  page.scroll(1494); // and puts them back
+  page.resize(2100); // the answer goes on
+
+  expect(page.at()).toBe(1494);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+});
+
+test("a reader put back only part of the way isn't scrolling down either", () => {
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+
+  page.resize(1980);
+  page.resize(1990); // room for some of the way back: its end is 1490
+  page.scroll(1490);
+  page.resize(2100);
+
+  expect(page.at()).toBe(1490);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+});
+
+test("a reader put back in two steps isn't scrolling down at the second either", () => {
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+
+  page.resize(1980);
+  page.resize(1990);
+  page.scroll(1490); // as far as there is room
+  page.resize(2004);
+  page.scroll(1494); // and the rest of the way
+  page.resize(2100);
+
+  expect(page.at()).toBe(1494);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+});
+
+test("a reader who scrolled up after they were moved is followed again once back near the end", () => {
+  // Nothing of theirs is heard here but the scrolls themselves, as when a finger's
+  // fling goes on: the place they were moved from is behind them once they scroll up.
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+  page.resize(1980); // moved up to 1480, from 1494
+
+  page.scroll(1200);
+  page.resize(2004);
+  page.scroll(1490);
+  page.resize(2100);
+
+  expect(page.at()).toBe(1600);
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+
+test("a reader who scrolled down past where they were moved from is moved from where they are next", () => {
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+  page.resize(1980); // moved up to 1480, from 1494
+  page.resize(2600);
+  page.scroll(2000); // their own scroll down, a hundred from the end
+
+  page.resize(2480); // shorter again: moved up to 1980, from 2000
+  page.resize(2520);
+  page.scroll(2000); // and put back
+  page.resize(2700);
+
+  expect(page.at()).toBe(2000);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+});
+
+test("a reader put back a fraction of a pixel off isn't scrolling down either", () => {
+  // A scroller's place isn't a whole number at every zoom.
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+
+  page.resize(1980);
+  page.resize(2004);
+  page.scroll(1494.4);
+  page.resize(2100);
+
+  expect(page.at()).toBe(1494.4);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+});
+
+test("where the reader was is the first place, when what is shown gets shorter twice", () => {
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+
+  page.resize(1980); // moved up to 1480
+  page.resize(1960); // and to 1460
+  page.resize(2004);
+  page.scroll(1494); // put back where the wheel had left them
+  page.resize(2100);
+
+  expect(page.at()).toBe(1494);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+});
+
+test("older messages shown above move the place the reader was moved from along", () => {
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+  page.resize(1980); // moved up to 1480
+
+  page.addAbove(1000); // the reader is at 2480, and was moved from 2494
+  page.resize(3004);
+  page.scroll(2494); // put back
+  page.resize(3100);
+
+  expect(page.at()).toBe(2494);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+});
+
+test.each([
+  {
+    how: "turns the wheel",
+    act: (scroller: HTMLElement) => fireEvent.wheel(scroller, { deltaY: 6 }),
+  },
+  {
+    how: "moves a finger",
+    act: (scroller: HTMLElement) => fireEvent.touchMove(scroller),
+  },
+  {
+    how: "takes hold of the scrollbar",
+    act: (scroller: HTMLElement) => fireEvent.pointerDown(scroller),
+  },
+  {
+    how: "presses a key that scrolls",
+    act: () => fireEvent.keyDown(window, { key: "ArrowDown" }),
+  },
+])(
+  "a reader who $how after what is shown got shorter is followed again near the end",
+  ({ act: theirs }) => {
+    // The control: what they do next is theirs, back to the end as well.
+    const page = conversation(2000);
+    page.resize(2000);
+    fireEvent.wheel(page.scroller, { deltaY: -6 });
+    page.scroll(1494);
+    page.resize(1980);
+    page.resize(2004);
+
+    theirs(page.scroller);
+    page.scroll(1490);
+    page.resize(2100);
+
+    expect(page.at()).toBe(1600);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  },
+);
+
+test("a reader who is past where they were moved from is followed again near the end", () => {
+  // Without anything the page hears of them, as a finger's fling goes on: beyond the
+  // place the browser moved them from, a scroll down is theirs.
+  const page = conversation(2000);
+  page.resize(2000);
+  fireEvent.wheel(page.scroller, { deltaY: -6 });
+  page.scroll(1494);
+  page.resize(1980);
+  page.resize(2040);
+
+  page.scroll(1520);
+  page.resize(2100);
+
+  expect(page.at()).toBe(1600);
+});
+
 // Older messages are shown above what is shown while a long conversation comes onto
 // the page, newest first (chat.tsx). Browsers keep a reader's place by themselves, but
 // none does at the top of what is shown, where a reader who wants the older messages

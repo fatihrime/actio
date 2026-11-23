@@ -199,9 +199,23 @@ function Answer({
   message: ChatMessage;
   writing: boolean;
 }) {
-  const shown = message.parts.filter(
+  const parts = message.parts.filter(
     (part) => part.type === "text" || part.type === "reasoning",
   );
+  // A piece of text that has begun and has no words yet draws nothing, and until
+  // something is drawn the answer goes on saying that it waits for the model. A piece
+  // begins a moment before its first words: drawn from its beginning, it stood there
+  // empty in place of the wait, for as long as its first words took, and the
+  // conversation got shorter and then longer again under whoever was reading its end
+  // (ADR 0015, revision "an answer waits for the model until it has words"). A thought
+  // that has begun says so by itself.
+  const drawn = (part: (typeof parts)[number]) =>
+    part.type === "reasoning" || part.text.trim() !== "";
+  const shown = parts.filter(drawn);
+  // The last piece that is drawn is the one that can still be arriving. So a thought
+  // stays open until the text after it has words, and folds away as they come: not a
+  // moment before, with nothing yet in its place.
+  const last = parts.map(drawn).lastIndexOf(true);
   const waits = useWaitsForRenderer(shown.length > 0);
   if (!writing && isBlank(message)) {
     // An answer that is over and has nothing in it to read: nothing arrived, because
@@ -218,9 +232,11 @@ function Answer({
     <>
       <article aria-label="Actio" className="space-y-3">
         {!waits &&
-          shown.map((part, index) => {
-            // Only the last part can still be arriving.
-            const arriving = writing && index === shown.length - 1;
+          parts.map((part, index) => {
+            if (!drawn(part)) {
+              return null;
+            }
+            const arriving = writing && index === last;
             return part.type === "reasoning" ? (
               <Reasoning key={index} text={part.text} writing={arriving} />
             ) : (

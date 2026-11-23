@@ -21,11 +21,12 @@ test("the page stays at the newest words, and leaves a reader who scrolls up whe
   await chat.open();
   await chat.ask(LONG);
 
-  // Once the answer no longer fits, some seconds in, the page is at its end, look
-  // after look.
-  await expect
-    .poll(() => chat.hidden(), { timeout: 20_000 })
-    .toBeGreaterThan(300);
+  // Some seconds into the answer, with a few hundred of its words written, the page is
+  // at its end, look after look. The answer is waited for by its own words: the
+  // question is as long as the answer, so the conversation is longer than the screen
+  // from the moment it is asked.
+  await expect(chat.answers).toContainText("word200", { timeout: 20_000 });
+  expect(await chat.hidden()).toBeGreaterThan(300);
   for (let look = 0; look < 5; look++) {
     expect(await chat.below()).toBeLessThan(AT_THE_END);
     await page.waitForTimeout(100);

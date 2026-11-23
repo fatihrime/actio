@@ -394,6 +394,37 @@ describe("an answer that arrives", () => {
     expect(newestAnswer().textContent).toBe(WHOLE);
   });
 
+  it("waits for the model until its first words are here, also once its text has begun", async () => {
+    // A text begins a moment before its first piece, and the two can reach the page
+    // apart. Drawn from its beginning, the text stood there empty in the wait's place
+    // until the clock had moved on: the conversation got shorter, and longer again.
+    clockAt();
+    const turns = sentByHand("answer.sse");
+    fakeApi().on(TURNS, turns.answer);
+    const { ask, user } = await openWithRenderer();
+
+    await ask(user, ASKED);
+    turns.send(BEFORE_THE_TEXT);
+    await aWhile();
+
+    expect(screen.getByText("Waiting for the model…")).toBeInTheDocument();
+    expect(drawnTexts()).toEqual([]);
+    expect(newestAnswer().textContent).toBe("Waiting for the model…");
+
+    // Its first piece is drawn as it comes, while the clock stands still.
+    turns.send();
+
+    await waitFor(() => {
+      expect(drawnTexts()).toEqual(["Echo: "]);
+    });
+    expect(
+      screen.queryByText("Waiting for the model…"),
+    ).not.toBeInTheDocument();
+    turns.end();
+    await screen.findByRole("button", { name: "Send" });
+    expect(newestAnswer().textContent).toBe(WHOLE);
+  });
+
   it("has its reasoning drawn at the same pace, and whole once its words begin", async () => {
     // The recorded answer of `reasoning.sse`: a reasoning of four pieces, "Blue " the
     // first, then the words of `answer.sse`.

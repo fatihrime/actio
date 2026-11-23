@@ -74,6 +74,13 @@ export function useFollow(): {
   const top = useRef(0);
   // When the reader last did something that scrolls, by the clock.
   const moved = useRef(-Infinity);
+  // Where the reader was when what is shown got shorter under them and the browser
+  // moved them up to its new end. Should the browser put them back when it gets longer
+  // again, that is no scroll of theirs. Nothing once they scroll themselves, up or
+  // down, or do something that scrolls (ADR 0015, revision "an answer waits for the
+  // model until it has words"). It only matters while the end isn't followed, and
+  // whatever takes the reader from the end empties it first.
+  const movedFrom = useRef<number | null>(null);
 
   const toEnd = useCallback(() => {
     const scrolling = scroller.current;
@@ -125,6 +132,9 @@ export function useFollow(): {
     // from a place above the one it started at: a scroll up would count as one down,
     // and the end would pull the reader back.
     top.current += added;
+    if (movedFrom.current !== null) {
+      movedFrom.current += added;
+    }
   }, []);
 
   // At the end before the browser first paints the conversation. The sizes below are
@@ -150,13 +160,36 @@ export function useFollow(): {
       }
       const up = scrolling.scrollTop < top.current;
       const down = scrolling.scrollTop > top.current;
+      const was = top.current;
       top.current = scrolling.scrollTop;
       if (up && below() > 1) {
         // The reader went up, however little. Going up while exactly at the end is
         // something else: what is shown got shorter, and the browser moved along.
         following.current = false;
-      } else if (down && below() < NEAR) {
-        following.current = true;
+        movedFrom.current = null;
+      } else if (up) {
+        // Where the reader was is kept: the first such place, if what is shown gets
+        // shorter more than once.
+        movedFrom.current ??= was;
+      } else if (
+        down &&
+        movedFrom.current !== null &&
+        scrolling.scrollTop < movedFrom.current + 1
+      ) {
+        // The browser putting the reader back where they were, as far as there is
+        // room again, to within a pixel: seen in Chromium a few frames after a wheel
+        // was turned, on a busy device. Taken for the reader scrolling down to the
+        // end, it had the end followed again, over the wheel they had just turned.
+        if (scrolling.scrollTop > movedFrom.current - 1) {
+          movedFrom.current = null;
+        }
+      } else if (down) {
+        // The reader's own scroll down. Whatever was kept is behind them now: should
+        // what is shown get shorter again, they are moved from where they are.
+        movedFrom.current = null;
+        if (below() < NEAR) {
+          following.current = true;
+        }
       }
       setAway(!following.current && below() >= NEAR);
     };
@@ -171,8 +204,13 @@ export function useFollow(): {
 
     // The browser scrolls on a thread of its own, and tells the page a frame later.
     // What the reader does to scroll is heard as they do it.
-    const turned = (event: WheelEvent) => {
+    // The reader does something that scrolls: what moves the scroller next is theirs.
+    const theirs = () => {
       moved.current = Date.now();
+      movedFrom.current = null;
+    };
+    const turned = (event: WheelEvent) => {
+      theirs();
       if (event.deltaY < 0 && !event.ctrlKey && scrolling.scrollTop > 0) {
         // Up, and there is something above: the end is no longer followed from now
         // on. Followed until the browser says that the reader scrolled, a change of
@@ -183,14 +221,12 @@ export function useFollow(): {
       }
     };
     // A finger that moves, or a scrollbar taken hold of.
-    const touched = () => {
-      moved.current = Date.now();
-    };
+    const touched = theirs;
     // Those keys scroll the conversation wherever the keyboard is, so they are heard
     // on the window, before anything else on the page has them.
     const pressed = (event: KeyboardEvent) => {
       if (SCROLLING_KEYS.has(event.key)) {
-        moved.current = Date.now();
+        theirs();
       }
     };
 
