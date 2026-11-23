@@ -15,6 +15,7 @@ Messages are added by turns, which have their own routes.
 
 import base64
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -24,7 +25,7 @@ from pydantic import BaseModel, Field, StringConstraints
 from actio.api.body import Body
 from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now, Runner
 from actio.api.problems import Problem
-from actio.chat import conversations, titles, tree, turns
+from actio.chat import context, conversations, titles, tree, turns
 from actio.chat.conversations import TITLE_MAX, Cursor
 from actio.chat.models import Conversation, Message, Role, Turn, TurnStatus
 from actio.chat.parts import Part, from_stored
@@ -92,6 +93,13 @@ class TurnOut(BaseModel):
     input_tokens: int | None
     cached_input_tokens: int | None
     output_tokens: int | None
+    context_tokens: int | None
+    """About how many tokens of the model's context window the conversation takes after
+    this turn: what the model was shown, and the words it answered with. What it only
+    thought isn't kept for the next question, and isn't counted: where it thought and
+    then answered, the words' share of what it wrote is a guess, by characters. Empty
+    while the turn runs, and when the model's server counted nothing, as for a stopped
+    or failed turn."""
     load_ms: int | None
     prompt_ms: int | None
     generation_ms: int | None
@@ -111,7 +119,10 @@ class TurnOut(BaseModel):
     finished_at: datetime | None
 
     @classmethod
-    def of(cls, turn: Turn) -> "TurnOut":
+    def of(cls, turn: Turn, *, answer: Sequence[Part] | None) -> "TurnOut":
+        """The turn as it is recorded. `answer` is what it wrote, as the parts of its
+        answer, or `None` when it wrote nothing, or nothing yet: how much of the window
+        its conversation takes after it follows from that (`context.tokens_after`)."""
         return cls(
             id=turn.id,
             model=turn.model,
@@ -122,6 +133,9 @@ class TurnOut(BaseModel):
             input_tokens=turn.input_tokens,
             cached_input_tokens=turn.cached_input_tokens,
             output_tokens=turn.output_tokens,
+            context_tokens=context.tokens_after(
+                answer or (), input_tokens=turn.input_tokens, output_tokens=turn.output_tokens
+            ),
             load_ms=turn.load_ms,
             prompt_ms=turn.prompt_ms,
             generation_ms=turn.generation_ms,
@@ -283,20 +297,23 @@ async def _with_messages(
         messages=[
             _message(message, versions[message.id], wrote.get(message.id)) for message in branch
         ],
-        unanswered=TurnOut.of(unanswered) if unanswered else None,
+        # A turn that wrote an answer put it after the question, at the end of the branch
+        # (`tree.append`): one that leaves the question at the end wrote none.
+        unanswered=TurnOut.of(unanswered, answer=None) if unanswered else None,
     )
 
 
 def _message(message: Message, versions: list[uuid.UUID], turn: Turn | None) -> MessageOut:
+    parts = from_stored(message.parts)  # once: the message's turn reads them too
     return MessageOut(
         id=message.id,
         role=message.role,
-        parts=from_stored(message.parts),
+        parts=parts,
         metadata=MessageMetadata(
             parent_id=message.parent_id,
             created_at=message.created_at,
             versions=versions,
-            turn=TurnOut.of(turn) if turn else None,
+            turn=TurnOut.of(turn, answer=parts) if turn else None,
         ),
     )
 

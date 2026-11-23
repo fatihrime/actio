@@ -568,6 +568,49 @@ async def test_stopping_a_turn_that_has_ended_changes_nothing(scripted: Any) -> 
     assert turn["status"] == "completed"
 
 
+async def test_stopping_a_turn_that_has_ended_says_what_its_conversation_takes_as_it_did(
+    scripted: Any,
+) -> None:
+    """The stop answers with the turn as it is recorded: how much of the window its
+    conversation takes follows from its answer, read for that. Here a thought of 33
+    characters, then 11 of words: a quarter of what was written goes back."""
+    _, browser = await scripted(
+        ReasoningDelta("x" * 33),
+        TextDelta("The saddle."),
+        Finish(FinishReason.STOP, Usage(input_tokens=30, output_tokens=12)),
+    )
+    chat = Chat(browser)
+    [answered] = await ended(chat.asking(thinking=True))
+    turn = chunk(answered, "finish")["messageMetadata"]["turn"]
+
+    too_late = await chat.stop(turn["id"])
+
+    assert too_late.json()["context_tokens"] == turn["context_tokens"] == 30 + 3
+
+
+async def test_a_stopped_turn_says_nothing_of_the_window_its_conversation_takes(
+    scripted: Any,
+) -> None:
+    """Its model never said what it read and wrote: a stream that is closed sends no
+    count. A page keeps the figure from before it."""
+    never = asyncio.Event()
+    model, browser = await scripted(
+        ReasoningDelta("Let me think."), TextDelta("Half an "), never, DONE
+    )
+    chat = Chat(browser)
+    asked = chat.asking(thinking=True)
+    await held(model)
+
+    stopped = await chat.stop(await chat.running_turn())
+    [reader] = await ended(asked)
+
+    stored = (await chat.read())["messages"][1]["metadata"]["turn"]
+    assert stopped.json()["status"] == "stopped"
+    assert stopped.json()["context_tokens"] is None
+    assert chunk(reader, "finish")["messageMetadata"]["turn"]["context_tokens"] is None
+    assert stored["context_tokens"] is None
+
+
 async def test_a_stop_that_comes_twice_stops_once(scripted: Any, db: AsyncSession) -> None:
     never = asyncio.Event()
     model, browser = await scripted(TextDelta("Half an answer"), never, DONE)

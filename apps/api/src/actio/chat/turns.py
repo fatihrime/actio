@@ -31,7 +31,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import BigInteger, ColumnElement, and_, func, literal, not_, select, update
@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio.chat import conversations, titles, tree
 from actio.chat.models import Conversation, Message, Turn
-from actio.chat.parts import Part
+from actio.chat.parts import Part, from_stored
 from actio.core import jobs
 from actio_llm import Timings, Usage
 
@@ -432,6 +432,16 @@ async def get(db: AsyncSession, conversation: Conversation, turn_id: uuid.UUID) 
         .execution_options(populate_existing=True)
     )
     return found
+
+
+async def answer_of(db: AsyncSession, turn: Turn) -> list[Part] | None:
+    """What the turn wrote, as the parts of its answer: `None` when it wrote nothing."""
+    if turn.answer_id is None:
+        return None
+    stored: list[dict[str, Any]] | None = await db.scalar(
+        select(Message.parts).where(Message.id == turn.answer_id)
+    )
+    return None if stored is None else from_stored(stored)
 
 
 async def running_in(db: AsyncSession, conversation: Conversation) -> uuid.UUID | None:

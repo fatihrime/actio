@@ -53,6 +53,7 @@
           "input_tokens": 35,
           "cached_input_tokens": 0,
           "output_tokens": 10,
+          "context_tokens": 40,
           "load_ms": null,
           "prompt_ms": null,
           "generation_ms": null,

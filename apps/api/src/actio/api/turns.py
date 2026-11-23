@@ -240,7 +240,9 @@ async def start_turn(
     start = {
         "type": "start",
         "messageId": str(answer_id),
-        "messageMetadata": _metadata(begun, answer_id, TurnOut.of(turn), turn.created_at),
+        "messageMetadata": _metadata(
+            begun, answer_id, TurnOut.of(turn, answer=None), turn.created_at
+        ),
     }
     try:
         await events.open(turn.id, ui_stream.event(start))
@@ -346,10 +348,11 @@ async def cancel_turn(
     if not await runner.stop(turn_id):
         await turns.give_up_on_stale(db, conversation.id, now=now)
     turn = await turns.get(db, conversation, turn_id)
+    answer = await turns.answer_of(db, turn) if turn is not None else None
     await db.commit()
     if turn is None:  # the conversation was deleted meanwhile
         raise Problem(404, "This conversation has no such turn.")
-    return TurnOut.of(turn)
+    return TurnOut.of(turn, answer=answer)
 
 
 async def _begin(
@@ -577,7 +580,7 @@ async def _write(
 
     This runs in a task of its own (`actio.chat.running`), whoever reads."""
     turn = begun.turn
-    running = TurnOut.of(turn)
+    running = TurnOut.of(turn, answer=None)
     await out.send({"type": "start-step"})
     try:
         ended = await answering.answer(
@@ -663,17 +666,23 @@ async def _read(events: TurnEvents, turn_id: uuid.UUID) -> AsyncIterator[bytes]:
 
 
 def _ended(running: TurnOut, ended: Ended) -> TurnOut:
-    """The turn as it was recorded, without reading it back."""
+    """The turn as it was recorded, without reading it back. Its answer is what it
+    wrote, which is what was stored."""
     ending = ended.ending
     usage, timings = ending.usage, ending.timings
+    input_tokens = usage.input_tokens if usage else None
+    output_tokens = usage.output_tokens if usage else None
     return running.model_copy(
         update={
             "status": ending.status,
             "finish_reason": ending.finish_reason,
             "error": ending.error,
-            "input_tokens": usage.input_tokens if usage else None,
+            "input_tokens": input_tokens,
             "cached_input_tokens": usage.cached_input_tokens if usage else None,
-            "output_tokens": usage.output_tokens if usage else None,
+            "output_tokens": output_tokens,
+            "context_tokens": context.tokens_after(
+                ending.parts, input_tokens=input_tokens, output_tokens=output_tokens
+            ),
             "load_ms": timings.load_ms if timings else None,
             "prompt_ms": timings.prompt_ms if timings else None,
             "generation_ms": timings.generation_ms if timings else None,

@@ -1,16 +1,18 @@
 """The parts of a turn that need no server: collecting an answer as it streams, naming
-what went wrong, and choosing what a model is shown."""
+what went wrong, choosing what a model is shown, and how much of its window that takes."""
 
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from actio.chat import answering, context
 from actio.chat.answering import Answer, Closed, Opened, Wrote, code_for
 from actio.chat.models import Message
-from actio.chat.parts import ReasoningPart, TextPart
+from actio.chat.parts import Part, ReasoningPart, TextPart
 from actio.core.ids import new_id
 from actio_llm import (
     Assistant,
@@ -219,3 +221,110 @@ def test_an_answer_with_no_text_is_not_sent_back() -> None:
     shown = context.for_model(history, now=NOON)
 
     assert shown[1:] == [User("A hard question"), User("Well?")]
+
+
+# --- How much of the window a conversation takes after a turn -------------------------
+#
+# A turn's model read 30 tokens and wrote 12, in every case but those about the counts.
+
+SADDLE = TextPart(text="The saddle.")  # 11 characters of words
+
+
+@pytest.mark.parametrize(
+    ("answer", "figure"),
+    [
+        pytest.param([SADDLE], 30 + 12, id="words alone: all that was written"),
+        # 11 characters of words of 44 in all: a quarter of the 12 tokens.
+        pytest.param(
+            [ReasoningPart(text="x" * 33), SADDLE], 30 + 3, id="a thought, then the words"
+        ),
+        # The same share, back and forth: whatever the order, characters are counted.
+        pytest.param(
+            [
+                ReasoningPart(text="x" * 11),
+                TextPart(text="The "),
+                ReasoningPart(text="x" * 22),
+                TextPart(text="saddle."),
+            ],
+            30 + 3,
+            id="thoughts between the words",
+        ),
+        pytest.param([ReasoningPart(text="Something to sit on.")], 30, id="a thought alone"),
+        pytest.param([TextPart(text=" \n\t")], 30, id="nothing but blank space"),
+        pytest.param(
+            [ReasoningPart(text="Something to sit on."), TextPart(text="\n")],
+            30,
+            id="a thought, then blank space",
+        ),
+        pytest.param([], 30, id="nothing written"),
+        # An empty thought is no thought.
+        pytest.param([ReasoningPart(text=""), SADDLE], 30 + 12, id="an empty thought"),
+    ],
+)
+def test_a_conversation_takes_what_its_model_read_and_the_words_it_answered_with(
+    answer: list[Any], figure: int
+) -> None:
+    assert context.tokens_after(answer, input_tokens=30, output_tokens=12) == figure
+
+
+@pytest.mark.parametrize(
+    ("words", "thought", "share"),
+    [
+        (2, 1, 7),  # two thirds of 10 tokens is 6.7
+        (1, 2, 3),  # one third is 3.3
+        (26, 25, 5),  # the recorded thought of `reasoning.sse`: 5.1
+    ],
+)
+def test_the_words_share_is_rounded_to_a_whole_token(words: int, thought: int, share: int) -> None:
+    answer: list[Part] = [ReasoningPart(text="x" * thought), TextPart(text="y" * words)]
+
+    assert context.tokens_after(answer, input_tokens=30, output_tokens=10) == 30 + share
+
+
+@pytest.mark.parametrize(("input_tokens", "output_tokens"), [(None, 12), (30, None), (None, None)])
+def test_a_turn_without_its_counts_says_nothing_of_the_window(
+    input_tokens: int | None, output_tokens: int | None
+) -> None:
+    """As a stopped turn: the stream that was closed never said what was read and written."""
+    for answer in ([SADDLE], []):
+        assert (
+            context.tokens_after(answer, input_tokens=input_tokens, output_tokens=output_tokens)
+            is None
+        )
+
+
+@given(
+    words=st.text(max_size=200),
+    thought=st.text(max_size=2_000),
+    input_tokens=st.integers(min_value=0, max_value=1_000_000),
+    output_tokens=st.integers(min_value=0, max_value=1_000_000),
+)
+def test_a_conversation_takes_at_least_what_was_read_and_at_most_all_that_was_written_too(
+    words: str, thought: str, input_tokens: int, output_tokens: int
+) -> None:
+    answer: list[Part] = [ReasoningPart(text=thought), TextPart(text=words)]
+
+    figure = context.tokens_after(answer, input_tokens=input_tokens, output_tokens=output_tokens)
+
+    assert figure is not None
+    assert input_tokens <= figure <= input_tokens + output_tokens
+
+
+def test_what_goes_back_to_a_model_is_what_the_conversation_takes() -> None:
+    """The figure and what is sent follow one rule. An answer of which nothing is sent
+    back adds nothing to the figure; one whose text is sent back whole, with no thought,
+    adds all that was written."""
+    question = message("user", TextPart(text="Name a bike part."))
+    cases: list[tuple[list[Part], list[Any], int]] = [
+        ([ReasoningPart(text="Something to sit on.")], [], 0),
+        ([TextPart(text="  ")], [], 0),
+        ([TextPart(text="The "), TextPart(text="saddle.")], [Assistant("The saddle.")], 12),
+    ]
+    for answer, sent, added in cases:
+        history = [question, message("assistant", *answer)]
+
+        shown = context.for_model(history, now=NOON)
+        figure = context.tokens_after(answer, input_tokens=30, output_tokens=12)
+
+        assert shown[2:] == sent
+        assert figure == 30 + added

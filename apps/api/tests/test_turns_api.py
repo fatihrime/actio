@@ -168,6 +168,8 @@ async def test_a_question_is_answered_as_a_stream(chat: Chat, server_ids: Any) -
         "input_tokens": len(TODAY.content.split()) + 2,
         "cached_input_tokens": 0,
         "output_tokens": 3,
+        # It thought nothing: all of its answer goes back with the next question.
+        "context_tokens": len(TODAY.content.split()) + 2 + 3,
         "load_ms": None,
         "prompt_ms": None,
         "generation_ms": None,
@@ -493,6 +495,59 @@ async def test_a_question_that_got_no_answer_can_be_answered_again(chat: Chat) -
     assert kinds(again)[-3:] == ["message-metadata", "error", "[DONE]"]
     assert await chat.texts() == ["Hello?", "Echo: Hello?"]
     assert kinds(reworded)[-2:] == ["finish", "[DONE]"]
+
+
+# --- How much of the model's window a conversation takes ------------------------------
+#
+# The rule, case by case, is in test_answering.py. Here: the stream and the conversation
+# read right after it say the same figure.
+
+
+def newest_turn(conversation: dict[str, Any]) -> dict[str, Any]:
+    """The turn of the conversation's last message, or of its open question."""
+    if conversation["unanswered"] is not None:
+        return conversation["unanswered"]  # type: ignore[no-any-return]
+    return conversation["messages"][-1]["metadata"]["turn"]  # type: ignore[no-any-return]
+
+
+@pytest.mark.parametrize(
+    ("written", "figure"),
+    [
+        pytest.param([TextDelta("The saddle.")], 30 + 12, id="words"),
+        # 11 characters of words, of 44 written: a quarter of the 12 tokens.
+        pytest.param(
+            [ReasoningDelta("x" * 33), TextDelta("The saddle.")], 30 + 3, id="a thought and words"
+        ),
+        pytest.param([ReasoningDelta("Something to sit on.")], 30, id="a thought alone"),
+        # Nothing is stored, and the question stays open.
+        pytest.param([], 30, id="nothing"),
+    ],
+)
+async def test_a_turn_says_how_much_of_the_window_its_conversation_takes_and_so_does_a_read(
+    scripted: Any, written: list[Any], figure: int
+) -> None:
+    _, browser = await scripted(
+        *written, Finish(FinishReason.STOP, Usage(input_tokens=30, output_tokens=12))
+    )
+    chat = Chat(browser)
+
+    response = await chat.ask("Name a bike part.", thinking=True)
+
+    assert chunk(response, "start")["messageMetadata"]["turn"]["context_tokens"] is None
+    streamed = chunk(response, "finish")["messageMetadata"]["turn"]
+    stored = newest_turn(await chat.read())
+    assert (streamed["id"], streamed["status"]) == (stored["id"], "completed")
+    assert streamed["context_tokens"] == stored["context_tokens"] == figure
+
+
+async def test_a_turn_that_failed_says_nothing_of_the_window(chat: Chat) -> None:
+    """Its model counted nothing. A page keeps the figure from before it."""
+    response = await chat.ask("[[fail: 503]] Hello?")
+
+    turn = chunk(response, "message-metadata")["messageMetadata"]["turn"]
+    assert turn["status"] == "failed"
+    assert turn["context_tokens"] is None
+    assert (await chat.read())["unanswered"]["context_tokens"] is None
 
 
 # --- Refused before a model is asked --------------------------------------------------
