@@ -48,6 +48,7 @@ nav = [
     { "0023. Answers that wait their turn" = "adr/0023-answers-that-wait-their-turn.md" },
     { "0024. Background jobs in a queue in Postgres" = "adr/0024-background-jobs-in-a-queue-in-postgres.md" },
     { "0025. Titles written by a model" = "adr/0025-titles-written-by-a-model.md" },
+    { "0026. Models loaded ahead of the first question" = "adr/0026-models-loaded-ahead-of-the-first-question.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

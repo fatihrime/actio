@@ -36,5 +36,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0023](0023-answers-that-wait-their-turn.md) | Answers that wait their turn: a gate in front of a model's server, and limits on what one account runs at once | Accepted |
 | [0024](0024-background-jobs-in-a-queue-in-postgres.md) | Background jobs in a queue in Postgres, through Procrastinate | Accepted |
 | [0025](0025-titles-written-by-a-model.md) | Titles written by a model: once per conversation, by the worker, never over a person's | Accepted |
+| [0026](0026-models-loaded-ahead-of-the-first-question.md) | A model is loaded ahead of the first question: the page asks, the API answers at once, and the load is a chat's request without messages | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.
