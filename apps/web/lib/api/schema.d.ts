@@ -359,6 +359,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/models/{model_id}/warm-up": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Warm Up
+         * @description Have a model loaded into its server's memory now, so that the first question to
+         *     it doesn't wait for the load. A local server keeps a model loaded for a few minutes
+         *     after it was last asked anything; this moves that time too.
+         *
+         *     Answers at once, without waiting for the load, and with no body. It costs no
+         *     credits. What becomes of the load isn't said: a question asked meanwhile waits for
+         *     it at the server, as it would have waited for its own.
+         */
+        post: operations["warm_up"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/usage": {
         parameters: {
             query?: never;
@@ -1742,6 +1768,78 @@ export interface operations {
             };
             /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    warm_up: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The model is being loaded: a load was started, or one is under way already. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Nothing was started: the model's kind of server can't be asked to load a model ahead, or its server is writing as many answers as it takes. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No model is called that. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request doesn't have the expected form. `errors` lists what is wrong, and where. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests to load a model in a short time. `Retry-After` says how long to wait. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The model can't answer right now: `model_status` says why. Or requests can't be counted right now. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -53,6 +53,7 @@ from starlette.types import Receive, Scope, Send
 
 from actio.api import ui_stream
 from actio.api.body import Body
+from actio.api.catalog import not_ready
 from actio.api.conversations import MessageMetadata, OwnConversation, TurnOut
 from actio.api.dependencies import (
     NO_SESSION,
@@ -107,11 +108,6 @@ read along with isn't started."""
 
 NO_SUCH_TURN: dict[int | str, dict[str, Any]] = {
     404: {"description": "No such conversation, or no such turn in it."}
-}
-
-NOT_READY = {
-    "missing": "This model isn't on its server yet.",
-    "unreachable": "This model's server can't be reached.",
 }
 
 
@@ -214,7 +210,7 @@ async def start_turn(
     await limits.turn(principal.user_id)
     status = await catalog.status(offered.name, now=now)
     if status.state != "ready":
-        raise Problem(503, NOT_READY[status.state], model=offered.name, model_status=status.state)
+        raise not_ready(offered.name, status.state)
     if body.thinking and not status.thinking:
         raise Problem(422, "This model can't reason before it answers.", model=offered.name)
 

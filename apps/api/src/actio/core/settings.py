@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     limit_turns_per_user: RateSetting = Rate.parse("120/hour")
     """Messages one account, a guest included, may send to a model."""
 
+    limit_warm_ups_per_user: RateSetting = Rate.parse("120/hour")
+    """Requests one account, a guest included, may make to have a model loaded ahead of
+    a question. The page makes one a minute at most, in each tab."""
+
     @field_validator("database_url")
     @classmethod
     def _is_postgres(cls, value: SecretStr) -> SecretStr:

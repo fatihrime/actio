@@ -517,6 +517,12 @@ class Lineup:
         """Offer a model called `name` that follows `script`, behind `gate` if any. See
         `ScriptedModel` for `closes_when`."""
         model = ScriptedModel(*script, closes_when=closes_when)
+        self.offer(name, model, gate=gate)
+        return model
+
+    def offer(self, name: str, chat: ChatProvider, *, gate: Gate | None = None) -> None:
+        """Offer `chat` as the model called `name`, behind `gate` if any: for a model
+        that is more than its script, such as one whose server can load it ahead."""
         self._offered[name] = OfferedModel(
             name=name,
             title=name.capitalize(),
@@ -524,10 +530,9 @@ class Lineup:
             model=f"scripted-{name}",
             context_window=4096,
             max_output_tokens=512,
-            chat=model,
+            chat=chat,
             gate=gate,
         )
-        return model
 
     @property
     def names(self) -> list[str]:

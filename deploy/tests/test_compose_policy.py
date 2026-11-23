@@ -272,6 +272,7 @@ def test_a_client_cannot_choose_the_address_it_is_counted_under(stack: dict[str,
         "ACTIO_LIMIT_LOGINS_PER_ADDRESS",
         "ACTIO_LIMIT_LOGINS_PER_EMAIL",
         "ACTIO_LIMIT_TURNS_PER_USER",
+        "ACTIO_LIMIT_WARM_UPS_PER_USER",
     ],
 )
 def test_a_rate_limit_set_in_env_reaches_the_api(limit: str) -> None:
@@ -664,3 +665,6 @@ def test_no_test_meets_a_rate_limit_made_for_people(e2e: dict[str, Any]) -> None
     # The one limit that guards an account's password is the one people get. A test
     # makes up its own address, so it has that address's attempts to itself.
     assert environment["ACTIO_LIMIT_LOGINS_PER_EMAIL"] is None
+    # So is the one on loading a model ahead, per account: the page asks once a minute
+    # at most, and no test keeps a page open for long.
+    assert environment["ACTIO_LIMIT_WARM_UPS_PER_USER"] is None

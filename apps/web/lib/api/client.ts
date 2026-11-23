@@ -177,6 +177,17 @@ export async function listModels(): Promise<ModelList> {
   return answered(await api().GET("/api/models"));
 }
 
+/** Have a model loaded into its server's memory ahead of a question to it. The API
+ * answers at once, before the load is over, and with nothing: whether a load was
+ * started or there was nothing to load, the page doesn't need to know. */
+export async function warmUpModel(modelId: string): Promise<void> {
+  done(
+    await api().POST("/api/models/{model_id}/warm-up", {
+      params: { path: { model_id: modelId } },
+    }),
+  );
+}
+
 /** The caller's plan, and how much of each of its usage limits is used. */
 export async function getUsage(): Promise<Usage> {
   return answered(await api().GET("/api/usage"));

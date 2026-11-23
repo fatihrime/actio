@@ -1,4 +1,5 @@
-"""Limits on what anyone can ask for: new guests, new accounts, password attempts.
+"""Limits on what anyone can ask for: new guests, new accounts, password attempts, and
+what one account asks of the models.
 
 A route counts an attempt before doing its work, in one line: `await limits.log_in(...)`.
 With no room left, that raises a 429 problem with a `Retry-After` header, and the work
@@ -104,6 +105,17 @@ class RateLimits:
         await self._spend(
             "Too many messages in a short time.",
             Take("turns-user", str(user_id), self._settings.limit_turns_per_user),
+        )
+
+    async def warm_up(self, user_id: uuid.UUID) -> None:
+        """Count a request to load a model ahead against the account that makes it.
+
+        Per account, as messages are. A load costs no credits, and a model that is
+        loaded already answers in milliseconds: this only keeps one account from
+        keeping a server busy loading models."""
+        await self._spend(
+            "Too many requests to load a model.",
+            Take("warm-ups-user", str(user_id), self._settings.limit_warm_ups_per_user),
         )
 
     def _password_attempt(self, email: str) -> Take:

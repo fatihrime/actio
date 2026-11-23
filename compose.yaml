@@ -128,6 +128,7 @@ services:
       ACTIO_LIMIT_LOGINS_PER_ADDRESS:
       ACTIO_LIMIT_LOGINS_PER_EMAIL:
       ACTIO_LIMIT_TURNS_PER_USER:
+      ACTIO_LIMIT_WARM_UPS_PER_USER:
     networks: [edge, backend, models]
     mem_limit: 512m
     # Told to stop, the API first lets the answers that are being written come to an

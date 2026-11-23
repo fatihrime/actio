@@ -574,6 +574,51 @@ async def test_an_answer_about_a_model_is_reused_for_a_quarter_of_a_minute() -> 
     assert len(ollama.asked) == 2
 
 
+class LoadsForEver(httpx2.AsyncBaseTransport):
+    """An Ollama server that never answers a load. Says whether it had been closed by
+    the time the load was given up on."""
+
+    def __init__(self) -> None:
+        self.asked = asyncio.Event()
+        self.closed = False
+        self.closed_before_given_up: bool | None = None
+        """`None` while the load hasn't been given up on."""
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/version":
+            return httpx2.Response(200, json={"version": "0.40.16"})
+        self.asked.set()
+        try:
+            await asyncio.Event().wait()  # nothing sets it: only a cancellation ends this
+        finally:
+            self.closed_before_given_up = self.closed
+        return httpx2.Response(500)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_a_load_under_way_is_given_up_on_before_its_servers_client_is_closed() -> None:
+    """None is left pending once the catalog is closed, and none is left to a closed
+    client."""
+    server = LoadsForEver()
+
+    # With a time limit: a catalog that waited for the load would never close.
+    async with (
+        asyncio.timeout(5),
+        catalogs.build(
+            parsed(GOOD), ollama_url="http://ollama", transports={"ollama": server}
+        ) as catalog,
+    ):
+        started = catalog.load_ahead("standard")
+        await asyncio.wait_for(server.asked.wait(), 5)
+
+    assert started
+    assert server.closed
+    assert server.closed_before_given_up is False
+    assert [task for task in asyncio.all_tasks() if task.get_name().startswith("load-")] == []
+
+
 async def test_every_model_is_asked_about_at_once() -> None:
     ollama = FakeOllama({"qwen3.5:4b-q4_K_M": ["completion", "thinking"]})
     transports: dict[str, Any] = {

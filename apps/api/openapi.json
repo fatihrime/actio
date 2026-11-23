@@ -1038,6 +1038,85 @@
         }
       }
     },
+    "/api/models/{model_id}/warm-up": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Warm Up",
+        "description": "Have a model loaded into its server's memory now, so that the first question to\nit doesn't wait for the load. A local server keeps a model loaded for a few minutes\nafter it was last asked anything; this moves that time too.\n\nAnswers at once, without waiting for the load, and with no body. It costs no\ncredits. What becomes of the load isn't said: a question asked meanwhile waits for\nit at the server, as it would have waited for its own.",
+        "operationId": "warm_up",
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The model is being loaded: a load was started, or one is under way already."
+          },
+          "401": {
+            "description": "No session, or it has ended. Start one with `POST /api/session/guest`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Nothing was started: the model's kind of server can't be asked to load a model ahead, or its server is writing as many answers as it takes."
+          },
+          "404": {
+            "description": "No model is called that.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests to load a model in a short time. `Retry-After` says how long to wait.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The model can't answer right now: `model_status` says why. Or requests can't be counted right now.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request doesn't have the expected form. `errors` lists what is wrong, and where.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/usage": {
       "get": {
         "tags": [

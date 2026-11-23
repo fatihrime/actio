@@ -9,15 +9,18 @@ what to call it at its provider, its limits, and the client to stream an answer 
 - `open_catalog` builds the clients for the providers it names, and closes them again.
   Nothing connects until a model is used.
 - `Catalog.status` asks a provider whether it has a model, and what the model can do.
+- `Catalog.load_ahead` has a model's server load it into memory before the first
+  question to it, where the server can be asked to (ADR 0026).
 
 A server writes only so many answers at once: a local one, such as Ollama, one. Each
 provider that has such a limit gets a `Gate`, shared by every model it runs, at which
 the answers that would be too many wait their turn.
 
-Nothing here knows about HTTP: the route is in `actio.api.models`.
+Nothing here knows about HTTP: the routes are in `actio.api.catalog`.
 """
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -35,11 +38,14 @@ from actio.core.settings import Settings
 from actio_llm import (
     ChatProvider,
     LLMError,
+    LoadsAhead,
     ModelNotFoundError,
     Ollama,
     OpenAICompatible,
     Timeouts,
 )
+
+logger = logging.getLogger(__name__)
 
 STATUS_LIFETIME = timedelta(seconds=15)
 """How long an answer about a model's status is reused before its provider is asked
@@ -49,7 +55,8 @@ every look; short enough that a model pulled a moment ago shows up."""
 TIMEOUTS = Timeouts(connect_s=2.0, request_s=3.0)
 """Asking for a status is a small call: a provider that takes longer than this counts as
 away. Waiting for an answer to start, and between its pieces, keeps the adapters' own,
-much longer, patience."""
+much longer, patience, and so does a model's load, which takes as long as the first
+word of an answer to a model that isn't loaded."""
 
 type Kind = Literal["ollama", "openai-compatible"]
 
@@ -257,6 +264,8 @@ class Catalog:
         self._models = dict(models)
         self._declared_thinking = dict(thinking)
         self._statuses: dict[str, tuple[datetime, ModelStatus]] = {}
+        self._loads: dict[str, asyncio.Task[None]] = {}
+        """Each model's last load, by its name: under way, or ended."""
         self.default = default
         self.titles = titles
         """The name of the model that names conversations. `None`: none does."""
@@ -289,6 +298,57 @@ class Catalog:
         found = await asyncio.gather(*(self.status(name, now=now) for name in names))
         return dict(zip(names, found, strict=True))
 
+    def load_ahead(self, name: str) -> bool:
+        """Start having the model called `name` loaded into its server's memory, ahead of
+        the first question to it, and return at once. Raises `UnknownModelError`.
+
+        Says whether a load was started, or is under way already: one at a time for a
+        model, and once it has ended, well or not, the next call starts another. False
+        when there is nothing to do: the model's server can't be asked to load it, or it
+        is writing as many answers as it takes. The model that answers there is in
+        memory already. A load of another one waited for the answer to end, when it
+        was measured on Ollama, and then had the answer's model unloaded (ADR 0026).
+
+        A load takes no place at the model's gate, and never waits there: a question to
+        the same model asked meanwhile is asked at once, and waits inside the server for
+        that load. It is asked with the model's context window, as a turn is. A load
+        that fails is said in the log, and nowhere else.
+        """
+        offered = self.get(name)
+        if not isinstance(offered.chat, LoadsAhead):
+            return False
+        last = self._loads.get(offered.name)
+        if last is not None and not last.done():
+            return True  # under way, whatever its server does meanwhile
+        if offered.gate is not None and offered.gate.full:
+            return False
+        self._loads[offered.name] = asyncio.create_task(
+            self._load(offered, offered.chat), name=f"load-{offered.name}"
+        )
+        return True
+
+    async def stop_loading(self) -> None:
+        """Cancel the loads under way, and wait until each has ended. For whoever closes
+        the providers' clients, or stops using the catalog: no load is left pending."""
+        loading = [task for task in self._loads.values() if not task.done()]
+        for task in loading:
+            task.cancel()
+        await asyncio.gather(*loading, return_exceptions=True)
+
+    async def _load(self, offered: OfferedModel, chat: LoadsAhead) -> None:
+        """Nobody waits for this: what goes wrong ends here, and only the log hears of
+        it. A cancellation gets out as it came."""
+        try:
+            await chat.load(offered.model, context_window=offered.context_window)
+        except LLMError as error:
+            # Its kind, never its text: that is the server's, and no log line needs it.
+            logger.warning(
+                "model %s: it wasn't loaded ahead (%s)", offered.name, type(error).__name__
+            )
+        except Exception:
+            # Something of Actio's own, with its trace. A load carries nobody's words.
+            logger.exception("model %s: loading it ahead failed", offered.name)
+
     async def _ask(self, offered: OfferedModel) -> ModelStatus:
         declared = self._declared_thinking.get(offered.name, False)
         try:
@@ -312,8 +372,8 @@ async def build(
     ollama_url: str,
     transports: Mapping[str, httpx2.AsyncBaseTransport] | None = None,
 ) -> AsyncIterator[Catalog]:
-    """The catalog a checked file describes. Its providers' clients are closed on the
-    way out.
+    """The catalog a checked file describes. On the way out, the loads under way are
+    cancelled, and then its providers' clients are closed.
 
     `ollama_url` is where Ollama providers are, unless the file gives one its own `url`.
     `transports` replaces how a provider is reached, by the provider's name: tests pass
@@ -361,7 +421,11 @@ async def build(
             for name, entry in file.models.items()
         }
         declared = {name: bool(entry.thinking) for name, entry in file.models.items()}
-        yield Catalog(models, default=file.default, thinking=declared, titles=file.titles)
+        catalog = Catalog(models, default=file.default, thinking=declared, titles=file.titles)
+        # After the clients, so it is done before they are closed: a load under way is
+        # given up on while its connection is still there.
+        stack.push_async_callback(catalog.stop_loading)
+        yield catalog
 
 
 @asynccontextmanager
