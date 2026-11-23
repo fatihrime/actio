@@ -11,6 +11,8 @@ the middle is in `test_turns_live.py`, which runs a real server.
 
 import asyncio
 import json
+import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -565,7 +567,32 @@ async def test_each_kind_of_failure_has_a_code_and_words_for_a_person(
 
     assert chunk(response, "error")["errorText"] == explanation
     assert (await chat.read())["unanswered"]["error"] == code
-    assert "9000 tokens" not in response.text  # the server's own words stay in its log
+    assert "9000 tokens" not in response.text  # the server's own words aren't the reader's
+
+
+async def test_a_failed_turn_is_in_the_log_by_the_kind_of_its_models_error_never_its_text(
+    scripted: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An error's text can quote what the model had written, or what its server said of
+    the request. What people wrote stays out of the log, so the line names the error's
+    kind, and the code the turn is recorded with."""
+    quoting = ProviderError("Ollama sent a line that isn't JSON: 'My door code is 4471 and'")
+    _, browser = await scripted(quoting)
+    chat = Chat(browser)
+
+    await chat.ask("Hello?")
+
+    told = [
+        record
+        for record in caplog.records
+        if record.name == "actio.chat.answering" and "the model failed" in record.getMessage()
+    ]
+    assert [record.levelno for record in told] == [logging.WARNING]
+    assert re.fullmatch(
+        r"turn [0-9a-f-]{36}: the model failed \(ProviderError\), recorded as model_error",
+        told[0].getMessage(),
+    )
+    assert "4471" not in caplog.text
 
 
 async def test_a_question_that_got_no_answer_can_be_answered_again(chat: Chat) -> None:

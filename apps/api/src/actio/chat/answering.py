@@ -348,8 +348,16 @@ async def answer(
         else:
             raise StreamInterruptedError("the model's answer ended without saying why")
     except LLMError as error:
-        logger.warning("turn %s: the model failed (%s: %s)", turn_id, type(error).__name__, error)
-        ending = Ending("failed", collected.parts, error=code_for(error), first_word_at=first_word)
+        # Its kind, never its text: that can quote what the model had written, or what
+        # its server said of the request (ADR 0008, revision of 2026-11-23).
+        failed_as = code_for(error)
+        logger.warning(
+            "turn %s: the model failed (%s), recorded as %s",
+            turn_id,
+            type(error).__name__,
+            failed_as,
+        )
+        ending = Ending("failed", collected.parts, error=failed_as, first_word_at=first_word)
         for step in collected.close():
             await emit(step)
     except Exception:
