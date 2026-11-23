@@ -37,7 +37,7 @@ from actio.api import turns as turn_routes
 from actio.api import ui_stream
 from actio.chat import events
 from actio.core.settings import Settings
-from actio_llm import Finish, FinishReason, TextDelta, Timings, Usage
+from actio_llm import Finish, FinishReason, ReasoningDelta, TextDelta, Timings, Usage
 
 pytestmark = pytest.mark.anyio
 
@@ -115,6 +115,23 @@ async def test_an_answer_cut_off_at_the_limit_streams_what_was_recorded(scripted
     response = await turn(browser, "Count to a hundred.")
 
     as_recorded("cut_off.sse", response.text)
+
+
+async def test_a_thought_that_used_up_the_answer_streams_what_was_recorded(
+    scripted: Any,
+) -> None:
+    """A model asked to think, that was still thinking when it reached the longest a
+    single answer may be, far from the window's end: it wrote no answer. For the web
+    app, which says so, and offers to ask again."""
+    _, browser = await scripted(
+        ReasoningDelta("Let me count them all, "),
+        ReasoningDelta("one by one."),
+        Finish(FinishReason.LENGTH, Usage(input_tokens=30, output_tokens=512)),
+    )
+
+    response = await turn(browser, "How many words are there?", thinking=True)
+
+    as_recorded("thought_too_long.sse", response.text)
 
 
 async def test_an_answer_that_says_what_it_took_streams_what_was_recorded(

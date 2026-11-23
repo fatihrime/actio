@@ -66,10 +66,12 @@ of it was left to record its outcome in."""
 FINISH_REASONS = {
     "stop": "stop",
     "length": "length",
+    # The library has no finer word: the turn's record in the metadata says which limit.
+    "context_window": "length",
     "tool_calls": "tool-calls",
     "content_filter": "content-filter",
 }
-"""Why a model stopped, in the model clients' words and in the stream's."""
+"""Why a model stopped, in the words a turn is recorded with and in the stream's."""
 
 
 def event(chunk: Mapping[str, Any]) -> bytes:

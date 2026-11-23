@@ -273,6 +273,90 @@ async def test_an_answer_cut_off_at_the_limit_says_so(scripted: Any) -> None:
     assert model.requests[0].max_output_tokens == 512  # the catalog's limit for the model
 
 
+@pytest.mark.parametrize(
+    ("finish", "recorded"),
+    [
+        # What was read and written together is the scripted model's window, 4,096.
+        pytest.param(
+            Finish(FinishReason.LENGTH, Usage(input_tokens=4_000, output_tokens=96)),
+            "context_window",
+            id="at the window's end",
+        ),
+        pytest.param(
+            Finish(FinishReason.LENGTH, Usage(input_tokens=4_000, output_tokens=200)),
+            "context_window",
+            id="past it, by a server that counts oddly",
+        ),
+        pytest.param(
+            Finish(FinishReason.LENGTH, Usage(input_tokens=3_000, output_tokens=512)),
+            "length",
+            id="the answer's own limit, short of the window's end",
+        ),
+        pytest.param(Finish(FinishReason.LENGTH, None), "length", id="nothing counted"),
+        pytest.param(
+            Finish(FinishReason.STOP, Usage(input_tokens=4_000, output_tokens=96)),
+            "stop",
+            id="stopped by itself",
+        ),
+    ],
+)
+async def test_a_turn_says_which_limit_its_answer_reached(
+    scripted: Any, finish: Finish, recorded: str
+) -> None:
+    """The library's own word is `length` for both limits: the turn's record says which,
+    in the stream and in the conversation alike."""
+    _, browser = await scripted(TextDelta("One two"), finish)
+    chat = Chat(browser)
+
+    response = await chat.ask("Count to a hundred")
+
+    streamed = chunk(response, "finish")
+    stored = (await chat.read())["messages"][1]["metadata"]["turn"]
+    assert streamed["finishReason"] == ("stop" if recorded == "stop" else "length")
+    assert streamed["messageMetadata"]["turn"]["finish_reason"] == recorded
+    assert stored["finish_reason"] == recorded
+
+
+async def test_counts_a_turn_doesnt_keep_name_no_limit_for_it(scripted: Any) -> None:
+    """A server that says it wrote nothing, beside an answer that has words, isn't
+    believed: the turn keeps none of its counts. Then they don't say which limit ended
+    the answer either, though what the server said it read is the whole window."""
+    _, browser = await scripted(
+        TextDelta("One two"),
+        Finish(FinishReason.LENGTH, Usage(input_tokens=4_096, output_tokens=0)),
+    )
+    chat = Chat(browser)
+
+    response = await chat.ask("Count to a hundred")
+
+    streamed = chunk(response, "finish")["messageMetadata"]["turn"]
+    stored = (await chat.read())["messages"][1]["metadata"]["turn"]
+    for turn in (streamed, stored):
+        assert (turn["finish_reason"], turn["input_tokens"]) == ("length", None)
+
+
+async def test_an_answer_cut_at_what_its_usage_limit_left_it_reached_no_window(
+    scripted: Any, plans_with: Any
+) -> None:
+    """Near a usage limit the model is given less room, and the answer ends at it, far
+    from the window's end: the answer's own limit, as before, and the turn says that a
+    usage limit set it."""
+    model, browser = await scripted(
+        TextDelta("One two"),
+        Finish(FinishReason.LENGTH, Usage(input_tokens=40, output_tokens=200)),
+        plans=plans_with(guest=(300, 10_000)),
+    )
+    chat = Chat(browser)
+
+    response = await chat.ask("Count to a hundred")
+
+    turn = chunk(response, "finish")["messageMetadata"]["turn"]
+    assert model.requests[0].max_output_tokens < 512  # what the limit left it
+    assert (turn["finish_reason"], turn["capped_by_usage"]) == ("length", True)
+    stored = (await chat.read())["messages"][1]["metadata"]["turn"]
+    assert (stored["finish_reason"], stored["capped_by_usage"]) == ("length", True)
+
+
 # --- What the model is shown ----------------------------------------------------------
 
 

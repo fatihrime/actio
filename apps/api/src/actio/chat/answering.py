@@ -58,6 +58,7 @@ from actio_llm import (
     ChatRequest,
     ContextOverflowError,
     Finish,
+    FinishReason,
     LLMError,
     ModelNotFoundError,
     ProviderError,
@@ -107,6 +108,29 @@ def code_for(error: LLMError) -> str:
             return "answer_interrupted"
         case _:
             return "model_error"
+
+
+def reason_for(finish: Finish, usage: Usage | None, *, context_window: int | None) -> str:
+    """The reason a completed turn is recorded with, from the model's last event, the
+    counts the turn keeps (`usage`) and the window its request went out with.
+
+    A model's server says `length` for two limits: the one on a single answer's size,
+    and the end of the context window. Only the counts tell them apart. At its own
+    limit an answer has written what it was allowed, far from the window's end; at the
+    window's end what was read and written together is the window. So `length` with
+    the two counts together at the window, or past it as a server that counts oddly
+    may say, is `context_window`. Otherwise the model's own reason, `length` too when
+    the server counted nothing. See ADR 0014, revision "a turn says which limit its
+    answer reached"."""
+    reason = finish.reason
+    if (
+        reason is FinishReason.LENGTH
+        and usage is not None
+        and context_window is not None
+        and usage.input_tokens + usage.output_tokens >= context_window
+    ):
+        return "context_window"
+    return reason.value
 
 
 # --- What an answer does, step by step ------------------------------------------------
@@ -306,11 +330,14 @@ async def answer(
                         with anyio.CancelScope(shield=True):
                             await emit(step)
         if collected.finish is not None:
+            kept = _believed(collected.finish.usage, collected.parts, reserved, turn_id)
             ending = Ending(
                 "completed",
                 collected.parts,
-                finish_reason=collected.finish.reason.value,
-                usage=_believed(collected.finish.usage, collected.parts, reserved, turn_id),
+                finish_reason=reason_for(
+                    collected.finish, kept, context_window=request.context_window
+                ),
+                usage=kept,
                 timings=_kept(collected.finish.timings, turn_id),
                 first_word_at=first_word,
             )

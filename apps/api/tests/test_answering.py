@@ -152,6 +152,45 @@ def test_every_failure_of_a_model_call_has_a_code_and_an_explanation(
     assert answering.EXPLANATIONS[code].endswith(".")
 
 
+# --- Which limit an answer reached ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("reason", "usage", "window", "recorded"),
+    [
+        # What was read and written together is the window: its end.
+        (FinishReason.LENGTH, Usage(input_tokens=4_000, output_tokens=96), 4_096, "context_window"),
+        # Past it, as a server that counts oddly may say.
+        (
+            FinishReason.LENGTH,
+            Usage(input_tokens=4_000, output_tokens=200),
+            4_096,
+            "context_window",
+        ),
+        # One token short of it: the answer's own limit.
+        (FinishReason.LENGTH, Usage(input_tokens=4_000, output_tokens=95), 4_096, "length"),
+        # Nothing to tell the two apart by.
+        (FinishReason.LENGTH, None, 4_096, "length"),
+        (FinishReason.LENGTH, Usage(input_tokens=4_000, output_tokens=96), None, "length"),
+        # A model that stopped by itself stopped by itself, whatever the counts say.
+        (FinishReason.STOP, Usage(input_tokens=4_000, output_tokens=96), 4_096, "stop"),
+    ],
+)
+def test_a_turn_says_which_limit_its_answer_reached(
+    reason: FinishReason, usage: Usage | None, window: int | None, recorded: str
+) -> None:
+    assert answering.reason_for(Finish(reason, usage), usage, context_window=window) == recorded
+
+
+def test_which_limit_is_told_by_the_counts_the_turn_keeps() -> None:
+    """A count that can't be right isn't kept (`_believed`): nor does it name a limit."""
+    reported = Usage(input_tokens=4_000, output_tokens=96)
+
+    kept = answering.reason_for(Finish(FinishReason.LENGTH, reported), None, context_window=4_096)
+
+    assert kept == "length"
+
+
 # --- What a model is shown ------------------------------------------------------------
 
 

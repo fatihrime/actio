@@ -85,8 +85,12 @@ class TurnOut(Described):
     whoever asked stopped it; `failed`, because the model did; or `interrupted`, because
     the server that was writing it was restarted, or stopped answering."""
     finish_reason: str | None
-    """Why the model stopped, when it did by itself: `stop`, or `length` when it ran
-    into the limit on an answer's size."""
+    """Why the model stopped, when it did by itself. `stop`: it had finished. `length`:
+    it ran into the limit on a single answer's size. `context_window`: the conversation
+    and the answer together filled the model's context window. A model's server that
+    doesn't count what it read and wrote says `length` for both limits, and so do turns
+    recorded before the two were told apart. A provider may give other reasons, such as
+    `content_filter`."""
     error: str | None
     """For a failed turn, what went wrong, as a code: `model_unavailable`,
     `model_missing`, `context_overflow`, `model_refused`, `answer_interrupted`,

@@ -1747,7 +1747,7 @@
               }
             ],
             "title": "Finish Reason",
-            "description": "Why the model stopped, when it did by itself: `stop`, or `length` when it ran\ninto the limit on an answer's size."
+            "description": "Why the model stopped, when it did by itself. `stop`: it had finished. `length`:\nit ran into the limit on a single answer's size. `context_window`: the conversation\nand the answer together filled the model's context window. A model's server that\ndoesn't count what it read and wrote says `length` for both limits, and so do turns\nrecorded before the two were told apart. A provider may give other reasons, such as\n`content_filter`."
           },
           "error": {
             "anyOf": [
