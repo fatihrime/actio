@@ -73,10 +73,13 @@ function Window({ window, now }: { window: UsageWindow; now: number }) {
         aria-valuemax={100}
         aria-valuenow={Math.floor(percent)}
         aria-valuetext={`${label} used`}
-        className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"
+        // Where a system's own colours take the place of the page's, both grounds are
+        // gone: there the bar has a line around it, and is filled in the colour of
+        // the words (app/globals.css).
+        className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted forced-colors:border"
       >
         <div
-          className={`h-full rounded-full ${percent >= CLOSE ? "bg-caution" : "bg-primary"}`}
+          className={`h-full rounded-full forced-colors:bg-foreground ${percent >= CLOSE ? "bg-caution" : "bg-primary"}`}
           style={{ width: `${String(percent)}%` }}
         />
       </div>

@@ -167,7 +167,7 @@ export const Message = memo(function Message({
     // A question is shown as it was typed: someone who types a star means a star.
     return (
       <article aria-label="You" className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl bg-muted px-4 py-2.5 wrap-break-word whitespace-pre-wrap">
+        <div className="max-w-[85%] rounded-2xl bg-muted px-4 py-2.5 wrap-break-word whitespace-pre-wrap forced-colors:border">
           {message.parts.map((part, index) =>
             part.type === "text" ? <span key={index}>{part.text}</span> : null,
           )}
@@ -256,7 +256,10 @@ function Figures({ figures }: { figures: string[] }) {
           {index > 0 && (
             <span
               aria-hidden="true"
-              className="size-0.75 shrink-0 rounded-full bg-current"
+              // A dot is a ground and nothing else: where a system's colours take the
+              // place of the page's, it has the colour of the words by its role
+              // (app/globals.css).
+              className="size-0.75 shrink-0 rounded-full bg-current forced-colors:bg-foreground"
             />
           )}
           {figure}

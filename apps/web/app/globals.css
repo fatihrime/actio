@@ -42,6 +42,27 @@
   }
 }
 
+/* Where a system's own few colours take the place of the page's (`forced-colors`, as
+   Windows' contrast themes do), every ground below is the system's one ground. So what
+   a component sets apart by its ground alone gets something there that takes no
+   colour of the page's: a line around it, which the system colours
+   (`forced-colors:border`), an underline for the chosen one of a group, and for what
+   is a ground and nothing else, a meter's bar or a dot, the colour of the words by
+   its role (`forced-colors:bg-foreground`: the system leaves a colour of its own as
+   it is, and gives any other ground the page's). e2e/forced-colours.spec.ts and
+   e2e/scheme.spec.ts hold them. */
+
+/* The dialog that holds a link until the reader has seen its address is Streamdown's
+   own (ADR 0016), and its classes aren't the app's to write. Its button that opens
+   the link is a filled ground without a border, as two of the app's own buttons
+   are: its line is drawn from here. */
+@media (forced-colors: active) {
+  [data-streamdown="link-safety-modal"] button.bg-primary {
+    border-style: solid;
+    border-width: 1px;
+  }
+}
+
 /* A border with no colour of its own takes the border colour below, not the text's.
    Streamdown is written for that. */
 @layer base {

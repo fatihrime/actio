@@ -126,8 +126,10 @@ export function Row({
         onFollow={onOpen}
         aria-current={current ? "page" : undefined}
         title={label}
-        // Room for the two buttons, when they show.
-        className="peer block truncate rounded-lg px-3 py-2 text-sm group-focus-within:pr-16 group-hover:bg-muted group-hover:pr-16 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring aria-[current=page]:bg-muted aria-[current=page]:pr-16 aria-[current=page]:font-medium"
+        // Room for the two buttons, when they show. And a line around the conversation
+        // on the page where a system's own colours take the place of the page's: its
+        // ground is gone there (app/globals.css).
+        className="peer block truncate rounded-lg px-3 py-2 text-sm group-focus-within:pr-16 group-hover:bg-muted group-hover:pr-16 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring aria-[current=page]:bg-muted aria-[current=page]:pr-16 aria-[current=page]:font-medium forced-colors:aria-[current=page]:border"
       >
         {label}
       </InAppLink>
@@ -267,7 +269,7 @@ function ConfirmDelete({
           type="button"
           onClick={onDelete}
           disabled={deleting}
-          className="rounded-md bg-destructive px-3 py-1 font-medium text-destructive-foreground hover:bg-destructive/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
+          className="rounded-md bg-destructive px-3 py-1 font-medium text-destructive-foreground hover:bg-destructive/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60 forced-colors:border"
         >
           {deleting ? "Deleting…" : "Delete"}
         </button>

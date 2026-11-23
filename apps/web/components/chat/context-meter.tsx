@@ -54,11 +54,13 @@ const Filled = memo(function Filled({
         aria-valuemax={100}
         aria-valuenow={Math.floor(percent)}
         aria-valuetext={spoken}
-        // It gives way before the words do.
-        className="h-1.5 w-24 min-w-4 shrink-[100] overflow-hidden rounded-full bg-muted"
+        // It gives way before the words do. Where a system's own colours take the
+        // place of the page's, it has a line around it and is filled in the colour of
+        // the words, as the usage meter's bars are (app/globals.css).
+        className="h-1.5 w-24 min-w-4 shrink-[100] overflow-hidden rounded-full bg-muted forced-colors:border"
       >
         <div
-          className={`h-full rounded-full ${nearlyFull ? "bg-caution" : "bg-primary"}`}
+          className={`h-full rounded-full forced-colors:bg-foreground ${nearlyFull ? "bg-caution" : "bg-primary"}`}
           style={{ width: `${String(percent)}%` }}
         />
       </div>
