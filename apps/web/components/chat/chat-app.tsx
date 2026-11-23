@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import useSWR from "swr";
 
 import { SessionPlace } from "@/components/account/session-place";
@@ -27,6 +33,7 @@ import {
 } from "@/lib/location";
 import type { Place } from "@/lib/location";
 import { useMedia, WIDE } from "@/lib/media";
+import { followChoicesMadeElsewhere } from "@/lib/scheme";
 import { useSession } from "@/lib/session";
 import { useStoredSwitch } from "@/lib/stored-switch";
 import { useUsage } from "@/lib/usage";
@@ -140,9 +147,22 @@ export function ChatApp() {
   // start on: the script at the start of the body set it before the first paint
   // (lib/frame.ts), and the list's place, decided by it, is shown again after a
   // log-out, with no page loaded in between.
-  useEffect(() => {
+  //
+  // Before the browser paints, here and below: when React can't take the page over as
+  // the server sent it, it draws the page anew and takes every attribute off the
+  // root, both marks with them. Put back only after the paint, a frame showed the
+  // list's place to someone who had put it away, and the system's scheme to someone
+  // who had chosen the other (ADR 0015, revision "the reader chooses light or dark").
+  useLayoutEffect(() => {
     markListAway(putAway);
   }, [putAway]);
+
+  // Light or dark, as chosen in another window of this browser, or while the browser
+  // kept this page away: followed for as long as the app is on the page, whatever is
+  // on it, also with the list and its choice put away (lib/scheme.ts). The mark of the
+  // scheme isn't kept like the list's above: it changes only where the choice does,
+  // and once here, where it has come apart from what the browser remembers.
+  useLayoutEffect(() => followChoicesMadeElsewhere(), []);
 
   const onExists = useCallback(() => {
     go(conversationPath(id), { replace: true });

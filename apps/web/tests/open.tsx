@@ -9,6 +9,7 @@ import { SWRConfig } from "swr";
 import { vi } from "vitest";
 
 import { ChatApp } from "@/components/chat/chat-app";
+import { FRAME_SCRIPT } from "@/lib/frame";
 
 /** The whole app, as each of its pages shows it, with a cache of its own: what one
  * test read from the API isn't the next one's. */
@@ -47,6 +48,17 @@ export function open(
   );
   render(strict ? <StrictMode>{page}</StrictMode> : page);
   return userEvent.setup();
+}
+
+/** What the browser does before a page's first paint: run the script at the start of
+ * its body, which marks the page's root by what this browser remembers (lib/frame.ts).
+ * `open` doesn't, so that a test of what the page itself does with the marks starts
+ * without them. */
+export function runFrameScript(): void {
+  const script = document.createElement("script");
+  script.textContent = FRAME_SCRIPT;
+  document.body.prepend(script);
+  script.remove();
 }
 
 /** Type a question into the box, and send it. */

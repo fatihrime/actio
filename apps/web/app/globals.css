@@ -12,9 +12,34 @@
    `list-away:hidden` outweigh `md:block`, wherever each is written in the styles. */
 @custom-variant list-away (html[data-list-away] &);
 
-/* Follow the operating system's light or dark setting. */
+/* Light or dark: as the reader chose, or as the operating system is set, the default.
+   The page's root element says a choice from before the first paint (lib/frame.ts),
+   and the colours below follow. */
 :root {
   color-scheme: light dark;
+}
+:root[data-scheme="light"] {
+  color-scheme: light;
+}
+:root[data-scheme="dark"] {
+  color-scheme: dark;
+}
+
+/* `dark:…`: while the page is dark, as chosen or as the system is set. Streamdown colours
+   code with it, each token's dark theme's colour in a `dark:` class: Tailwind's own
+   variant follows the system alone, and would give a page chosen light the dark
+   theme's code. No component of the app's uses it. `:where()` leaves a `dark:` class
+   as weighty as the plain one beside it, as Tailwind's own does, so the order of the
+   styles still decides between them. */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-scheme="light"]) *) {
+      @slot;
+    }
+  }
+  &:where(:root[data-scheme="dark"] *) {
+    @slot;
+  }
 }
 
 /* A border with no colour of its own takes the border colour below, not the text's.
@@ -29,7 +54,7 @@
 
 /* The colours by role. Streamdown expects these names (they are shadcn/ui's), and the
    app's own components use them too. Each is a light and a dark colour, and the
-   browser picks by the setting above. The page itself keeps the browser's own
+   browser picks by the scheme above. The page itself keeps the browser's own
    background and text colours. */
 @theme {
   --color-background: Canvas;

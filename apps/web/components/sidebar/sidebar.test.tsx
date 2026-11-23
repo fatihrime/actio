@@ -795,7 +795,9 @@ describe("deleting a conversation", () => {
 
     await user.keyboard("{Escape}");
 
-    expect(screen.queryByRole("group")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "Delete “Flat tyres”?" }),
+    ).not.toBeInTheDocument();
     expect(api.to(DELETE)).toHaveLength(0);
   });
 

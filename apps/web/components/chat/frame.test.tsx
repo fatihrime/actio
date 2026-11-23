@@ -11,15 +11,42 @@
 // which only a real browser shows (e2e/frame.spec.ts). The narrow window's visitor
 // holds the rest: the frame is taken over as it was sent, and the session then fills
 // it as a narrow window wants.
+//
+// The scheme the reader chose is marked on the page's root by the script at the start
+// of the body, before React takes the page over, and the page changes that mark only
+// where the choice changes (lib/scheme.ts). While React takes the page over, the
+// choice reads as the server's, the system's: whatever marked the root from it then
+// would take the script's mark away, for a moment.
 import { act, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 
-import { LIST_HIDDEN_KEY } from "@/lib/frame";
+import { LIST_HIDDEN_KEY, SCHEME_KEY, SCHEME_MARK } from "@/lib/frame";
 import { fakeApi, GUEST, json, later } from "@/tests/fake-api";
-import { app, narrowWindow } from "@/tests/open";
+import { app, narrowWindow, runFrameScript } from "@/tests/open";
+
+/** From now on, note each change of the scheme's mark on the page's root. Hands back
+ * what reads the notes: what the mark was each time it changed. */
+function watchTheSchemesMark(): () => (string | null)[] {
+  const changes: (string | null)[] = [];
+  const note = (records: MutationRecord[]) => {
+    changes.push(...records.map((record) => record.oldValue));
+  };
+  const observer = new MutationObserver(note);
+  observer.observe(document.documentElement, {
+    attributeFilter: [SCHEME_MARK],
+    attributeOldValue: true,
+  });
+  onTestFinished(() => {
+    observer.disconnect();
+  });
+  return () => {
+    note(observer.takeRecords());
+    return changes;
+  };
+}
 
 /** Hydrate `html`, made by the server, with `node`, as the browser does, and hand
  * back what React had to say about it: the mismatches it recovered from, and
@@ -72,6 +99,20 @@ describe("the helper that hydrates", () => {
   );
 });
 
+describe("the note of the scheme's mark", () => {
+  it("has each change, even one that is undone at once", () => {
+    // Without this, the tests below could pass with a mark taken away for a moment.
+    runFrameScript(); // nothing remembered: no mark
+    const changes = watchTheSchemesMark();
+
+    document.documentElement.setAttribute(SCHEME_MARK, "dark");
+    document.documentElement.removeAttribute(SCHEME_MARK);
+    document.documentElement.setAttribute(SCHEME_MARK, "dark");
+
+    expect(changes()).toEqual([null, "dark", null]);
+  });
+});
+
 describe("the page's frame", () => {
   it.each([
     {
@@ -94,6 +135,15 @@ describe("the page's frame", () => {
       expanded: "false",
       listed: false,
     },
+    {
+      visitor: "dark chosen on an earlier visit",
+      before: () => {
+        window.localStorage.setItem(SCHEME_KEY, "dark");
+        runFrameScript();
+      },
+      expanded: "true",
+      listed: true,
+    },
   ])(
     "is taken over from the server as it was sent, with $visitor",
     async ({ before, expanded, listed }) => {
@@ -102,6 +152,8 @@ describe("the page's frame", () => {
       // before the browser remembers anything.
       const html = renderToString(app());
       before();
+      const marked = document.documentElement.getAttribute(SCHEME_MARK);
+      const changes = watchTheSchemesMark();
       const session = later(() => json(201, GUEST));
       fakeApi().on("POST /api/session/guest", session.answer);
 
@@ -121,6 +173,9 @@ describe("the page's frame", () => {
       } else {
         expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
       }
+      // The scheme is as the script marked it, and was all along.
+      expect(document.documentElement.getAttribute(SCHEME_MARK)).toBe(marked);
+      expect(changes()).toEqual([]);
     },
   );
 });

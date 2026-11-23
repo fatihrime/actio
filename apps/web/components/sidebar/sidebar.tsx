@@ -12,9 +12,11 @@ import { conversationPath, SIGNUP } from "@/lib/location";
 import type { UsageLimits } from "@/lib/usage";
 
 import { Row } from "./row";
+import { ThemeChoice } from "./theme";
 
 /** The list of the caller's conversations, most recently active first: open one,
- * rename it, delete it. Under it, how much of the usage limits is used.
+ * rename it, delete it. Under it, how much of the usage limits is used, and last,
+ * whether the page is light or dark.
  *
  * Both are read by the page around it, which also knows when to read them again
  * (`lib/chat/list.ts`, `lib/usage.ts`). What is shown here is always what the server
@@ -188,6 +190,7 @@ export function Sidebar({
           to keep them.
         </p>
       )}
+      <ThemeChoice />
     </>
   );
 }

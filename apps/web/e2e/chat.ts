@@ -91,6 +91,18 @@ export class Chat {
     return this.usage.getByRole("meter", { name });
   }
 
+  /** Under the list of conversations, last: whether the page is light or dark. */
+  get theme(): Locator {
+    return this.page.getByRole("group", { name: "Theme" });
+  }
+
+  /** Choose "System", "Light" or "Dark" there, as a person does, by its words, and
+   * wait until it is chosen. */
+  async chooseTheme(name: "System" | "Light" | "Dark"): Promise<void> {
+    await this.theme.getByText(name, { exact: true }).click();
+    await expect(this.theme.getByRole("radio", { name })).toBeChecked();
+  }
+
   /** The header's link to an account's own page: there once its owner is logged in. */
   accountLink(email: string): Locator {
     return this.header.getByRole("link", { name: `Account: ${email}` });
@@ -171,10 +183,20 @@ export interface Outside {
   expected: string[];
 }
 
+/** What the page's own scripts threw. Every error is noted, and a test ends with a
+ * failure at any of them, unless it broke the page on purpose and said with what. */
+export interface Thrown {
+  errors: string[];
+  /** From here on, the test brings about an error that matches `known`. An error
+   * thrown before this was said is no such error, and the test fails too if none
+   * that matches comes after it. */
+  expect: (known: RegExp) => void;
+}
+
 export const test = base.extend<{
   chat: Chat;
   outside: Outside;
-  unbroken: undefined;
+  thrown: Thrown;
 }>({
   // Playwright calls the second argument `use`. It has another name here, because the
   // linter takes a call to `use` for React's hook of that name.
@@ -204,13 +226,35 @@ export const test = base.extend<{
     { auto: true },
   ],
 
-  // No test passes on a page whose scripts broke.
-  unbroken: [
+  // No test passes on a page whose scripts broke, unless it broke them itself and
+  // says how.
+  thrown: [
     async ({ page }, give) => {
       const errors: string[] = [];
+      /** What a test said it brings about, and how many errors there were by then. */
+      const expected: { known: RegExp; after: number }[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await give(undefined);
-      expect(errors, "errors in the page's scripts").toEqual([]);
+      await give({
+        errors,
+        expect: (known) => {
+          expected.push({ known, after: errors.length });
+        },
+      });
+      const broughtAbout = (error: string, at: number) =>
+        expected.some(({ known, after }) => at >= after && known.test(error));
+      expect(
+        errors.filter((error, at) => !broughtAbout(error, at)),
+        "errors in the page's scripts",
+      ).toEqual([]);
+      expect(
+        expected
+          .filter(
+            ({ known, after }) =>
+              !errors.slice(after).some((error) => known.test(error)),
+          )
+          .map(({ known }) => String(known)),
+        "errors a test said it brings about, which never came",
+      ).toEqual([]);
     },
     { auto: true },
   ],

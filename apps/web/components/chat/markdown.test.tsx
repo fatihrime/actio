@@ -5,6 +5,15 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
 import { code } from "@/lib/chat/code-colours";
+import {
+  answer,
+  conversation,
+  fakeApi,
+  json,
+  question,
+} from "@/tests/fake-api";
+import { open } from "@/tests/open";
+import { RECORDED } from "@/tests/recorded";
 
 import Markdown from "./markdown";
 
@@ -384,8 +393,9 @@ describe("diagrams", () => {
 
   const DIAGRAM = ["```mermaid", "flowchart TD", "  A --> B", "```"].join("\n");
 
-  test("a diagram is drawn", async () => {
-    onScreen();
+  /** Draw diagrams with a stand-in for the library, which writes the theme it was
+   * asked for and the diagram's source into the drawing's title. */
+  function drawnWithTheirTheme() {
     vi.doMock("@streamdown/mermaid", () => ({
       mermaid: {
         getMermaid: (config: { theme: string }) => ({
@@ -396,10 +406,55 @@ describe("diagrams", () => {
         }),
       },
     }));
+  }
+
+  test("a diagram is drawn", async () => {
+    onScreen();
+    drawnWithTheirTheme();
     const { container } = show(DIAGRAM);
 
     await waitFor(() => {
       expect(container.querySelector("svg title")).toHaveTextContent(
+        "default: flowchart TD A --> B",
+      );
+    });
+    vi.doUnmock("@streamdown/mermaid");
+  });
+
+  test("a diagram is drawn anew in the dark theme once the reader chooses a dark page", async () => {
+    // Through the whole app: the reader chooses under the list of conversations
+    // (components/sidebar/theme.tsx), and the diagram asks lib/scheme.ts.
+    onScreen();
+    drawnWithTheirTheme();
+    fakeApi().on("GET /api/conversations/*", () =>
+      json(
+        200,
+        conversation(RECORDED.conversation, [
+          question(RECORDED.question, "Draw it."),
+          answer(RECORDED.answer, DIAGRAM, RECORDED.question),
+        ]),
+      ),
+    );
+    const user = open(`/c/${RECORDED.conversation}`);
+    const drawn = await screen.findByRole("article", { name: "Actio" });
+    await waitFor(() => {
+      expect(drawn.querySelector("svg title")).toHaveTextContent(
+        "default: flowchart TD A --> B",
+      );
+    });
+
+    await user.click(screen.getByRole("radio", { name: "Dark" }));
+
+    await waitFor(() => {
+      expect(drawn.querySelector("svg title")).toHaveTextContent(
+        "dark: flowchart TD A --> B",
+      );
+    });
+
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+
+    await waitFor(() => {
+      expect(drawn.querySelector("svg title")).toHaveTextContent(
         "default: flowchart TD A --> B",
       );
     });

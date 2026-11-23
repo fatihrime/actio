@@ -4,7 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, configure } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
-import { LIST_AWAY_MARK } from "@/lib/frame";
+import { LIST_AWAY_MARK, SCHEME_MARK } from "@/lib/frame";
 
 // How long a test waits for something to appear, at the most. A stored conversation,
 // and an answer's words, are shown once the code that reads markdown is here (ADR 0016,
@@ -40,9 +40,10 @@ afterEach(() => {
     cleanup();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
-    // The mark of a list put away is on the page's root element (lib/frame.ts), which
-    // outlives a test's components.
+    // The marks of a list put away and of the scheme chosen are on the page's root
+    // element (lib/frame.ts), which outlives a test's components.
     document.documentElement.removeAttribute(LIST_AWAY_MARK);
+    document.documentElement.removeAttribute(SCHEME_MARK);
   }
   vi.useRealTimers(); // a test may have set the clock (./clock.ts)
 });
