@@ -30,9 +30,9 @@ from actio import worker
 from actio.api import turns as turn_routes
 from actio.api import ui_stream
 from actio.catalog import Catalog, Gate
+from actio.chat import conversations, running, turns
 from actio.chat import events as turn_events
 from actio.chat import readers as turn_readers
-from actio.chat import running, turns
 from actio.chat.events import EventsUnavailableError, TurnEvents
 from actio.chat.models import Conversation, Message, Turn
 from actio.chat.parts import ReasoningPart, TextPart
@@ -995,6 +995,94 @@ async def test_a_turn_given_up_on_with_what_it_had_written_is_left_so_when_it_en
     assert (await count(db, Message), await count(db, UsageEntry)) == (2, 0)
     assert [(w["used"], w["reserved"]) for w in usage["windows"]] == [(0, 0), (0, 0)]
     assert said(reader) == "Sorry, I'm late."  # whoever read along saw it written
+
+
+# --- What the readers of a turn whose outcome wasn't recorded are told ----------------
+
+
+def endings_said(response: httpx.Response) -> list[str]:
+    """The status of the turn in each chunk of a stream that carries it."""
+    return [
+        c["messageMetadata"]["turn"]["status"]
+        for c in chunks(response)[:-1]
+        if "messageMetadata" in c
+    ]
+
+
+async def test_the_readers_of_a_turn_that_ends_after_it_was_given_up_on_are_not_told_it_completed(
+    scripted: Any,
+    db: AsyncSession,
+    clock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Its process was only slow. Its record is what giving up wrote: interrupted, with
+    its draft as its answer, and no counts. So its stream says nothing of the ending the
+    process saw, no `finish` and no metadata of a completed turn, and ends in an error
+    in words for a person: the page reads the conversation then. A reader who joined
+    while the turn ran is told the same, byte for byte."""
+    monkeypatch.setattr(turns, "BEAT", timedelta(milliseconds=10))
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("Sorry, "), hold, TextDelta("I'm late."), DONE)
+    chat = Chat(browser)
+    asked = chat.asking()
+    await held(model)
+    joined = chat.reading_along(await chat.running_turn())
+    await asyncio.sleep(0.05)  # it reads along before the turn is given up on
+    clock.advance(seconds=20)
+    await beaten(lambda: said_alive_at(db, clock.now))  # with what was written by then
+
+    async def lost(*_: Any, **__: Any) -> None:
+        """A beat that doesn't reach the database."""
+
+    monkeypatch.setattr(turns, "still_alive", lost)
+    clock.advance(seconds=turns.STALE_AFTER.total_seconds())
+    given_up_on = await chat.read()
+    hold.set()
+    [reader, follower] = await ended(asked, joined)
+    afterwards = await chat.read()
+    usage = (await browser.get("/api/usage")).json()
+
+    assert said(reader) == "Sorry, I'm late."  # whoever read along saw it written
+    assert kinds(reader)[-3:] == ["text-end", "error", "[DONE]"]
+    assert endings_said(reader) == ["running"]  # the `start` chunk's, and no other
+    assert chunk(reader, "error")["errorText"] == ui_stream.GIVEN_UP
+    assert follower.text == reader.text
+    assert afterwards == given_up_on
+    _, answer = afterwards["messages"]
+    assert answer["parts"] == [{"type": "text", "text": "Sorry, "}]
+    turn = answer["metadata"]["turn"]
+    assert turn["status"] == "interrupted"
+    counts = ("input_tokens", "output_tokens", "context_tokens", "credits")
+    assert [turn[member] for member in counts] == [None, None, None, None]
+    assert "it ended after it had been given up on" in caplog.text
+    assert await count(db, UsageEntry) == 0
+    assert [(w["used"], w["reserved"]) for w in usage["windows"]] == [(0, 0), (0, 0)]
+
+
+async def test_the_reader_of_a_turn_whose_conversation_is_gone_when_it_ends_is_not_told_it_completed(
+    scripted: Any, db: AsyncSession
+) -> None:
+    """Deleted by another process of the API, which doesn't write the turn, and so can't
+    stop it first: nothing is left to record the turn's outcome in."""
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("Half an "), hold, TextDelta("answer."), DONE)
+    chat = Chat(browser)
+    asked = chat.asking()
+    await held(model)
+
+    elsewhere = await db.get(Conversation, chat.id)
+    assert elsewhere is not None
+    await conversations.delete(db, elsewhere)
+    await db.commit()
+    hold.set()
+    [reader] = await ended(asked)
+
+    assert said(reader) == "Half an answer."
+    assert kinds(reader)[-3:] == ["text-end", "error", "[DONE]"]
+    assert endings_said(reader) == ["running"]
+    assert chunk(reader, "error")["errorText"] == ui_stream.GONE
+    assert (await browser.get(chat.path)).status_code == 404
 
 
 # --- A shutdown -----------------------------------------------------------------------

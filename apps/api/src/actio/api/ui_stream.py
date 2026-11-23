@@ -52,6 +52,17 @@ LOST = "The connection to this answer was lost. It may still be being written."
 """What a reader is told when what the turn streams can no longer be read, while the
 turn itself may be running on. Whoever shows the conversation should read it again."""
 
+GIVEN_UP = (
+    "This answer was given up on before it ended. The conversation shows what was kept of it."
+)
+"""What a reader is told when a turn ended after it had been given up on: its record is
+what giving up wrote, not the ending its reader saw arrive. Whoever shows the
+conversation should read it again."""
+
+GONE = "This conversation was deleted while its answer was being written."
+"""What a reader is told when a turn ended after its conversation was deleted: nothing
+of it was left to record its outcome in."""
+
 FINISH_REASONS = {
     "stop": "stop",
     "length": "length",

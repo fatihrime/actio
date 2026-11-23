@@ -1,8 +1,9 @@
 """Following a model's answer as it streams, and making sure the turn gets recorded.
 
 `answer` asks a model and hands on what it writes, as `Step`s: a part of the answer
-opens, grows, closes. It returns `Ended`, after the turn was written to the database.
-Whatever happens on the way, the turn doesn't stay `running`:
+opens, grows, closes. It returns `Ended`, after the turn was written to the database,
+or was found given up on or deleted meanwhile (`Ended.recorded`). Whatever happens on
+the way, the turn doesn't stay `running`:
 
 - the model finishes: `completed`, with the whole answer;
 - the model fails: `failed`, with a short code for what went wrong, and whatever it
@@ -139,11 +140,17 @@ class Closed:
 
 @dataclass(frozen=True, slots=True)
 class Ended:
-    """The turn is over and recorded."""
+    """The turn is over, and its outcome was written, or found to have no place."""
 
     ending: Ending
+    """How the turn ended, as its process saw it."""
     at: datetime
     """When it was recorded: the turn's `finished_at`, and its answer's `created_at`."""
+    recorded: turns.Recorded
+    """What became of the outcome (`turns.finish`). `recorded`: `ending` is the turn's
+    record. `left`: the turn had been given up on meanwhile, and its record is what
+    giving up wrote, not `ending`. `gone`: its conversation was deleted meanwhile, and
+    nothing of it is left to record anything in."""
     credits: int | None = None
     """What the turn cost its account. `None`: nothing, and nothing was written to the
     usage ledger."""
@@ -334,7 +341,7 @@ async def answer(
             finished = clock()
             with anyio.CancelScope(shield=True):
                 await asyncio.wait({beats})  # so that no beat is written after the outcome
-                credits, warnings = await _record(
+                recorded, credits, warnings = await _record(
                     open_session,
                     conversation_id,
                     turn_id,
@@ -345,7 +352,7 @@ async def answer(
                     reserved,
                     ask_for_title=ask_for_title,
                 )
-    return Ended(ending, finished, credits, warnings)
+    return Ended(ending, finished, recorded, credits, warnings)
 
 
 @asynccontextmanager
@@ -542,11 +549,12 @@ async def _record(
     reserved: Reserved,
     *,
     ask_for_title: bool = False,
-) -> tuple[int | None, tuple[UsageWarning, ...]]:
+) -> tuple[turns.Recorded, int | None, tuple[UsageWarning, ...]]:
     """Write how the turn ended, and what it used, in one transaction, with the job that
     asks for the conversation's title when it is due (`turns.finish`). Then tell the
     counters, and once they were told, note that they were, in a transaction of its
-    own. Returns what it cost, and the warnings the counters gave.
+    own. Returns what became of the outcome, as `turns.finish` says it, what the turn
+    cost, and the warnings the counters gave.
 
     In that order, because the counters can be lost and are then rebuilt from the
     ledger: what they have counted must be in the ledger already. What they weren't
@@ -594,12 +602,12 @@ async def _record(
         raise
     if credits is None:
         await usage.release(reserved, now=now)
-        return None, ()
+        return recorded, None, ()
     warnings = await usage.settle(reserved, credits, now=now)
     if warnings is None:
-        return credits, ()  # the counters weren't told: `settle` said so in the log
+        return recorded, credits, ()  # the counters weren't told: `settle` said so in the log
     await _counted(open_session, turn_id, usage, reserved)
-    return credits, warnings
+    return recorded, credits, warnings
 
 
 async def _counted(

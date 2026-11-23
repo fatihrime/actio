@@ -604,6 +604,14 @@ async def _write(
         await out.send({"type": "error", "errorText": answering.EXPLANATIONS["internal_error"]})
         await out.end()
         raise
+    if ended.recorded != "recorded":
+        # Its outcome wasn't recorded: the turn had been given up on meanwhile, or is
+        # gone with its conversation. The stream says nothing of an ending that isn't
+        # the record's. Readers are told, and read the conversation.
+        lost = ui_stream.GIVEN_UP if ended.recorded == "left" else ui_stream.GONE
+        await out.send({"type": "error", "errorText": lost})
+        await out.end()
+        return
     about = _metadata(
         begun, answer_id, _ended(running, ended), ended.at, written=bool(ended.ending.parts)
     )

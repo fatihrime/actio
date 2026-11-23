@@ -192,6 +192,27 @@ async def test_an_answer_that_was_stopped_streams_what_was_recorded(scripted: An
     as_recorded("stopped.sse", response.text)
 
 
+async def test_an_answer_that_ends_after_it_was_given_up_on_streams_what_was_recorded(
+    scripted: Any, clock: Any
+) -> None:
+    """Its process was only slow: someone read the conversation a minute after the turn
+    last said it was alive, and gave up on it. The answer that ends after that is not
+    the turn's record, so its reader isn't told that it completed: the stream ends in an
+    error, in the API's words, and the page reads the conversation."""
+    hold = asyncio.Event()
+    model, browser = await scripted(TextDelta("Sorry, "), hold, TextDelta("I'm late."), DONE)
+    asked = asyncio.create_task(turn(browser, "Are you there?"))
+    await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
+
+    clock.advance(seconds=60)  # no beat in the meantime: under test they are 15 real seconds apart
+    given_up_on = (await browser.get(f"/api/conversations/{CONVERSATION}")).json()
+    hold.set()
+    response = await asyncio.wait_for(asked, PATIENCE_S)
+
+    assert given_up_on["unanswered"]["status"] == "interrupted"
+    as_recorded("given_up.sse", response.text)
+
+
 async def test_reading_along_with_a_turn_whose_stream_is_gone_streams_what_was_recorded(
     scripted: Any, settings: Settings, valkey_url: str
 ) -> None:
