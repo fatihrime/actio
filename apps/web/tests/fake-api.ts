@@ -400,6 +400,7 @@ export function turn(changes: Partial<Turn> = {}): Turn {
     credits: 9,
     capped_by_usage: false,
     started_at: MOMENT,
+    first_word_at: MOMENT,
     finished_at: MOMENT,
     ...changes,
   };

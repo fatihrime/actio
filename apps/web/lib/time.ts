@@ -57,6 +57,27 @@ export function timeLeft(ms: number): string {
   return both(Math.floor(hours / 24), "day", hours % 24, "hour");
 }
 
+/** How long something took that lasted `ms` milliseconds: "240 ms" under a second, to
+ * the nearest ten and "10 ms" at the least; "1.2 s" under ten seconds; "42 s" under a
+ * minute; then "1 min 5 s". A time that rounds up to the next step is said in that
+ * step's words: 996 ms is "1.0 s", and 59.6 seconds "1 min". */
+export function timeTaken(ms: number): string {
+  const tens = Math.max(10, Math.round(ms / 10) * 10);
+  if (tens < 1000) {
+    return `${String(tens)} ms`;
+  }
+  const tenths = Math.round(ms / 100) / 10;
+  if (tenths < 10) {
+    return `${tenths.toFixed(1)} s`;
+  }
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) {
+    return `${String(seconds)} s`;
+  }
+  const minutes = `${String(Math.floor(seconds / 60))} min`;
+  return seconds % 60 === 0 ? minutes : `${minutes} ${String(seconds % 60)} s`;
+}
+
 function count(amount: number, unit: string): string {
   return `${String(amount)} ${unit}${amount === 1 ? "" : "s"}`;
 }

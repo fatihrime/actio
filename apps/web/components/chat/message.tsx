@@ -1,6 +1,8 @@
 import { Component, memo, useEffect, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 
+import { figuresOf } from "@/lib/chat/figures";
+import { hasContent, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
 
 // Its type alone: the code comes apart from the page, below.
@@ -176,14 +178,18 @@ export const Message = memo(function Message({
   return <Answer message={message} writing={writing} />;
 });
 
-/** A model's answer: what it thought, and its words.
+/** A model's answer: what it thought, its words, and what it took.
  *
  * None of them is on the page while the renderer is on its way, whether the answer is
  * still arriving or already complete, until the page's wait for it is over
  * (`useWaitsForRenderer`). Meanwhile the answer says what it says before its first
  * word, once. Then all of them are shown at once, as markdown from their first render,
  * or as written when the wait ran out. It asks for the renderer as soon as it is on the
- * page, before its first word. */
+ * page, before its first word.
+ *
+ * What the answer took comes under it, after its article, once its words are shown and
+ * its turn has ended, as its record says (`Figures`): nothing of it while the answer
+ * arrives. */
 function Answer({
   message,
   writing,
@@ -195,20 +201,62 @@ function Answer({
     (part) => part.type === "text" || part.type === "reasoning",
   );
   const waits = useWaitsForRenderer(shown.length > 0);
+  const turn = turnOf(message);
+  const figures =
+    !writing && !waits && turn !== null && hasContent(message)
+      ? figuresOf(turn)
+      : [];
+  // The article is the model's words and nothing else. What the page says about the
+  // answer stands after it, as the notice of how a turn ended does (chat.tsx).
   return (
-    <article aria-label="Actio" className="space-y-3">
-      {!waits &&
-        shown.map((part, index) => {
-          // Only the last part can still be arriving.
-          const arriving = writing && index === shown.length - 1;
-          return part.type === "reasoning" ? (
-            <Reasoning key={index} text={part.text} writing={arriving} />
-          ) : (
-            <Words key={index} text={part.text} writing={arriving} />
-          );
-        })}
-      {(waits || (writing && shown.length === 0)) && <Waiting />}
-    </article>
+    <>
+      <article aria-label="Actio" className="space-y-3">
+        {!waits &&
+          shown.map((part, index) => {
+            // Only the last part can still be arriving.
+            const arriving = writing && index === shown.length - 1;
+            return part.type === "reasoning" ? (
+              <Reasoning key={index} text={part.text} writing={arriving} />
+            ) : (
+              <Words key={index} text={part.text} writing={arriving} />
+            );
+          })}
+        {(waits || (writing && shown.length === 0)) && <Waiting />}
+      </article>
+      {figures.length > 0 && <Figures figures={figures} />}
+    </>
+  );
+}
+
+/** What an answer took, in one quiet line under it: how fast its model wrote, how long
+ * its first word took, what it cost (`figuresOf`). There for everyone, not on hover,
+ * which a phone and a keyboard don't have. A list a screen reader names, with an item a
+ * figure; the dots between them are drawn, and have nothing to say. It is the answer's
+ * next sibling in the log, which puts `gap-6` between its children: a margin of less
+ * than nothing brings it to 8 px under its answer, so that it reads as that answer's. */
+function Figures({ figures }: { figures: string[] }) {
+  return (
+    <ul
+      // A list without its marks is no list to Safari's screen reader unless it says so.
+      role="list"
+      aria-label="What this answer took"
+      // The log is a live region, which says what is added to it. This is no news:
+      // it is there for whoever looks for it, and isn't read out after every answer.
+      aria-live="off"
+      className="-mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"
+    >
+      {figures.map((figure, index) => (
+        <li key={figure} className="flex items-center gap-2">
+          {index > 0 && (
+            <span
+              aria-hidden="true"
+              className="size-0.75 shrink-0 rounded-full bg-current"
+            />
+          )}
+          {figure}
+        </li>
+      ))}
+    </ul>
   );
 }
 

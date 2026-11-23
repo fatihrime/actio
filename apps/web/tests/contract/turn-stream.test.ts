@@ -24,8 +24,12 @@ interface Metadata {
     finish_reason: string | null;
     error: string | null;
     output_tokens: number | null;
+    generation_ms: number | null;
     credits: number | null;
     capped_by_usage: boolean;
+    started_at: string;
+    first_word_at: string | null;
+    finished_at: string | null;
   };
 }
 
@@ -176,6 +180,35 @@ describe("a recorded turn, read by the ai package", () => {
     });
     // The fake model read 30 tokens and wrote 6, at a credit each.
     expect(last(states).metadata?.turn.credits).toBe(36);
+  });
+
+  it("carries in the metadata what the page says an answer took", async () => {
+    // Recorded with a model that says how long it took to write, and a clock that
+    // moved between the question, the first word and the end.
+    const { states, errors } = await replay("figures.sse");
+
+    expect(errors).toEqual([]);
+    expect(last(states).parts).toEqual([
+      { type: "step-start" },
+      {
+        type: "text",
+        text: "Thirty-four tokens, in four seconds.",
+        state: "done",
+      },
+    ]);
+    expect(states[0]?.metadata?.turn).toMatchObject({
+      status: "running",
+      first_word_at: null,
+    });
+    expect(last(states).metadata?.turn).toMatchObject({
+      status: "completed",
+      output_tokens: 34,
+      generation_ms: 4000,
+      started_at: "2026-11-10T12:00:00Z",
+      first_word_at: "2026-11-10T12:00:01.200000Z",
+      finished_at: "2026-11-10T12:00:03.200000Z",
+      credits: 1234,
+    });
   });
 
   it("takes a usage warning as a chunk of the stream, and keeps it out of the message", async () => {

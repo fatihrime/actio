@@ -874,6 +874,33 @@ describe("an answer that arrives while the code is on its way", () => {
     expect(await screen.findByText("two bike")).toHaveClass("font-semibold");
   });
 
+  it("says what it took only once its words are shown", async () => {
+    // The clock stands still: the page's wait doesn't run out. The answer has ended,
+    // and its turn has every figure (`figures.sse`).
+    clockAt();
+    const arrive = holdCode();
+    fakeApi().on(TURNS, () => streamed("figures.sse"));
+    const { ask, open } = await newPage();
+    const user = open();
+    await screen.findByLabelText("Message");
+
+    await ask(user, "How fast was that?");
+    await screen.findByRole("button", { name: "Send" });
+    const shown = screen.getByRole("article", { name: "Actio" });
+    await afterAMoment();
+    expect(shown).toHaveTextContent(ONLY_WAITING);
+    expect(
+      screen.queryByRole("list", { name: "What this answer took" }),
+    ).not.toBeInTheDocument();
+
+    arrive();
+
+    expect(
+      await screen.findByRole("list", { name: "What this answer took" }),
+    ).toBeVisible();
+    expect(shown).toHaveTextContent("Thirty-four tokens, in four seconds.");
+  });
+
   it("is shown as written at once when the code turns out not to be had", async () => {
     // The clock stands still: nothing is shown for having waited.
     clockAt();

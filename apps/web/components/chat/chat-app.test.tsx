@@ -390,7 +390,9 @@ describe("markdown", () => {
       await screen.findByRole("heading", { level: 2, name: "Parts" }),
     ).toBeVisible();
     expect(
-      screen.getAllByRole("listitem").map((item) => item.textContent),
+      within(screen.getByRole("article", { name: "Actio" }))
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
     ).toEqual(["The saddle", "The chain"]);
   });
 });

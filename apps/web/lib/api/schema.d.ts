@@ -696,6 +696,8 @@ export interface components {
              * Format: date-time
              */
             started_at: string;
+            /** First Word At */
+            first_word_at: string | null;
             /** Finished At */
             finished_at: string | null;
         };

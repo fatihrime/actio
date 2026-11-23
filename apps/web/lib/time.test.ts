@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { atTime, timeLeft } from "./time";
+import { atTime, timeLeft, timeTaken } from "./time";
 
 // The tests' time zone is UTC (vitest.config.mts). Between a time and its "AM" or
 // "PM" the browser puts a space that doesn't break, which `\s` matches.
@@ -64,5 +64,32 @@ describe("timeLeft", () => {
   it("never says that no time is left", () => {
     expect(timeLeft(0)).toBe("1 second");
     expect(timeLeft(-5000)).toBe("1 second");
+  });
+});
+
+describe("timeTaken", () => {
+  it.each([
+    // Under a second: milliseconds, to the nearest ten, and never none.
+    [0, "10 ms"],
+    [4, "10 ms"],
+    [15, "20 ms"],
+    [244, "240 ms"],
+    [994, "990 ms"],
+    // From a second to under ten: with one decimal.
+    [995, "1.0 s"],
+    [1000, "1.0 s"],
+    [1234, "1.2 s"],
+    [9949, "9.9 s"],
+    // From ten seconds to under a minute: whole seconds.
+    [9950, "10 s"],
+    [42_400, "42 s"],
+    [59_499, "59 s"],
+    // From a minute on: minutes and seconds.
+    [59_500, "1 min"],
+    [60_000, "1 min"],
+    [65_000, "1 min 5 s"],
+    [125_400, "2 min 5 s"],
+  ])("says %d ms as %s", (ms, words) => {
+    expect(timeTaken(ms)).toBe(words);
   });
 });
