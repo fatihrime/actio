@@ -214,8 +214,8 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 **"This is too much to send at once"**
 :   A request to the API was larger than 2 MB, and the proxy in front of it refused it. A question has room for 100,000 characters, which is far less.
 
-**"The server was restarted while this answer was being written"**
-:   The API was stopped in the middle of an answer: by `make down`, by `make up` after a change, or by a saved file under `make dev`. It gives the answers being written 15 seconds to finish, then keeps what each had written and marks it interrupted. If the API was killed instead, the answer is marked so once it has been silent for a minute, with what it had written when it last saved it: an answer that is being written is saved every 15 seconds. Such an answer costs nothing. **Try again** asks for it once more.
+**"This answer broke off: the server that was writing it was restarted, or stopped answering"**
+:   The API was stopped in the middle of an answer: by `make down`, by `make up` after a change, or by a saved file under `make dev`. It gives the answers being written 15 seconds to finish, then keeps what each had written and marks it interrupted. If the API was killed instead, or fell silent for a minute while it wrote, the answer is marked so once it has been silent that long, with what it had written when it last saved it: an answer that is being written is saved every 15 seconds. Such an answer costs nothing. **Try again** asks for it once more.
 
 **`make down` takes a quarter of a minute**
 :   An answer was being written: see the entry above. With none under way it takes a second or two.
