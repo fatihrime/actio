@@ -507,3 +507,38 @@ Under each answer that has ended, one quiet line says what it took, in up to thr
     - **Stop** sends again within 9 to 35 ms with either.
 - **Not heard with a screen reader.** `aria-live="off"` is the standard's way to say that an addition to a live region is no news. Chromium's accessibility tree, read through its DevTools protocol, has the list with its name and its three items, and says nothing of how an addition is passed on. Whether a given screen reader stays quiet at it was not tried.
 - **Planted,** one at a time in a scratch copy of the tree: 60 mistakes, 16 in what the API records and 44 in the page's arithmetic, its wording and the line. Each fails a test. Three failed none at first, and each got one: a whole rate under ten, which keeps its decimal ("7.0 tokens a second"); an answer of no words whose turn was counted, which gets no line; and a turn given up on before it had written anything, which says nothing of a first word. Two more were no mistakes: guards against a rate and against credits that aren't finite, which no record can hold, and which were taken out.
+
+### 2026-11-23: a turn that left no answer says so
+
+The page says how a turn ended under the conversation's last message: stopped, failed and why, interrupted, cut at a length limit. One ending had no words: a turn that completed, and left no answer. Its model wrote nothing, and ended as a finished answer does. The page then showed the question, an empty answer, and nothing else: no word of what happened, and no way to ask again but to write the question anew. After a reload it showed the question alone.
+
+- **When:** a turn completed, and the conversation has no answer of it that says anything. Either its model wrote nothing: the server stores no empty answer ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md)), so the question stands open. Or it thought, and then wrote nothing: the answer holds its reasoning and no words.
+- **What the page says:** "The model gave no answer.", where it says how a turn ended, with "Try again", which asks for another answer to the same question, as after a failure. A model that reached its length limit before a word keeps the sentence of that limit, and can be tried again now too.
+- **The page tells, from the conversation.** A turn's record says `completed` either way, and has no member that says whether an answer was left. `outcomeOf` and `canRetry` (`lib/chat/outcomes.ts`) are told whether the conversation's last message is an answer that says anything (`hasWords` in `lib/chat/messages.ts`: text that isn't blank). A thought is no answer.
+- **An answer that is over and has nothing in it to read isn't drawn** (`Answer` in `components/chat/message.tsx`, `isBlank` in `lib/chat/messages.ts`). An answer's stream begins with a message for it, and when nothing followed, the page held an empty `article` until it next read the conversation. The message itself stays where it was, as before: a question asked next takes the open question's place. An answer of nothing but blank space, which a model can write and the server stores, is treated the same: not drawn, and no answer.
+- **What an answer took still stands under an answer that only thought:** it has something in it to read. Under an answer that isn't drawn, nothing does.
+- **What such a turn costs is as it was:** a model that read the question and wrote nothing is counted for what it read, when its server says so ([ADR 0020](0020-usage-limits-on-turns.md)).
+
+**Options considered:**
+
+1. **The API says it:** a member of the turn's record for "left an answer", or a status of its own.
+    - Con: the record changes, and every recorded stream with it, for something the conversation already says. And the turn did complete: the model's server made no mistake that Actio could name.
+2. **The page reads the conversation again after an answer of nothing,** and shows what is stored.
+    - Con: a request more, for a state the page can tell from what it has. It would still need the words for it.
+3. **The page tells from what it has.** Chosen.
+
+**Why now, and not at the start:** nothing had produced this ending. The fake model echoes its question, and a real model nearly always says something. The step of the same day, which shows what an answer took, needed a test of an answer without words, and with it a recording of a model that answers with nothing (`no_words.sse`). Run through the page, that recording showed the empty answer.
+
+**Tests:**
+
+- in the page's component tests (`components/chat/chat-app.test.tsx`): the recorded stream of a model that answered with nothing, which says so, draws no answer, and is asked again; a stored question whose turn completed without an answer; a stored answer that holds only a thought, which is asked again too; one of nothing but blank space, which isn't drawn; and a turn that reached the length limit before a word, which keeps its own sentence and can be tried again. An answer with words says nothing of the sort and offers no other try, once it is over;
+- one older test rested on the empty `article` this revision no longer draws (`components/chat/newest-first.test.tsx`, a conversation read again after a model failed): its wait for the page to show "what the server has" was a wait for that article to go. It now tells what was read again from what the stream left by the turn's own sentence, which its fake conversation words differently from its stream;
+- end to end (`e2e/no-answer.spec.ts`), with the stack's quiet model, which the question's request is given on its way out: the sentence under the question, the same after a reload, and an answer after "Try again".
+
+**Measured** on 2026-11-23:
+
+- **Before:** the four component tests written first failed on the code as it was (`15ddeeb`): no sentence in three of them, and no "Try again" in the fourth.
+- **On a real stack, in Chromium 158, Firefox 159 and WebKit 27.2:** the end-to-end stack, its quiet model asked by giving the first request its name. The sentence and "Try again" stood under the question when the answer's stream ended, and again after a reload, at the same place, with no answer drawn. "Try again" got an answer from the default model, and the sentence went. No error of the page.
+- **A model that thought and then said nothing,** the quiet model with a `[[think: ...]]` directive, in Chromium: its thought, the line of what the answer took, then the sentence and "Try again", when the stream ended and after a reload.
+- **Planted,** one at a time in a scratch copy: 18 mistakes. 17 fail a test. One is no mistake: a running turn that "can be tried again" shows nowhere, since nothing is said of a turn while it runs. One failed nothing at first, blank text taken for words, and got a test. The end-to-end test fails against a build with the sentence taken out.
+- **Not seen with a real model:** nothing here makes one answer with nothing on demand.
