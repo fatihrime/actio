@@ -28,6 +28,7 @@ import {
 } from "@/lib/chat/outcomes";
 import { turnTransport } from "@/lib/chat/turns";
 import type { JoinOptions, TurnOptions } from "@/lib/chat/turns";
+import { warmUp } from "@/lib/chat/warm-up";
 import { newId } from "@/lib/ids";
 import { useStoredSwitch } from "@/lib/stored-switch";
 import type { UsageLimits } from "@/lib/usage";
@@ -127,6 +128,7 @@ async function readConversation(id: string): Promise<Conversation | null> {
 export function Chat({
   id,
   stored,
+  holder,
   model,
   offers,
   usage,
@@ -139,6 +141,8 @@ export function Chat({
   id: string;
   /** What the server has of it, or nothing for a new one. Read once. */
   stored: Conversation | null;
+  /** What the session's data is held under (`Session.holder`). */
+  holder: string | null;
   /** The model that answers, once known: the installation's default one, or the one
    * that was chosen to carry on with at a usage limit. */
   model: Model | null;
@@ -747,6 +751,10 @@ export function Chat({
               // page, the answer's words would wait for it there (ADR 0016, revisions of
               // 2026-11-22).
               fetchRenderer();
+              // And its model is loaded at its server, unless it was asked for within
+              // the last minute: a question written in less than about four minutes
+              // finds it loaded (ADR 0026).
+              warmUp(holder, model);
               setText(written);
             }}
             onSend={send}

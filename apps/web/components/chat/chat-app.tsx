@@ -20,6 +20,7 @@ import { ApiProblem, getConversation, listModels } from "@/lib/api/client";
 import type { Conversation, Me, Model, ModelList } from "@/lib/api/client";
 import { useConversations } from "@/lib/chat/list";
 import { explain } from "@/lib/chat/outcomes";
+import { warmUp } from "@/lib/chat/warm-up";
 import { LIST_HIDDEN_KEY, markListAway } from "@/lib/frame";
 import { newId } from "@/lib/ids";
 import {
@@ -423,9 +424,17 @@ function Current({
   onStartOver: () => void;
 }) {
   const models = useModels(holder, usage.standIn);
+  const answers = models === null ? null : answering(models, usage.standIn);
+  // The model that answers is loaded at its server ahead of the first question, once
+  // the page knows it and it is ready: also when it becomes ready, and when another
+  // model answers. Nothing on the page waits for it, or says so (ADR 0026).
+  useEffect(() => {
+    warmUp(holder, answers);
+  }, [holder, answers]);
   const chat = {
     id,
-    model: models === null ? null : answering(models, usage.standIn),
+    holder,
+    model: answers,
     // The models that cost nothing, as far as this installation still offers them.
     offers: (usage.reached?.free ?? []).flatMap(
       (free) => models?.models.find((model) => model.id === free) ?? [],
@@ -447,6 +456,7 @@ function Current({
 /** A conversation the API has: loaded first, then shown. */
 function StoredChat({
   id,
+  holder,
   model,
   offers,
   usage,
@@ -456,6 +466,7 @@ function StoredChat({
   onStartOver,
 }: {
   id: string;
+  holder: string | null;
   model: Model | null;
   offers: Model[];
   usage: UsageLimits;
@@ -506,6 +517,7 @@ function StoredChat({
     <Chat
       id={id}
       stored={loaded.conversation}
+      holder={holder}
       model={model}
       offers={offers}
       usage={usage}

@@ -115,14 +115,16 @@ function matches(route: string, call: Call): boolean {
 
 /** Replace `fetch` with a fake API for the running test. It starts with a guest
  * session, one model that is ready and can reason, no conversations, and nothing used
- * of the usage limits: what a working installation answers a first visit. A request
- * the test didn't set up fails the test. */
+ * of the usage limits: what a working installation answers a first visit. A model the
+ * page asks to have loaded ahead has nothing to load. A request the test didn't set up
+ * fails the test. */
 export function fakeApi(): FakeApi {
   const api = new FakeApi()
     .on("POST /api/session/guest", () => json(201, GUEST))
     .on("GET /api/models", () => json(200, models()))
     .on("GET /api/conversations", () => json(200, listed([])))
-    .on("GET /api/usage", () => json(200, usage()));
+    .on("GET /api/usage", () => json(200, usage()))
+    .on("POST /api/models/*/warm-up", () => nothing());
   vi.stubGlobal("fetch", api.fetch);
   onTestFinished(() => {
     expect(api.unexpected, "requests the test set up no answer for").toEqual(
