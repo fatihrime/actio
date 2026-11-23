@@ -87,18 +87,25 @@ export function passedIn(data: unknown): Passed | null {
 }
 
 /** How full a window is. What is held for answers that are being written isn't
- * counted: it comes back when they end, for all that they didn't use.
- *
- * `percent` is for a bar, from 0 to 100. `label` is for reading, in whole percent,
- * and never says 0% once something is used, or 100% before everything is. */
-export function shareUsed(window: UsageWindow): {
+ * counted: it comes back when they end, for all that they didn't use. */
+export function shareUsed(window: UsageWindow): Share {
+  return shareOf(window.used, window.limit);
+}
+
+/** A share of something that fills up. */
+export interface Share {
+  /** For a bar: from 0 to 100. */
   percent: number;
+  /** For reading, in whole percent: never 0% once something is used, or 100% before
+   * everything is. */
   label: string;
-} {
+}
+
+/** How much of `whole` is `part`, as a share: none over 100%. A whole of nothing is
+ * full. */
+export function shareOf(part: number, whole: number): Share {
   const percent =
-    window.limit <= 0
-      ? 100
-      : Math.min(100, Math.max(0, (100 * window.used) / window.limit));
+    whole <= 0 ? 100 : Math.min(100, Math.max(0, (100 * part) / whole));
   const label =
     percent > 0 && percent < 1 ? "under 1%" : `${String(Math.floor(percent))}%`;
   return { percent, label };

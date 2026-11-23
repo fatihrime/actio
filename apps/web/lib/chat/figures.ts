@@ -14,7 +14,7 @@ import { timeTaken } from "@/lib/time";
 export const SHORTEST_WRITING_MS = 250;
 
 /** Whole numbers, grouped as English groups them: "1,234". */
-const WHOLE = new Intl.NumberFormat("en", { maximumFractionDigits: 0 });
+export const WHOLE = new Intl.NumberFormat("en", { maximumFractionDigits: 0 });
 
 /** What a turn took, as the words to show under its answer, in this order: how fast
  * its model wrote, how long its first word took, and what it cost. Only the figures its

@@ -214,7 +214,9 @@ describe("the usage meter", () => {
     expect(
       await screen.findByText("Your usage can’t be read right now."),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("meter")).not.toBeInTheDocument();
+    for (const name of ["Session", "Week"]) {
+      expect(screen.queryByRole("meter", { name })).not.toBeInTheDocument();
+    }
 
     await ask(user, "Why is the sky blue?");
 

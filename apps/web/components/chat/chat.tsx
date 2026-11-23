@@ -16,6 +16,7 @@ import { Notice, NoticeButton } from "@/components/notice";
 import { LimitReached, UsagePassed } from "@/components/usage/limit";
 import { ApiProblem, cancelTurn, getConversation } from "@/lib/api/client";
 import type { Conversation, Model, Turn } from "@/lib/api/client";
+import { contextFill } from "@/lib/chat/context";
 import { fromStored, hasContent, hasWords, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
 import {
@@ -32,6 +33,7 @@ import { useStoredSwitch } from "@/lib/stored-switch";
 import type { UsageLimits } from "@/lib/usage";
 
 import { Composer } from "./composer";
+import { ContextMeter } from "./context-meter";
 import { useFollow } from "./follow";
 import { fetchRenderer, Message, Waiting } from "./message";
 
@@ -118,7 +120,9 @@ async function readConversation(id: string): Promise<Conversation | null> {
  *
  * What answers cost is the server's to count too. A question refused at a usage limit
  * is handed to `usage`, which holds the limit until it starts over: nothing is sent
- * meanwhile, unless a model that costs nothing was chosen to carry on with.
+ * meanwhile, unless a model that costs nothing was chosen to carry on with. And so is
+ * how much of the model's window the conversation takes, which the line under the box
+ * says of the model that answers (`ContextMeter`).
  */
 export function Chat({
   id,
@@ -731,37 +735,44 @@ export function Chat({
             </p>
           </Notice>
         )}
-        <Composer
-          box={box}
-          text={text}
-          onText={(written) => {
-            // Someone is writing a question, so the code that will draw its answer is
-            // asked for now, unless the page has asked already: ahead of any answer it
-            // asks only once the list of conversations is on the page, and a question
-            // can be written before that. Asked for only when the answer is on the
-            // page, the answer's words would wait for it there (ADR 0016, revisions of
-            // 2026-11-22).
-            fetchRenderer();
-            setText(written);
-          }}
-          onSend={send}
-          onStop={() => {
-            // The page stops reading at once. When the library has said so, the turn
-            // is stopped at the server (`onFinish`, `resync`).
-            stopping.current = true;
-            void stop().finally(() => {
-              // If the answer had just ended by itself, nothing was there to stop,
-              // and nobody took the note. It must not wait for the next answer: that
-              // one would be stopped by merely leaving its conversation.
-              stopping.current = false;
-            });
-          }}
-          answering={answering}
-          blocked={blocked}
-          thinking={
-            model?.thinking === true ? { on: thinking, set: setThinking } : null
-          }
-        />
+        <div className="space-y-1.5">
+          <Composer
+            box={box}
+            text={text}
+            onText={(written) => {
+              // Someone is writing a question, so the code that will draw its answer is
+              // asked for now, unless the page has asked already: ahead of any answer it
+              // asks only once the list of conversations is on the page, and a question
+              // can be written before that. Asked for only when the answer is on the
+              // page, the answer's words would wait for it there (ADR 0016, revisions of
+              // 2026-11-22).
+              fetchRenderer();
+              setText(written);
+            }}
+            onSend={send}
+            onStop={() => {
+              // The page stops reading at once. When the library has said so, the turn
+              // is stopped at the server (`onFinish`, `resync`).
+              stopping.current = true;
+              void stop().finally(() => {
+                // If the answer had just ended by itself, nothing was there to stop,
+                // and nobody took the note. It must not wait for the next answer: that
+                // one would be stopped by merely leaving its conversation.
+                stopping.current = false;
+              });
+            }}
+            answering={answering}
+            blocked={blocked}
+            thinking={
+              model?.thinking === true
+                ? { on: thinking, set: setThinking }
+                : null
+            }
+          />
+          {/* Under the box, and not in its row, which a narrow window leaves no room
+            in. Its place is there from the first render, with a figure or without. */}
+          <ContextMeter fill={contextFill(messages, open, model)} />
+        </div>
       </div>
     </>
   );

@@ -23,7 +23,9 @@ interface Metadata {
     status: string;
     finish_reason: string | null;
     error: string | null;
+    input_tokens: number | null;
     output_tokens: number | null;
+    context_tokens: number | null;
     generation_ms: number | null;
     credits: number | null;
     capped_by_usage: boolean;
@@ -129,6 +131,7 @@ describe("a recorded turn, read by the ai package", () => {
     const first = states[0]?.metadata;
     const final = last(states).metadata;
     expect(first?.turn.status).toBe("running");
+    expect(first?.turn.context_tokens).toBeNull();
     expect(final?.parent_id).toBe(QUESTION_ID);
     expect(final?.versions).toEqual([ANSWER_ID]);
     expect(final?.turn).toMatchObject({
@@ -136,6 +139,8 @@ describe("a recorded turn, read by the ai package", () => {
       finish_reason: "stop",
       error: null,
       output_tokens: 6,
+      // How much of the window the conversation takes after it: 30 read, 6 written.
+      context_tokens: 36,
     });
   });
 
@@ -143,6 +148,12 @@ describe("a recorded turn, read by the ai package", () => {
     const { states, errors } = await replay("reasoning.sse");
 
     expect(errors).toEqual([]);
+    // What the model thought isn't kept for the next question, nor counted.
+    expect(last(states).metadata?.turn).toMatchObject({
+      input_tokens: 35,
+      output_tokens: 10,
+      context_tokens: 40,
+    });
     expect(last(states).parts).toEqual([
       { type: "step-start" },
       // The library keeps the id the API gave the reasoning part.

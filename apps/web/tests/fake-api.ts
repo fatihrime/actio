@@ -382,7 +382,7 @@ export function usageWindow(
 }
 
 export function turn(changes: Partial<Turn> = {}): Turn {
-  return {
+  const made: Turn = {
     id: "01900000-0000-7000-8000-000000000001",
     model: "standard",
     thinking: false,
@@ -392,6 +392,8 @@ export function turn(changes: Partial<Turn> = {}): Turn {
     input_tokens: 12,
     cached_input_tokens: 0,
     output_tokens: 6,
+    // It thought nothing: the server counts all of it.
+    context_tokens: 18,
     load_ms: null,
     prompt_ms: null,
     generation_ms: null,
@@ -404,6 +406,13 @@ export function turn(changes: Partial<Turn> = {}): Turn {
     finished_at: MOMENT,
     ...changes,
   };
+  // The API says how much of the window a conversation takes only after a turn its
+  // model's server counted: one that completed. A test that wants another turn to
+  // have a figure says so.
+  if (!("context_tokens" in changes) && made.status !== "completed") {
+    made.context_tokens = null;
+  }
+  return made;
 }
 
 export function question(

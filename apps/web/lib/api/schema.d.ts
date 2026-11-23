@@ -681,6 +681,8 @@ export interface components {
             cached_input_tokens: number | null;
             /** Output Tokens */
             output_tokens: number | null;
+            /** Context Tokens */
+            context_tokens: number | null;
             /** Load Ms */
             load_ms: number | null;
             /** Prompt Ms */

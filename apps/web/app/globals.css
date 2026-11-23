@@ -69,6 +69,12 @@
   );
   /* A level that is close to its limit. */
   --color-caution: light-dark(var(--color-amber-600), var(--color-amber-400));
+  /* Words about such a level, in small type on the page: darker in the light, where the
+     colour above stands out from the page less than words need to. */
+  --color-caution-foreground: light-dark(
+    var(--color-amber-700),
+    var(--color-amber-400)
+  );
   /* What can't be undone. */
   --color-destructive: light-dark(var(--color-red-700), var(--color-red-400));
   --color-destructive-foreground: light-dark(
