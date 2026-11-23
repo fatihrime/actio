@@ -271,3 +271,38 @@ Also checked in the code: `GET /api/models` already gives each model's `context_
 The next question was the same each time, of 46 characters. After the answer that never got to its words, where nothing goes back and the figure is what was read, the next prompt held 18 tokens more than the figure; after the three whose words' share was guessed, 19 or 20 more. So the guess was a token or two under. After the plain answers of those conversations the figure was the two counts together, and the next prompt held 16 to 19 tokens more. The figure itself takes 0.24 ms for 300 answers of 2,000 characters of words after 4,000 of reasoning, beside the 0.33 ms it takes to read their stored parts, which the conversation's read does once for both.
 
 **Tests:** the rule, case by case, with the rounding, the counts missing, and a property test that the figure lies between what was read and the two counts together; and what holds it to `for_model`: an answer of which nothing is sent back adds nothing, and one whose text goes back whole adds all that was written (`test_answering.py`). The stream's last chunk and the conversation read right after it say the same figure, for words alone, a thought and words, a thought alone and a model that wrote nothing; a failed turn has none (`test_turns_api.py`); a stopped one has none, in the stream, the stop's answer and the conversation; a stop that comes after the end answers with the figure the stream said (`test_turns_running_api.py`). Every recorded stream's turn has the member now, and nothing else of them changed.
+
+### 2026-11-23: a turn says which limit its answer reached
+
+A model's server says `length` for two limits: the one on a single answer's size, `max_output_tokens`, sent to Ollama as `num_predict`, and the end of the context window, `num_ctx` ([ADR 0007](0007-local-models-through-ollamas-native-api.md)). The record kept the word as the server said it, and the page had one sentence for both, "The answer reached the model's length limit, and stops here.", which reads as if the window were full ([ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md), revision "the page says which limit an answer reached"). Only the server can tell them apart: it knows the window and the limit a request went out with.
+
+- **The value:** a completed turn's `finish_reason` is `context_window` when the model stopped for `length`, and what it read and wrote together, the counts the turn keeps, reached the request's `context_window`, or went past it, as a server that counts oddly may say. Otherwise it stays `length`, also when the server counted nothing. `stop` stays `stop` whatever the counts say.
+- **Where it is made:** where the `Ending` of a completed turn is made, in `actio.chat.answering` (`reason_for`), from the model's last event, the counts that `_believed` keeps, and the window of the request. Every place that says a turn reads the record's member, so the stream, the conversation read and a stop's answer say the same.
+- **No column and no migration:** `finish_reason` is a string. The turns there were before keep `length` for both limits.
+- **In the stream** the AI SDK's own `finishReason` for it is `length` (`ui_stream.FINISH_REASONS`): the library has no finer word. The turn's record in the metadata says `context_window`.
+- **The member's description says so,** now that it is published: `stop`; `length`, when the model ran into the limit on a single answer's size; `context_window`, when the conversation and the answer together filled the model's context window.
+
+**Measured** with Ollama 0.40.16 and `qwen3.5:4b-q4_K_M`, asked directly with what Actio's adapter sends (`truncate: false`, `shift: false`), on 2026-11-23:
+
+| What ended the answer | `done_reason` | Read | Wrote | Together | The limits sent |
+|---|---|---|---|---|---|
+| the answer's own limit | `length` | 21 | 40 | 61 | `num_predict` 40, a window of 2,048 |
+| the window's end, thinking | `length` | 390 | 1,658 | 2,048 | `num_predict` 2,000, a window of 2,048 in effect |
+| the model, by itself | `stop` | 18 | 4 | 22 | `num_predict` 200 |
+
+So at its own limit an answer has written exactly `num_predict`, and is far from the window's end. At the window's end what was read and written together is the window exactly, with `num_predict` not reached. What the maintainer saw that made this a step: an answer that thought, read 129 tokens, wrote 2,048, exactly the model's `max_output_tokens`, reasoning included, and ended with `length`, after 7,910 characters of thought and no words.
+
+**Options considered, and not built:**
+
+1. **A flag beside `capped_by_usage`,** such as `reached_window`, in a column of its own.
+    - Con: a migration, for what the reason the record already holds can say. And a second member for the page to read beside the first, which two limits, never at once, don't need.
+2. **The page works it out,** from the turn's counts and the models' limits in `GET /api/models`.
+    - Con: the page would have to know the window the request went out with, which the models file can change between the question and the reading, and the server's rule for which counts are kept. As for the figure of the window, the server says it, and the page doesn't copy the rule.
+3. **The server says it, in the reason it records.** Chosen.
+
+**What it leaves:**
+
+- **A server that counts nothing** can't be told apart: its turn keeps `length`, and the page says the answer reached the longest a single answer may be, which may be the window's end.
+- **The second run asked for `num_ctx` 768 and the server held 2,048:** Ollama seems to keep a floor there. Seen once, not looked into, and not this fix's.
+
+**Tests:** the rule, case by case, at the window, past it, one token short of it, with no counts, with no window, and a model that stopped by itself; and that a count the turn doesn't keep names no limit (`test_answering.py`). Over HTTP, the stream's last chunk and the conversation read say the same reason, with the library's `finishReason` `length` for both limits, and an answer cut at what a usage limit left it, far from the window's end, keeps `length` and `capped_by_usage` (`test_turns_api.py`). A recording was added: a model asked to think, that thought until it reached the longest a single answer may be and wrote no answer (`thought_too_long.sse`). Nothing else changed in the recorded files.

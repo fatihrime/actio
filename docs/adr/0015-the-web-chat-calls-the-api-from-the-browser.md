@@ -595,3 +595,29 @@ Send has a border now too, as wide as Stop's. It is transparent, so the button's
 **Why only now:** the page's frame and the answers were each checked for moving (the revision "the page's frame is there before the session" and what followed), and the box was not: no test compared it across an answer's beginning and end. The meter's own check did, which read the box at every frame.
 
 **Tests:** end to end, in a real browser (`e2e/turns.spec.ts`): the box with Send in it, with Stop in it while an answer is written, and with Send again once the answer was stopped, is where and as large as it was each time. A simulated browser lays nothing out, so no component test can hold it.
+
+### 2026-11-23: the page says which limit an answer reached
+
+**What the maintainer saw:** with "Think before answering" on, the question "huh". Under the thought and nothing else, the page said "The answer reached the model's length limit, and stops here.", beside the meter of the revision "the page says how full the model's window is", which said "1% full · 129 of 8,192 tokens". The turn's record: read 129, wrote 2,048, exactly the model's `max_output_tokens`, reasoning included, `finish_reason` `length`, 7,910 characters of thought and no words. Both statements were true, and the sentence read as if the window were full. Two limits can end an answer, and the page had one phrase for both.
+
+- **The server says which limit** ([ADR 0014](0014-turns-streamed-in-the-ai-sdks-format.md), revision "a turn says which limit its answer reached"): a completed turn's `finish_reason` is `context_window` when the conversation and the answer together filled the model's window, and `length` when the answer reached the longest a single answer may be. The page never works it out from the counts.
+- **The page's words,** all in `lib/chat/outcomes.ts`, by the turn's record and by whether the conversation has an answer of it with words (`answered`), as before:
+
+    | The turn completed with | Words? | The page says | "Try again" |
+    |---|---|---|---|
+    | `context_window` | yes | The conversation has filled the model's context window, and the answer stops here. Start a new chat to go on. | no |
+    | `context_window` | no | The conversation has filled the model's context window, and the model wrote no answer. Start a new chat to go on. | no: another try meets the same wall |
+    | `length`, `capped_by_usage` | either | as before: This answer stops here: your usage limit left no room for more of it. | as before: only without words |
+    | `length` | yes | The answer reached the longest a single answer may be, and stops here. | no, as before |
+    | `length`, the turn was asked to think (`turn.thinking`) | no | The model was still thinking when it reached the longest a single answer may be, and wrote no answer. Try again, or turn off “Think before answering” first. | yes |
+    | `length`, not asked to think | no | The model reached the longest a single answer may be, and wrote no answer. | yes |
+
+- **No "Try again" at the window's end,** with words or without, and also when a usage limit had left the answer less room (`capped_by_usage`): where what was read and written together reached the window, the window's end came first, or at the same moment, and it is what the page names. Another answer to the same question is asked with the same conversation before it, which already fills the window: it would meet the same wall. A new chat is what goes on, and the sentence says so. At the longest an answer may be, another try can go otherwise, and without thinking it has the whole of that room for its words: the sentence says that too, and "Try again" asks with what the switch says then.
+- **The sentence for an interrupted turn changed too,** from "The server was restarted while this answer was being written." to "This answer broke off: the server that was writing it was restarted, or stopped answering." The old one was untrue of a turn given up on while its process was only slow ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "a turn that ends after it was given up on says so"). The new one is true of a shutdown, of a process that died, and of that.
+
+**Why it surfaced only now:** the meter put a second limit on the page, the window's, beside a sentence that named neither. Before it, "the model's length limit" could be read as either, and nothing on the page said otherwise.
+
+**Tests:**
+
+- in the page's component tests (`components/chat/chat-app.test.tsx`): each row of the table, from a stored conversation, with "Try again" there or not; the thought that used up the answer as it arrives too, from a recorded stream (`thought_too_long.sse`), and "Try again" after it with the switch turned off first, which asks with `thinking: false`; the recorded answer that reached its length (`cut_off.sse`), in its new sentence; and the sentence of an interrupted turn wherever it is said;
+- end to end (`e2e/no-answer.spec.ts`), with "Think before answering" on and a thought longer than an answer may be on the stack: the thought, the sentence and "Try again", and the same after a reload.

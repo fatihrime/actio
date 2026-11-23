@@ -486,4 +486,4 @@ A test starts `actio --role all --reload` for real, and sends its server a SIGTE
 
 - **A usage warning that such a turn was the first to earn isn't sent.** A turn whose conversation was deleted meanwhile is still counted, and can be the one that takes its account past 75 % or 90 % of a limit. The notice of that goes out beside a turn's ending, which this stream no longer has. The counts themselves are right whenever the usage is read; only that one notice is missed.
 - **A turn whose conversation was deleted by another process is still counted** for what it used, as before, and as an answer that a delete stops first is.
-- **The page's words for an interrupted turn** are "The server was restarted while this answer was being written.", which a turn given up on while its process was only slow doesn't bear out.
+- **The page's words for an interrupted turn,** "The server was restarted while this answer was being written.", didn't bear out a turn given up on while its process was only slow, until the same day, when [ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md), revision "the page says which limit an answer reached", changed them.
