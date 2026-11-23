@@ -19,10 +19,19 @@ test("Stop ends an answer, and what was written is kept", async ({
   page,
 }) => {
   await chat.open();
+  await expect(page.getByText(/Answered by/)).toBeVisible();
+  // The box where a question is written, with Send in it.
+  const form = chat.box.locator("xpath=ancestor::form[1]");
+  const idle = await form.boundingBox();
+
   await chat.ask(
     "[[pace: 0.2]] one two three four five six seven eight nine ten eleven twelve",
   );
   await expect(chat.answers).toContainText("three");
+  // With Stop in it the box is where and as large as it was: nothing moves when an
+  // answer begins.
+  await expect(chat.stop).toBeVisible();
+  expect(await form.boundingBox()).toEqual(idle);
 
   await chat.stop.click();
 
@@ -30,6 +39,9 @@ test("Stop ends an answer, and what was written is kept", async ({
     "This answer was stopped before it was finished.",
   );
   await expect(stopped).toBeVisible();
+  // Nor when it ends.
+  await expect(chat.send).toBeVisible();
+  expect(await form.boundingBox()).toEqual(idle);
   await expect(chat.answers).toContainText("Echo: one two three");
   await expect(chat.answers).not.toContainText("twelve");
   const kept = await chat.answers.innerText();

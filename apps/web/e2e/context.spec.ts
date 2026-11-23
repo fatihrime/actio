@@ -71,9 +71,7 @@ test("after an answer the meter says its turn's figure, of the model's window, t
 }) => {
   await chat.open();
   await expect(page.getByText(/Answered by/)).toBeVisible();
-  // The place is there before the figure, so the box is where it will stay. Taken with
-  // Send under it, as it is once the answer has ended: Stop, while it is written, is a
-  // button of another height.
+  // The place is there before the figure, so the box is where it will stay.
   await expect(placeOf(chat)).toBeEmpty();
   const box = await chat.box.boundingBox();
   const log = await chat.scroller.boundingBox();

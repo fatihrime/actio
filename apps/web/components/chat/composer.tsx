@@ -93,7 +93,10 @@ export function Composer({
             type="submit"
             disabled={!sendable}
             title={blocked ?? undefined}
-            className="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-40"
+            // A border as wide as Stop's, which shows as part of the button's own face:
+            // the box is as large with either button in it, so nothing moves when an
+            // answer begins or ends.
+            className="rounded-lg border border-transparent bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-40"
           >
             Send
           </button>
