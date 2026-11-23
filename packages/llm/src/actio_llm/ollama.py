@@ -164,6 +164,40 @@ class Ollama:
                     return
         raise StreamInterruptedError("Ollama's answer ended without its final chunk")
 
+    async def load(self, model: str, *, context_window: int | None = None) -> None:
+        """Have the server load `model` into memory before it is asked anything, and
+        return once the server says that it has. A model that is loaded already is
+        answered in milliseconds, and kept for `keep_alive` from then.
+
+        The request is the chat request `stream` sends for `model` and `context_window`,
+        with no messages: Ollama loads the model and answers one line, with the done
+        reason `load`. Everything else in it must be what a chat sends. Measured on
+        Ollama 0.40.16 (ADR 0026): after a load without `"shift": false`, the next
+        question loaded the model again, for 1.4 to 3.4 s.
+
+        The server's answer is waited for as long as a chat's first line is
+        (`Timeouts.first_event_s`): a cold load takes seconds. Hanging up before it
+        comes abandons the load at the server.
+        """
+        await self._ensure_supported()
+        # A request needs a message to be made; the load sends none.
+        chat = ChatRequest(model=model, messages=[User("")], context_window=context_window)
+        lines = stream_lines(
+            self._client,
+            "/api/chat",
+            {**_body(chat, self._keep_alive), "messages": []},
+            provider="Ollama",
+            timeouts=self._timeouts,
+            rejection=lambda response, text: _rejection(response.status_code, text, model),
+        )
+        parser = _Parser()  # the one line is read as an answer's last one is
+        async with aclosing(lines):
+            async for line in lines:
+                parser.feed(line)
+                if parser.finished:
+                    return
+        raise StreamInterruptedError("Ollama's answer ended before it said the model was loaded")
+
     # --- The server and its models ---------------------------------------------------
 
     async def version(self) -> tuple[int, ...]:

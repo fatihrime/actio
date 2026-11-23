@@ -1,6 +1,7 @@
 """Actio's model clients.
 
-- `chat`: the neutral chat format every adapter speaks.
+- `chat`: the neutral chat format every adapter speaks, and `LoadsAhead`, for those
+  whose server can load a model before it is asked anything.
 - `errors`: why a model call failed.
 - `estimate`: a guess at a text's tokens, for when no provider has counted them.
 - `ollama`: the adapter for Ollama's native API.
@@ -15,6 +16,7 @@ from actio_llm.chat import (
     ChatRequest,
     Finish,
     FinishReason,
+    LoadsAhead,
     Message,
     ReasoningDelta,
     StreamEvent,
@@ -52,6 +54,7 @@ __all__ = [
     "Finish",
     "FinishReason",
     "LLMError",
+    "LoadsAhead",
     "LocalModel",
     "Message",
     "ModelInfo",

@@ -58,6 +58,20 @@ async def ask() -> None:
 
 A stream is any number of `TextDelta`, `ReasoningDelta` and `ToolCall` events, then exactly one `Finish`. Leaving the `aclosing` block early closes the connection, and Ollama stops generating: that is how an answer is stopped.
 
+## Loading a model ahead
+
+Ollama loads a model at the first request for it, and lets it go five minutes after the last one (`keep_alive`). Until it is loaded again, the next question waits for the load: seconds, for a model of a few gigabytes. `load` has it loaded before anything is asked:
+
+```python
+await Ollama(client).load("granite4:micro", context_window=4096)
+```
+
+- **The request is a chat's, without its messages:** the one `stream` would send for that model and window. Measured on Ollama 0.40.16: after a load that left out `"shift": false`, or named another window, the next question loaded the model again, for 1.4 to 3.4 s. So give it the window the questions will have.
+- **It returns once the server says that the model is loaded,** and waits for that as long as a chat waits for its first line. A model that is loaded already is answered in milliseconds, and kept for another five minutes. Hanging up before the answer abandons the load at the server.
+- **`isinstance(provider, LoadsAhead)` says whether a provider can do this.** The OpenAI-compatible adapter can't: that API has no such call.
+
+Why, and what Actio does with it: [ADR 0026](https://fatihrime.github.io/actio/adr/0026-models-loaded-ahead-of-the-first-question/).
+
 ## What the Ollama adapter guarantees
 
 **A model never answers from a shortened prompt, and an answer is never unbounded.** How that is achieved depends on which of Ollama's two engines runs the model. Both were measured against Ollama 0.40.16.
@@ -147,7 +161,7 @@ prompt_tokens(prompt)  # 31, with what a chat template writes around the two mes
 ## Not here yet
 
 - **Images and structured output** (a JSON schema for the answer). They arrive with the features that use them.
-- **Warm-up, unloading and pulling models.** They arrive with the model manager.
+- **Unloading and pulling models.** They arrive with the model manager.
 - **A guess that learns.** The estimate uses the same rules for every model. Correcting it per model, from the counts providers report, comes with the router.
 - **A router** that picks a provider, falls back to another and retries. The errors above are shaped for it.
 
@@ -159,7 +173,7 @@ make test-live                  # the same requests, sent to a real Ollama serve
 ```
 
 - **Recorded exchanges.** `tests/fixtures/ollama/` holds real responses from an Ollama server, one file per request. The tests replay them, and fail if the adapter no longer sends exactly the recorded request.
-- **Live mode.** `make test-live` needs `granite4:micro` on the server. It also runs what a recording can't show: that closing a stream frees the server, and that the guess at a prompt's tokens stays near the server's count.
+- **Live mode.** `make test-live` needs `granite4:micro` on the server. It also runs what a recording can't show: that closing a stream frees the server, that a model loaded ahead isn't loaded again by the next question, and that the guess at a prompt's tokens stays near the server's count. That test unloads `granite4:micro` first.
     - Set `ACTIO_TEST_OLLAMA_THINKING_MODEL` to a model that can reason, to test reasoning against it too.
     - Set `ACTIO_TEST_OLLAMA_MLX_MODEL` to a model that runs on the MLX engine, to pin that engine's behaviour. On an Apple Silicon Mac, `qwen3.5:4b` serves for both.
     - Add `ACTIO_RECORD_OLLAMA=1` to save the server's answers as the new recordings, after an Ollama upgrade.

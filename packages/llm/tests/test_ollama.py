@@ -20,8 +20,10 @@ from actio_llm import (
     ContextOverflowError,
     Finish,
     FinishReason,
+    LoadsAhead,
     ModelNotFoundError,
     Ollama,
+    OpenAICompatible,
     ProviderError,
     ProviderUnavailableError,
     ReasoningDelta,
@@ -210,6 +212,25 @@ async def test_models_lists_what_is_on_disk(ollama_with: Any) -> None:
 async def test_the_server_reports_a_supported_version(ollama_with: Any) -> None:
     ollama, _ = ollama_with("version")
     assert await ollama.version() >= MIN_VERSION
+
+
+async def test_a_model_is_loaded_ahead_of_a_question(ollama_with: Any) -> None:
+    """A chat request with no messages: the server loads the model, and answers one line
+    that says so. The request is the cassette's, so a change to it fails here too."""
+    ollama, tape = ollama_with("load")
+    await ollama.load(MODEL, context_window=CONTEXT)
+
+    [answer] = tape.chunks
+    assert (answer["done"], answer["done_reason"]) == (True, "load")
+    assert answer["message"]["content"] == ""
+
+
+async def test_loading_a_model_the_server_has_not_got_says_so(ollama_with: Any) -> None:
+    ollama, _ = ollama_with("load_unknown_model")
+    with pytest.raises(ModelNotFoundError, match="not found") as caught:
+        await ollama.load("no-such-model:1b", context_window=CONTEXT)
+
+    assert caught.value.model == "no-such-model:1b"
 
 
 # --- Responses written here ----------------------------------------------------------
@@ -585,6 +606,105 @@ async def test_tool_calls_without_ids_get_one(serve: Serve) -> None:
     events = await collect(serve(answering(piece(tool_calls=calls), DONE)).stream(ask("hi")))
 
     assert events[:2] == [ToolCall("call_1", "a", {}), ToolCall("call_2", "b", {"x": 1})]
+
+
+# --- Loading a model ahead -----------------------------------------------------------
+
+LOADED: dict[str, Any] = {
+    "message": {"role": "assistant", "content": ""},
+    "done": True,
+    "done_reason": "load",
+}
+"""What Ollama 0.40.16 answers a chat request with no messages, but its two moments."""
+
+
+async def test_ollama_can_load_ahead_and_a_server_that_speaks_openais_api_cannot() -> None:
+    async with httpx2.AsyncClient(base_url="http://ollama.test") as client:
+        assert isinstance(Ollama(client), LoadsAhead)
+        assert not isinstance(OpenAICompatible(client, provider="Lab"), LoadsAhead)
+
+
+async def test_a_load_is_the_request_a_question_would_be_without_its_messages(
+    serve: Serve,
+) -> None:
+    """Whatever decides whether the server loads the model again must be the same in
+    both. Measured on Ollama 0.40.16: after a load without `"shift": false`, the next
+    question loaded the model again, for 1.4 to 3.4 s (ADR 0026)."""
+    sent: list[dict[str, Any]] = []
+
+    def chat(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content))
+        return httpx2.Response(200, content=ndjson(DONE if sent[-1]["messages"] else LOADED))
+
+    ollama = serve(chat, keep_alive="30m")
+    await ollama.load("qwen3.5:4b", context_window=8192)
+    question = ChatRequest(model="qwen3.5:4b", messages=[User("hi")], context_window=8192)
+    await collect(ollama.stream(question))
+
+    loaded, asked = sent
+    assert loaded["messages"] == []
+    assert {**loaded, "messages": asked["messages"]} == asked
+    assert (loaded["shift"], loaded["options"]["num_ctx"], loaded["keep_alive"]) == (
+        False,
+        8192,
+        "30m",
+    )
+
+
+async def test_a_load_is_waited_for_as_long_as_a_first_word_not_as_a_small_call() -> None:
+    """A cold load took up to 3.1 s, measured, and the catalog gives the small calls, such
+    as asking whether a model is there, 3 s. Here the server takes longer than the small
+    calls' patience, and much less than the first word's. A real connection: only the
+    HTTP client's own transport keeps its read timeout."""
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = (await reader.readuntil(b"\r\n\r\n")).lower()
+        await reader.readexactly(int(head.split(b"content-length: ")[1].split(b"\r\n")[0]))
+        await asyncio.sleep(0.3)  # loading
+        body = ndjson(LOADED)
+        writer.write(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\n"
+            b"content-length: %d\r\n\r\n%b" % (len(body), body)
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(answer, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    patience = Timeouts(request_s=0.05, first_event_s=5.0)
+    async with (
+        asyncio.timeout(5),
+        server,
+        httpx2.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client,
+    ):
+        await Ollama(client, timeouts=patience, check_version=False).load(
+            MODEL, context_window=CONTEXT
+        )
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [[], [{"error": "llama runner process has terminated"}]],
+    ids=["nothing", "an error"],
+)
+async def test_a_load_the_server_never_says_it_made_is_an_interruption(
+    serve: Serve, chunks: list[dict[str, Any]]
+) -> None:
+    with pytest.raises(StreamInterruptedError):
+        await serve(answering(*chunks)).load(MODEL, context_window=CONTEXT)
+
+
+async def test_an_old_server_is_refused_before_a_load_is_sent(serve: Serve) -> None:
+    asked: list[httpx2.Request] = []
+
+    def chat(request: httpx2.Request) -> httpx2.Response:
+        asked.append(request)
+        return httpx2.Response(200, content=ndjson(LOADED))
+
+    with pytest.raises(UnsupportedServerError):
+        await serve(chat, version="0.31.2").load(MODEL, context_window=CONTEXT)
+    assert asked == []
 
 
 # --- Time ----------------------------------------------------------------------------

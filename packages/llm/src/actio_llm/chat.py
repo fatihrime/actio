@@ -14,7 +14,7 @@ Closing the stream early stops the model: wrap it in `contextlib.aclosing`.
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 # --- Messages ------------------------------------------------------------------------
 
@@ -197,4 +197,18 @@ class ChatProvider(Protocol):
 
     def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
         """Send `request` and yield the model's answer as it is written."""
+        ...
+
+
+@runtime_checkable
+class LoadsAhead(Protocol):
+    """A provider whose server can be asked to load a model into memory before anything
+    is asked of it, so that the first question doesn't wait for the load. Ollama's can;
+    a server that speaks OpenAI's API has no such call.
+
+    `isinstance(provider, LoadsAhead)` says whether a provider can."""
+
+    async def load(self, model: str, *, context_window: int | None = None) -> None:
+        """Have the server load `model`, as it will be asked with `context_window`, and
+        return once the server says that it has."""
         ...

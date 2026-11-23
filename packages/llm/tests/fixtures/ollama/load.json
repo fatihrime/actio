@@ -1,0 +1,19 @@
+{
+  "method": "POST",
+  "path": "/api/chat",
+  "request": {
+    "model": "granite4:micro",
+    "messages": [],
+    "stream": true,
+    "truncate": false,
+    "shift": false,
+    "keep_alive": "5m",
+    "options": {
+      "num_ctx": 4096,
+      "num_predict": 4096
+    }
+  },
+  "status": 200,
+  "content_type": "application/json; charset=utf-8",
+  "body": "{\"model\":\"granite4:micro\",\"created_at\":\"2026-11-23T16:48:07.979569Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"load\"}"
+}

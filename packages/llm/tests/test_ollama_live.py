@@ -9,6 +9,7 @@ need a second model on that server, named by an environment variable:
 On an Apple Silicon Mac, qwen3.5:4b is both.
 """
 
+import asyncio
 import os
 import time
 from contextlib import aclosing
@@ -65,6 +66,51 @@ async def test_closing_the_stream_frees_the_server(live_url: str) -> None:
 
     assert isinstance(last, Finish)
     assert time.monotonic() - started < 15
+
+
+async def test_a_model_loaded_ahead_is_not_loaded_again_by_the_next_question(
+    live_url: str,
+) -> None:
+    """A load that leaves out the chat's `"shift": false`, or names another window,
+    makes the server load the model again at the next question. Measured on Ollama
+    0.40.16 with this model: the question after a load took 6 to 13 ms to load, against
+    1,865 ms after a load without the flag (ADR 0026).
+
+    The model is unloaded first, the way Ollama's documentation says: a request with no
+    messages and `keep_alive` 0. Then the load is the only thing that can have loaded
+    it.
+    """
+    async with httpx2.AsyncClient(base_url=live_url) as client:
+        unloaded = await client.post(
+            "/api/chat", json={"model": MODEL, "messages": [], "keep_alive": 0}
+        )
+        assert unloaded.status_code == 200
+        async with asyncio.timeout(15):
+            while True:
+                if MODEL not in await _loaded(client):
+                    break
+                await asyncio.sleep(0.1)
+
+        ollama = Ollama(client)
+        await ollama.load(MODEL, context_window=CONTEXT)
+        question = ChatRequest(
+            model=MODEL,
+            messages=[User("Reply with: ok")],
+            context_window=CONTEXT,
+            max_output_tokens=5,
+        )
+        async with aclosing(ollama.stream(question)) as events:
+            last = [event async for event in events][-1]
+
+    assert isinstance(last, Finish)
+    assert last.timings is not None
+    assert last.timings.load_ms < 500
+
+
+async def _loaded(client: httpx2.AsyncClient) -> set[str]:
+    """The models the server has in memory now, by name."""
+    response = await client.get("/api/ps")
+    return {str(entry.get("name")) for entry in response.json().get("models") or ()}
 
 
 async def test_a_reasoning_model_thinks_only_when_asked(live_url: str) -> None:
