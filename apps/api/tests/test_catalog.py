@@ -8,6 +8,7 @@ and an OpenAI-compatible server by fakellm.
 import asyncio
 import json
 import tomllib
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -523,6 +524,34 @@ async def test_ollama_says_whether_it_has_a_model_and_whether_the_model_can_reas
 
 async def test_a_server_that_does_not_answer_is_unreachable_not_an_error() -> None:
     transports = {"ollama": unreachable(), "lab": unreachable()}
+
+    async with catalogs.build(
+        parsed(GOOD), ollama_url="http://ollama", transports=transports
+    ) as catalog:
+        statuses = await catalog.statuses(now=NOON)
+
+    assert statuses == {
+        "standard": ModelStatus("unreachable", False),
+        "big": ModelStatus("unreachable", False),
+    }
+
+
+class NeverGzip(httpx2.AsyncByteStream):
+    """A body as it comes from the network, which a server said was compressed."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"this was never gzip"
+
+
+async def test_a_server_whose_answers_cant_be_unpacked_is_unreachable_not_an_error() -> None:
+    """Its answer about a model is nonsense. The HTTP client's error for that is none
+    of its errors of the connection: let out as it was, it failed the list of models."""
+
+    def packed_badly(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, headers={"content-encoding": "gzip"}, stream=NeverGzip())
+
+    nonsense = httpx2.MockTransport(packed_badly)
+    transports = {"ollama": nonsense, "lab": nonsense}
 
     async with catalogs.build(
         parsed(GOOD), ollama_url="http://ollama", transports=transports

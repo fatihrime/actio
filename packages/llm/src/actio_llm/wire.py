@@ -39,6 +39,13 @@ type Rejection = Callable[[httpx2.Response, str], LLMError]
 """Builds the error for a response that isn't 200, from the response and its body."""
 
 
+def _unpacked_badly(provider: str, error: httpx2.DecodingError) -> ProviderError:
+    """A body that says it is compressed, and can't be unpacked. The HTTP client's error
+    for it is none of its errors of the connection (`TransportError`), so it is caught
+    by its own name wherever a body is read."""
+    return ProviderError(f"{provider} sent an answer that can't be unpacked: {error!r}")
+
+
 async def stream_lines(
     client: httpx2.AsyncClient,
     path: str,
@@ -79,6 +86,8 @@ async def stream_lines(
             raise too_slow from error
         except httpx2.TransportError as error:
             raise ProviderUnavailableError(f"can't reach {provider}: {error!r}") from error
+        except httpx2.DecodingError as error:
+            raise _unpacked_badly(provider, error) from error
 
         lines = response.aiter_lines()
         started = False
@@ -98,6 +107,12 @@ async def stream_lines(
             except httpx2.TransportError as error:
                 raise StreamInterruptedError(
                     f"the connection to {provider} broke: {error!r}"
+                ) from error
+            except httpx2.DecodingError as error:
+                if not started:
+                    raise _unpacked_badly(provider, error) from error
+                raise StreamInterruptedError(
+                    f"{provider}'s answer couldn't be unpacked half-way: {error!r}"
                 ) from error
             if line is None:
                 return
@@ -126,6 +141,10 @@ async def request_json(
         )
     except httpx2.TransportError as error:
         raise ProviderUnavailableError(f"can't reach {provider}: {error!r}") from error
+    except httpx2.DecodingError as error:
+        raise ProviderError(
+            f"{provider} answered {path} with something that can't be unpacked: {error!r}"
+        ) from error
     if response.status_code != 200:
         raise rejection(response, response.text)
     try:

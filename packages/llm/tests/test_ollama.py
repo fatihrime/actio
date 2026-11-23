@@ -7,6 +7,7 @@ healthy server won't produce on demand: broken streams, timeouts, old versions.
 
 import asyncio
 import json
+import zlib
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing
 from typing import Any
@@ -564,6 +565,56 @@ async def test_events_before_a_break_are_delivered_then_the_break_is_reported(se
         await read()
 
     assert received == [TextDelta("Hel")]
+
+
+# A body that says it is compressed, and can't be unpacked. The HTTP client has an
+# error of its own for that, which is none of its errors of the connection: unwrapped,
+# it failed a turn as a mistake of Actio's, and the list of models with a status 500.
+
+GZIPPED = {"content-encoding": "gzip"}
+
+
+def packed_badly(status: int = 200) -> Handler:
+    """Answers with a body that was never gzip, as one read from the network: a response
+    made with its content at hand is unpacked as it is made, in the test itself."""
+    return lambda _request: httpx2.Response(
+        status, headers=GZIPPED, stream=Paced(b"this was never gzip")
+    )
+
+
+async def test_an_answer_that_cant_be_unpacked_is_the_providers_failure(serve: Serve) -> None:
+    with pytest.raises(ProviderError, match="Ollama sent an answer that can't be unpacked"):
+        await collect(serve(packed_badly()).stream(ask("hi")))
+
+
+async def test_an_answer_that_cant_be_unpacked_half_way_is_an_interruption(serve: Serve) -> None:
+    packer = zlib.compressobj(wbits=31)  # gzip
+    first = packer.compress(ndjson(piece("Hel"))) + packer.flush(zlib.Z_SYNC_FLUSH)
+    broken = Paced(first, b"\xff no longer gzip \xff")
+    ollama = serve(lambda _request: httpx2.Response(200, headers=GZIPPED, stream=broken))
+    received: list[StreamEvent] = []
+
+    async def read() -> None:
+        async for event in ollama.stream(ask("hi")):
+            received.append(event)  # noqa: PERF401 - the list must outlive the exception
+
+    with pytest.raises(StreamInterruptedError, match="couldn't be unpacked half-way"):
+        await read()
+
+    assert received == [TextDelta("Hel")]
+
+
+async def test_a_small_call_answered_with_what_cant_be_unpacked_is_the_providers_failure(
+    serve: Serve,
+) -> None:
+    with pytest.raises(ProviderError, match=r"answered /api/show with something that can't be"):
+        await serve(packed_badly()).describe(MODEL)
+
+
+async def test_a_refusal_that_cant_be_unpacked_is_the_providers_failure(serve: Serve) -> None:
+    """The body of an error is read to say what the server refused."""
+    with pytest.raises(ProviderError, match="Ollama sent an answer that can't be unpacked"):
+        await collect(serve(packed_badly(400)).stream(ask("hi")))
 
 
 @pytest.mark.parametrize(
