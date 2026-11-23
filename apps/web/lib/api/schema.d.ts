@@ -740,8 +740,12 @@ export interface components {
             status: "running" | "completed" | "stopped" | "failed" | "interrupted";
             /**
              * Finish Reason
-             * @description Why the model stopped, when it did by itself: `stop`, or `length` when it ran
-             *     into the limit on an answer's size.
+             * @description Why the model stopped, when it did by itself. `stop`: it had finished. `length`:
+             *     it ran into the limit on a single answer's size. `context_window`: the conversation
+             *     and the answer together filled the model's context window. A model's server that
+             *     doesn't count what it read and wrote says `length` for both limits, and so do turns
+             *     recorded before the two were told apart. A provider may give other reasons, such as
+             *     `content_filter`.
              */
             finish_reason: string | null;
             /**

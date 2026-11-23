@@ -22,7 +22,12 @@ const FAILURES: Record<string, string> = {
  * still running. `answered` says whether the conversation has an answer of the turn's
  * with words in it: a turn can complete without one, when its model wrote nothing, or
  * thought and then wrote nothing. The server stores no empty answer, and the turn's
- * record alone doesn't say. */
+ * record alone doesn't say.
+ *
+ * Two limits can end an answer, and the server says which (ADR 0014, revision "a turn
+ * says which limit its answer reached"): the end of the model's context window, which
+ * the conversation and the answer filled together (`context_window`), or the longest a
+ * single answer may be (`length`). */
 export function outcomeOf(turn: Turn, answered: boolean): string | null {
   switch (turn.status) {
     case "failed":
@@ -33,26 +38,49 @@ export function outcomeOf(turn: Turn, answered: boolean): string | null {
     case "stopped":
       return "This answer was stopped before it was finished.";
     case "interrupted":
-      return "The server was restarted while this answer was being written.";
+      // A shutdown, a process that died, or one that was silent for so long that the
+      // server gave up on its turn (ADR 0022).
+      return "This answer broke off: the server that was writing it was restarted, or stopped answering.";
     case "completed":
-      if (turn.finish_reason !== "length") {
-        return answered ? null : "The model gave no answer.";
-      }
-      // Near a usage limit an answer is given less room than the model allows
-      // (ADR 0020). When it ran out of that, the limit is why it stops.
-      return turn.capped_by_usage
-        ? "This answer stops here: your usage limit left no room for more of it."
-        : "The answer reached the model's length limit, and stops here.";
+      return completedWith(turn, answered);
     case "running":
       return null;
   }
 }
 
+/** What is said of a turn that completed. */
+function completedWith(turn: Turn, answered: boolean): string | null {
+  if (turn.finish_reason === "context_window") {
+    return answered
+      ? "The conversation has filled the model's context window, and the answer stops here. Start a new chat to go on."
+      : "The conversation has filled the model's context window, and the model wrote no answer. Start a new chat to go on.";
+  }
+  if (turn.finish_reason !== "length") {
+    return answered ? null : "The model gave no answer.";
+  }
+  // Near a usage limit an answer is given less room than the model allows (ADR 0020).
+  // When it ran out of that, the limit is why it stops.
+  if (turn.capped_by_usage) {
+    return "This answer stops here: your usage limit left no room for more of it.";
+  }
+  if (answered) {
+    return "The answer reached the longest a single answer may be, and stops here.";
+  }
+  // Its reasoning counts toward the same limit, and can use it all up.
+  return turn.thinking
+    ? "The model was still thinking when it reached the longest a single answer may be, and wrote no answer. Try again, or turn off “Think before answering” first."
+    : "The model reached the longest a single answer may be, and wrote no answer.";
+}
+
 /** Whether a turn left its question open for another try: it ended any other way than
  * completed, or it completed and left no answer with words in it (`answered`, as for
- * `outcomeOf`). */
+ * `outcomeOf`). Not at the end of the context window: another try of the same
+ * question meets it again. */
 export function canRetry(turn: Turn, answered: boolean): boolean {
   if (turn.status === "running") {
+    return false;
+  }
+  if (turn.status === "completed" && turn.finish_reason === "context_window") {
     return false;
   }
   return turn.status !== "completed" || !answered;

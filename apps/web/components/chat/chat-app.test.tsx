@@ -39,6 +39,12 @@ const EARLIER = {
 };
 /** What the page says of a turn that completed, and left no answer. */
 const NO_ANSWER = "The model gave no answer.";
+/** What it says of a model asked to think, that thought all a single answer may hold. */
+const THOUGHT_TOO_LONG =
+  "The model was still thinking when it reached the longest a single answer may be, and wrote no answer. Try again, or turn off “Think before answering” first.";
+/** What it says of an interrupted turn. */
+const BROKE_OFF =
+  "This answer broke off: the server that was writing it was restarted, or stopped answering.";
 
 /** What the page posted to start a turn. */
 interface Posted {
@@ -568,29 +574,142 @@ describe("an answer that doesn't arrive whole", () => {
     expect(screen.getAllByRole("article")).toHaveLength(1);
   });
 
-  it("offers another try when the model reached its length limit before a word", async () => {
-    fakeApi().on(CONVERSATION, () =>
-      json(
-        200,
-        conversation(
-          RECORDED.conversation,
-          [question(RECORDED.question, "Count to five.")],
-          turn({
-            finish_reason: "length",
-            output_tokens: 0,
-            first_word_at: null,
-          }),
+  // Two limits can end an answer, and the turn's record says which: the end of the
+  // model's context window, or the longest a single answer may be. Another try helps
+  // only where no words came, and never at the window's end, which it meets again.
+  it.each([
+    {
+      ending: "the end of the context window, after words",
+      by: { finish_reason: "context_window" },
+      left: "words",
+      said: "The conversation has filled the model's context window, and the answer stops here. Start a new chat to go on.",
+      again: false,
+    },
+    {
+      ending: "the end of the context window, before a word",
+      by: { finish_reason: "context_window" },
+      left: "nothing",
+      said: "The conversation has filled the model's context window, and the model wrote no answer. Start a new chat to go on.",
+      again: false,
+    },
+    {
+      // The window's end came first, or at the same moment: it is what ended the
+      // answer, and what another try would meet again.
+      ending:
+        "the end of the context window, where a usage limit had left it less room too",
+      by: { finish_reason: "context_window", capped_by_usage: true },
+      left: "nothing",
+      said: "The conversation has filled the model's context window, and the model wrote no answer. Start a new chat to go on.",
+      again: false,
+    },
+    {
+      ending: "the longest an answer may be, after words",
+      by: { finish_reason: "length" },
+      left: "words",
+      said: "The answer reached the longest a single answer may be, and stops here.",
+      again: false,
+    },
+    {
+      ending: "the longest an answer may be, before a word",
+      by: { finish_reason: "length" },
+      left: "nothing",
+      said: "The model reached the longest a single answer may be, and wrote no answer.",
+      again: true,
+    },
+    {
+      ending: "the longest an answer may be, while it was asked to think",
+      by: { finish_reason: "length", thinking: true },
+      left: "a thought",
+      said: THOUGHT_TOO_LONG,
+      again: true,
+    },
+    {
+      ending: "what a usage limit left it, after words",
+      by: { finish_reason: "length", capped_by_usage: true },
+      left: "words",
+      said: "This answer stops here: your usage limit left no room for more of it.",
+      again: false,
+    },
+    {
+      ending: "what a usage limit left it, before a word",
+      by: { finish_reason: "length", capped_by_usage: true },
+      left: "nothing",
+      said: "This answer stops here: your usage limit left no room for more of it.",
+      again: true,
+    },
+  ] as const)(
+    "says when a stored answer ended at $ending, and offers another try only where one helps",
+    async ({ by, left, said, again }) => {
+      const ended = turn(by);
+      const asked = question(RECORDED.question, "Count to a hundred.");
+      const thought: StoredMessage = {
+        ...answer(RECORDED.answer, "", RECORDED.question, ended),
+        parts: [{ type: "reasoning", text: "Let me count them all." }],
+      };
+      fakeApi().on(CONVERSATION, () =>
+        json(
+          200,
+          left === "nothing"
+            ? // The model wrote nothing: the question stands open, with its turn.
+              conversation(RECORDED.conversation, [asked], ended)
+            : conversation(RECORDED.conversation, [
+                asked,
+                left === "words"
+                  ? answer(
+                      RECORDED.answer,
+                      "One, two",
+                      RECORDED.question,
+                      ended,
+                    )
+                  : thought,
+              ]),
         ),
-      ),
-    );
+      );
 
-    open(`/c/${RECORDED.conversation}`);
+      open(`/c/${RECORDED.conversation}`);
+
+      expect(await screen.findByText(said)).toBeVisible();
+      expect(screen.queryByText(NO_ANSWER)).not.toBeInTheDocument();
+      if (again) {
+        expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+      } else {
+        expect(
+          screen.queryByRole("button", { name: "Try again" }),
+        ).not.toBeInTheDocument();
+      }
+    },
+  );
+
+  it("says so as it arrives when the model was still thinking at the longest an answer may be, and asks again as the switch says then", async () => {
+    // Asked to think, the model thought until it had written all a single answer may
+    // hold, and wrote no answer. Another try may go better without thinking.
+    const api = fakeApi();
+    api.on(
+      TURNS,
+      () => streamed("thought_too_long.sse"),
+      () => streamed("answer.sse"),
+    );
+    const user = open();
+    await user.click(await screen.findByLabelText("Think before answering"));
+
+    await ask(user, "How many words are there?");
+
+    expect(await screen.findByText(THOUGHT_TOO_LONG)).toBeVisible();
+    // What it thought is there to read.
+    expect(screen.getByText("Thought before answering")).toBeInTheDocument();
+    expect(posted(api.to(TURNS)[0]).thinking).toBe(true);
+
+    // As the sentence says: the switch off first, then another try.
+    await user.click(screen.getByLabelText("Think before answering"));
+    await user.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(
-      await screen.findByText(/reached the model's length limit/),
-    ).toBeVisible();
-    expect(screen.queryByText(NO_ANSWER)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    expect(posted(api.to(TURNS)[1])).toEqual({
+      answer_to: sentQuestion(api),
+      thinking: false,
+    });
   });
 
   it("keeps the beginning of an answer that broke off", async () => {
@@ -665,11 +784,7 @@ describe("an answer that doesn't arrive whole", () => {
 
     await ask(user, "Are you there?");
 
-    expect(
-      await screen.findByText(
-        "The server was restarted while this answer was being written.",
-      ),
-    ).toBeVisible();
+    expect(await screen.findByText(BROKE_OFF)).toBeVisible();
     expect(api.to(CONVERSATION)).toHaveLength(2);
     const [before, kept] = screen.getAllByRole("article", { name: "Actio" });
     // The answer as it was kept, shorter than what arrived.
@@ -687,14 +802,16 @@ describe("an answer that doesn't arrive whole", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
-  it("says when an answer ran into the model's length limit", async () => {
+  it("says when an answer ran into the longest a single answer may be", async () => {
     fakeApi().on(TURNS, () => streamed("cut_off.sse"));
     const user = open();
 
     await ask(user, "Count to five.");
 
     expect(
-      await screen.findByText(/reached the model's length limit/),
+      await screen.findByText(
+        "The answer reached the longest a single answer may be, and stops here.",
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText("One, two, three")).toBeInTheDocument();
     expect(
@@ -724,7 +841,7 @@ describe("an answer that doesn't arrive whole", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(/reached the model's length limit/),
+      screen.queryByText(/the longest a single answer may be/),
     ).not.toBeInTheDocument();
   });
 
@@ -1110,11 +1227,7 @@ describe("a conversation's address", () => {
       .on(TURNS, () => streamed("answer.sse"));
     const user = open(`/c/${RECORDED.conversation}`);
 
-    expect(
-      await screen.findByText(
-        "The server was restarted while this answer was being written.",
-      ),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(BROKE_OFF)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Try again" }));
 
