@@ -6,9 +6,9 @@ Actio is a self-hostable, local-first AI platform. It will combine:
 - a gateway compatible with OpenAI's and Anthropic's APIs, so coding agents can use the same models;
 - usage limits inspired by Claude's, whose correctness is tested.
 
-!!! info "Status: Phase 1, local chat and usage limits"
+!!! info "Status: Phase 1 of 7 is done (v0.2.0), local chat and usage limits"
 
-    The chat works on a local model: `make up`, open the page, and ask. Answers are formatted, conversations are kept and listed, and a guest can sign up. Every answer is held to [usage limits](getting-started.md#usage-limits), counted by a [tested engine](reference/quota.md), and the page shows how much is used and what to do at a limit. An answer is [written to its end](adr/0022-turns-that-run-apart-from-their-request.md) whether or not its page stays open, and a page that comes back to it, after a reload or from another window, reads along. Answers [wait their turn](adr/0023-answers-that-wait-their-turn.md) for a local model that writes one at a time, and an account has only so many being written at once. The gateway comes next; see the [roadmap](https://github.com/fatihrime/actio#roadmap).
+    The chat works on a local model: `make up`, open the page, and ask. Answers are formatted, conversations are kept and listed, and a guest can sign up. Every answer is held to [usage limits](getting-started.md#usage-limits), counted by a [tested engine](reference/quota.md), and the page shows how much is used and what to do at a limit. An answer is [written to its end](adr/0022-turns-that-run-apart-from-their-request.md) whether or not its page stays open, and a page that comes back to it, after a reload or from another window, reads along. Answers [wait their turn](adr/0023-answers-that-wait-their-turn.md) for a local model that writes one at a time, and an account has only so many being written at once. Phase 2 comes next, the model router and the developer gateway; see the [roadmap](https://github.com/fatihrime/actio#roadmap).
 
 ## Where to start
 
