@@ -29,6 +29,7 @@ dev = [
     "import-linter>=2.16",
     "mypy>=2.4.1",
     "openai>=3.46.0",
+    "pillow>=13.0.0",
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",

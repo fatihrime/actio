@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live e2e build
+.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live e2e build demo-record
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -94,6 +94,16 @@ e2e: ## Run the end-to-end tests: the stack in containers with a fake model, dri
 build: ## Build the web app for production, and the documentation site (strict: warnings fail)
 	pnpm --dir apps/web run build
 	uv run zensical build --strict
+
+# Not part of `make check`: it drives the running stack, as `make up` runs it, whose
+# model must answer, and starts or stops nothing itself. The frames go to a folder of
+# their own outside the repository, removed at the end. Chromium's headless build is
+# downloaded once, as for the end-to-end tests. See docs/development.md.
+demo-record: ## Record the README's hero GIF from the running stack, into docs/assets/hero.gif
+	@pnpm --dir apps/web exec playwright install --only-shell chromium
+	@frames="$$(mktemp -d)" && trap 'rm -rf "$$frames"' EXIT && \
+	    pnpm --dir apps/web exec node demo/record.mts "$$frames" && \
+	    uv run python scripts/demo_gif.py "$$frames" docs/assets/hero.gif
 
 # Created once and never overwritten: Postgres keeps the password it started with.
 .env:
