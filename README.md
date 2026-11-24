@@ -44,7 +44,7 @@ Actio tackles these problems end to end on a 16 GB laptop and free tiers.
   - The engine runs as Lua scripts inside Valkey, so two requests at the same moment can never both take the last credits.
   - A plain-Python reference model is its specification. Random sequences of requests, crashes, clock jumps and data loss run against both, and their results and stored state must match after every step.
   - In the chat's API, an answer's credits are held before a model is asked, and what it used is written to a ledger in Postgres before the counters hear of it. Valkey keeps nothing on disk: restart it, and every account's limits are counted up again from the ledger. A question that doesn't fit is refused before it is stored.
-  - Measured: guessing a prompt's size from its bytes came out at under half for a page of numbers, because the model reads every digit as a token. The guess now counts digits one by one, and the provider's own count settles the bill.
+  - Measured: guessing a prompt's size from its bytes came out at under half for a page of numbers, because the model reads every digit as a token. So the guess counts digits one by one, and the provider's own count settles the bill.
   - The page counts nothing itself. It shows what the server counted, and learns that a limit is reached by being refused; the time to wait is taken from the length of the wait, not from a clock that may be wrong. A test in a real browser reaches a limit, carries on with a free model, and reloads to the same counts.
   - [The engine (ADR 0006)](docs/adr/0006-usage-limits-engine.md) · [in the chat's API (ADR 0020)](docs/adr/0020-usage-limits-on-turns.md) · [in the page (ADR 0021)](docs/adr/0021-usage-limits-in-the-page.md) · [the rules](https://fatihrime.github.io/actio/reference/quota/) · [the tests](packages/quota/tests)
 
@@ -62,7 +62,7 @@ Actio tackles these problems end to end on a 16 GB laptop and free tiers.
 
 - **A page whose speed is measured, in three browser engines.**
   - Every phase ends with a performance run in Chromium, Firefox and WebKit, against numbers the project holds itself to: no frame longer than 50 ms while an answer of 4,000 words arrives at 300 words a second, and a box that can be typed into within 0.3 s of a first visit on a desktop. At the end of Phase 1 that took 0.11 s, and 1.9 s on a phone profile, which is a CPU slowed four times on slow 4G.
-  - The runs found what using the page had not: a freeze of 1.5 s at the first block of TypeScript in Safari's engine, a long conversation that opened as one uninterrupted render, and a query that read a conversation again at every step of walking it, 360,000 rows for 600 messages.
+  - The runs found what using the page had not: frames of 0.8 and 0.6 s at the first block of TypeScript in Safari's engine, a long conversation that opened as one uninterrupted render, and a query that read a conversation again at every step of walking it, 360,000 rows for 600 messages.
   - A run can mislead too. One reported a click as slow that was slow only in the test's own driver, and the page on performance says so.
   - [How a run is made, the numbers, and what the runs found](https://fatihrime.github.io/actio/performance/)
 
