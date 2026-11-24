@@ -1,6 +1,6 @@
 [project]
 name = "actio"
-version = "0.0.0"
+version = "0.2.0"
 description = "Actio's API and worker processes: one modular FastAPI application."
 requires-python = ">=3.13"
 license = "MIT"

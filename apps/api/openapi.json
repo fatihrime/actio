@@ -3,7 +3,7 @@
   "info": {
     "title": "Actio",
     "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** Everything but the health checks needs a session, a guest's included.\n  It lives in a cookie: start one with `POST /api/session/guest`. Without one the\n  answer is 401.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. A request that changes something, sent by a page on another\n  site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`. An\n  answer is written whether or not anyone reads along. It can be joined again, and\n  stopped, by the turn's id.\n- **Usage is limited** per session and per week. `GET /api/usage` says how much is\n  left, and a question that no longer fits is answered 429, with when it will. A plan\n  may also limit how many answers are written for one account at once, and an account\n  reads along with only so many at once: past either, the answer is 429 too.\n",
-    "version": "0.0.0"
+    "version": "0.2.0"
   },
   "paths": {
     "/api/healthz": {

@@ -1,6 +1,6 @@
 [project]
 name = "actio-fakellm"
-version = "0.0.0"
+version = "0.2.0"
 description = "A deterministic, OpenAI-compatible fake LLM server for Actio's tests."
 readme = "README.md"
 requires-python = ">=3.13"

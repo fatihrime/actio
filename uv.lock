@@ -39,7 +39,7 @@ docs = [{ name = "zensical", specifier = ">=0.1.0" }]
 
 [[package]]
 name = "actio"
-version = "0.0.0"
+version = "0.2.0"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "actio-llm" },
@@ -78,7 +78,7 @@ requires-dist = [
 
 [[package]]
 name = "actio-fakellm"
-version = "0.0.0"
+version = "0.2.0"
 source = { editable = "packages/fakellm" }
 dependencies = [
     { name = "fastapi" },
@@ -95,7 +95,7 @@ requires-dist = [
 
 [[package]]
 name = "actio-llm"
-version = "0.0.0"
+version = "0.2.0"
 source = { editable = "packages/llm" }
 dependencies = [
     { name = "httpx2" },
@@ -106,7 +106,7 @@ requires-dist = [{ name = "httpx2", specifier = ">=2.16.0" }]
 
 [[package]]
 name = "actio-quota"
-version = "0.0.0"
+version = "0.2.0"
 source = { editable = "packages/quota" }
 dependencies = [
     { name = "tzdata" },
