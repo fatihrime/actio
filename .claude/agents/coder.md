@@ -1,6 +1,6 @@
 ---
 name: coder
-description: Builds one delegated piece of work in this repository. Use it for the first version of a step - code, tests, migrations, configuration and documentation - and again for any larger change that comes up after the review. Small corrections are the supervisor's own. It is the only agent that edits files, and nothing else may change files while it runs, so run one at a time and give it a self-contained brief.
+description: Builds one delegated piece of work in this repository. Use it for the first version of a step - code, tests, migrations, configuration and documentation - and again for any larger change that comes up after the review. Small corrections are the supervisor's own. It is the only agent that edits files, and nothing else may change files while it runs, so run one at a time and give it a self-contained brief. Start a new one for each step; continue it only within that step.
 tools: Read, Edit, Write, Bash
 model: opus
 effort: xhigh

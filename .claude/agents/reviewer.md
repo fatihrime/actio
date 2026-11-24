@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Reviews the uncommitted change of a step against the step's requirements, and reports findings labelled must-fix or minor. Use it once, after the coder's first build of the step. Use it again only when a later fix brought a new design or more than a small change to the source, and then give it just that part. It is read-only - it cannot edit files or run the code - so give it the step's requirements and acceptance criteria, and expect a report, not a fix.
+description: Reviews the uncommitted change of a step against the step's requirements, and reports findings labelled must-fix or minor. Use it once, after the coder's first build of the step. Use it again only when a later fix brought a new design or more than a small change to the source, and then give it just that part. It is read-only - it cannot edit files or run the code - so give it the step's requirements and acceptance criteria, and expect a report, not a fix. Start a new one for each step; continue it only within that step.
 tools: Read, Bash
 disallowedTools: Write, Edit, NotebookEdit
 model: opus

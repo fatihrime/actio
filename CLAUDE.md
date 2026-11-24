@@ -22,18 +22,19 @@ The layout is the one Claude Code's documentation describes for subagents. One w
 Rules for the supervisor:
 
 - **Keep a step small:** one feature, with its tests and its documentation. A step of the plan that holds several is split before it starts: say how in the step's first message.
+- **One step, one session.** The maintainer starts each step in a fresh session (`/clear`). So before a step's report, write into your notes what the next session needs: where the work stands, what was handed over, and what comes next. Nothing is left to the conversation, which the next session doesn't have. A session sends its whole conversation again with every request, so a second step in the same one pays for the first at each of its requests. Keep the notes short as well: replace what is no longer true instead of adding to it, and move what has become history out of them rather than deleting it.
 - **Check a decision against the tool's own documentation before the brief,** for the version in use, when it rests on how a tool behaves: a flag, a default, a limit. A decision that is reversed after it was built costs a round.
 - **Who writes what:**
     - the coder builds the step's first version: new behaviour, and changes to the source across several files. That keeps the writing, and the reading it takes, out of this session;
     - you make the small changes yourself: what takes a few edits from what you already know. A finding of the review, wording, a comment, an assertion of a test, a number in a decision record, the account of what you measured. Then run the tests of what you touched;
-    - a larger change that comes up later goes back to the coder that built the step. Continue that agent, which keeps what it has read, instead of starting a new one.
+    - a larger change that comes up later in the step goes back to the coder that built it. Continue that agent, which keeps what it has read, instead of starting a new one. Only within the step: a new step starts a new coder and a new reviewer. One continued from an earlier step sends that step again with every request, and a reviewer that read the last step is no longer one that hasn't seen how the code was written.
 - Start an agent by its name, and pass no model and no effort. Its file sets both, and a value passed at the start would replace the file's.
 - An agent starts with a fresh context, and without this session's memory. So every brief is self-contained: the goal, the relevant files and decision records, the requirements and acceptance criteria, the constraints, and what to report back.
-- One writer at a time. While the coder is running, change no file and run nothing that changes one: `make lint` fixes files. Work that only reads may run beside it.
+- One writer at a time. While the coder is running, change no file and run nothing that changes one: `make lint` fixes files. Work that only reads may run beside it. A timing measurement is not such work: it doesn't run beside the coder's tests or the test suites, since each bends the other's figures.
 - One plan step per go-ahead. For each step, in order:
 
-    1. Brief the coder, and wait for its report. The brief says which checks it runs before it reports: the tests of what it changed and `make lint`, and the end-to-end tests once if it wrote any. It plants no mistakes and runs nothing many times over: that is step 5, and yours.
-    2. Run the reviewer, once, with the step's requirements. Meanwhile read the actual diff yourself: `git diff HEAD`, and `git status --short --untracked-files=all` for a file nobody registered.
+    1. Start a new coder with the step's brief, and wait for its report. The brief says which checks it runs before it reports: the tests of what it changed and `make lint`, and the end-to-end tests once if it wrote any. It plants no mistakes and runs nothing many times over: that is step 5, and yours.
+    2. Start a new reviewer, once, with the step's requirements. Meanwhile read the actual diff yourself: `git diff HEAD`, and `git status --short --untracked-files=all` for a file nobody registered.
     3. Verify every finding of the reviewer against the code, and check the change against the requirements. In a large diff, concentrate on the flagged files and the critical paths.
     4. Fix what has to be fixed: the small things yourself, a large one through the coder. The reviewer reads again only when a fix brought a new design, or more than a small change to the source, and then only that part. After three rounds of fixes that didn't settle it, stop and ask the maintainer.
     5. Verify once, on the tree as it will be committed:
@@ -50,6 +51,7 @@ Rules for the supervisor:
         - the reviewer's findings, and how each was resolved;
         - anything you could not verify;
         - how to verify the step;
-        - the commit commands.
+        - the commit commands;
+        - that your notes are written for the next step, which starts in a new session.
 
 - Never report a step as done unless the tests pass on the tree as it is handed over, and you have checked the diff yourself.
