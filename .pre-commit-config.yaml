@@ -13,6 +13,9 @@ repos:
     hooks:
       - id: check-added-large-files # keeps models, videos and datasets out of git
         args: [--maxkb=500]
+        # The README's hero GIF is the one heavy file that belongs here. `make
+        # demo-record` makes it, and fails when it is heavier than 1.5 MB.
+        exclude: ^docs/assets/hero\.gif$
       - id: check-case-conflict
       - id: check-executables-have-shebangs
       - id: check-merge-conflict
