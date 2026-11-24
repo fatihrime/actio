@@ -897,3 +897,64 @@ A stored conversation opened at its end, always (revision "a long conversation o
 - **A frame of over 100 ms while 600 messages are scrolled through in WebKit** was there before and is there after, once in 60 notches. Its cause is not known.
 
 **Why now, and not at the start:** it was asked for on 2026-11-24, by the maintainer, as a reader of long conversations. The step also found what the measuring of "newest first" had not looked for: a block of code that changes its height when it comes near the window, which ADR 0016's revision of the same day ends.
+
+### 2026-11-24: fewer messages at once, the end without a wait, the place kept over a reload
+
+The revision before this one left two things: going to the newest message right after coming back far up a very long conversation stopped the page, and a reload opened a conversation at its end. The maintainer asked for both to be ended, and whether 20 was the right number of messages to draw at once: it had been given as an example.
+
+- **Ten messages are drawn at once, and more only while they don't fill the window.** Twenty had one reason: 20 messages of one line still fill a window, which 10 may not. Measured on a build whose numbers a probe could set, a conversation of 100 exchanges come back to at a place, five returns a setting, the middle one:
+
+    | Drawn at once | The first frame after the press, WebKit | Firefox | Chromium | The longest frame after it, Chromium at a quarter of the CPU's speed |
+    |---|---|---|---|---|
+    | 8 | 59 ms | 62 ms | 58 ms | 34 ms |
+    | 12 | 66 ms | 62 ms | 56 ms | 67 ms |
+    | 20 | 82 ms | 88 ms | 57 ms | 117 ms |
+    | 30 | 97 ms | 83 ms | 53 ms | 117 ms |
+    | 40 | 107 ms | 83 ms | 41 ms | 183 ms |
+
+    So a conversation opened at its end draws its newest 10 (`DRAWN_FIRST`), and one opened at a place the 2 before the place's message and 8 from it on (`DRAWN_BEFORE_PLACE`). And the reason for 20 is now the rule itself: before the first paint, while what is shown is no higher than the window and messages are held back, the next step is shown at once (`useFollow`). At the end that is the step above (`showAbove`), the reader at the end throughout. At a place it is the step below, while the reader is short of the place or the window isn't filled, and a step above only for a window that isn't filled once nothing is held back below.
+
+- **The steps behind stay at 20.** In 300 exchanges come back to at a place, three returns a setting, steps of 10 brought the whole conversation later in every engine, by a third in Chromium at a quarter of the CPU's speed (6.5 to 6.8 s where 20 took 4.8 to 4.9 s). Steps of 40 brought it 0.8 s sooner there, a little sooner in WebKit and no sooner in Firefox, with no frame longer. Three returns a setting don't tell 20 from 40 with any certainty, and a conversation that is whole sooner behind its first screen is nothing its reader sees: 20 stays.
+- **Short of the place for lack of room below it, nothing above is drawn.** As it was built first, a reader held short asked for the step above when none was left below. What is above the place changes nothing of the room below it, so every step was drawn before the first paint: 300 exchanges left 480 px above their end and come back to in a window 500 px taller, as when a draft made the box higher when they left, were all 600 messages in one frame of 517 ms in Chromium and 782 ms in WebKit. The review found it and the measuring confirmed it. Now the step drawn at once is all that frame holds, and the reader is as near the place as the page lets them.
+- **Asking for the end is opening at the end** (`toTheEnd` in `components/chat/chat.tsx`). The button to the newest message, and a question that is sent, show the conversation's last step at once, with as many before it as fill the window, the reader at the end and the end followed. Everything else comes in above, a step at a time while the reader is still, the nearest first, as a conversation's older messages do. What was shown around the place is out of sight again and keeps its elements: when its turn comes it is shown, not drawn anew.
+- **What comes after the stored messages waits for the end:** an answer the page reads along with, what a later look at the conversation brought. It is drawn after the last stored message once the steps shown reach it, and forces nothing. A reader who came back to a place far up while an answer is written at the end stays at their place; the page reads along meanwhile, and Stop is there.
+- **What is shown is one run of the steps, and every update of it is worked out from the state it is applied to.** The page keeps which steps are drawn (`drawn`) and which run of them is shown (`from`, `to`). A step is only ever added, `to` only goes down the conversation, and `from` only up it, but for the reader's own decision in `toTheEnd`. A value taken from the render is not enough. A step drawn in a transition decides the next one in an effect that may run only when the reader has already pressed the button, and its update then comes after the button's. Measured in Firefox, as it was built first: 2 presses of 31 left no message on the page, for 676 ms in the one whose frames were kept. The page before this change had the same order to lose, in its own form: 1 press of 42 took 236 of 298 messages off the page again 58 ms after it had shown them, and brought them back over a third of a second, the reader up to 28,592 px from the end meanwhile.
+- **The places are kept for the tab,** in its `sessionStorage`, one entry (`actio.places`): the account whose they are, and for each conversation the place, which is ids, a path and an offset, nothing a message says.
+    - **Written when the page is left** (`pagehide`), not at a scroll: the page's memory is the truth while the page lives. **Read once,** at the first ask for someone who has a session, and again when the page comes back from the browser's back/forward cache, since a newer page of the same tab may have written meanwhile.
+    - **For the same account only.** A session's holder counts the page's sessions, and starts again after a reload, so the entry names the account (`accountOf` in `lib/session.ts`). The page says whose places they are whenever the session changes hands (`holdPlacesFor`, from `ChatApp`): the last session's go at once, from the tab too, and not when a conversation next asks for one.
+    - **Nothing in it is believed without looking.** Storage that the browser refuses, an entry that isn't JSON, or one of another shape, is as if there were none.
+    - **Another tab has its own,** and opens the conversation at its end. So does a reader who left it at its end, after a reload too.
+- **Tests:** in a page whose sizes the test makes up (`components/chat/newest-first.test.tsx`, `components/chat/follow.test.tsx`), the module's own (`lib/chat/places.test.ts`), and in a real browser the reload and the second tab (`e2e/newest-first.spec.ts`). The press that comes before a step's effect is made on purpose there: from a `MutationObserver`, which runs right after a commit's changes to the page and before that commit's effects.
+
+**Measured** on 2026-11-24, as in the revision before: a production build with the fake model, Playwright's builds of Chromium 158, Firefox 159 and WebKit 27.2, the page before this change and after it within the same hour, conversations of exchanges of 110 to 260 words unless said otherwise.
+
+| | Chromium | Firefox | WebKit |
+|---|---|---|---|
+| Back at a place in 100 exchanges, 5 returns: off the place at the first frame and at every frame until the reader acted | 0 px | 0 px | 0 px |
+| The same with the place inside a block of code, 3 returns | 0 px | 0 px | 0 px |
+| From the press to the first frame back, the middle of five, before and after | 42 ms, 54 ms | 79 ms, 69 ms | 88 ms, 73 ms |
+| The same for a conversation opened at its end | 52 ms, 53 ms | 72 ms, 63 ms | 71 ms, 62 ms |
+| The longest frame while the rest came in, at a place and at the end | 16.8 ms | 42 to 50 ms | 23 to 42 ms |
+| 40 exchanges of one line in a window 1,500 px high, opened at its end, 4 openings: at the first frame | 30 messages or more, the window filled | the same | the same |
+| The button with 580 to 590 of 600 messages not shown: the longest frame, before | 400 to 433 ms | 592 to 608 ms | 649 to 685 ms |
+| The same, after | 17 to 33 ms | 43 to 50 ms | 33 ms |
+| The end on the page after the press, and all of the conversation | 11 to 14 ms, 0.83 to 0.89 s | 40 to 50 ms, 1.13 to 1.17 s | 27 to 38 ms, 1.22 to 1.25 s |
+| Back 480 px above the end in a window 500 px taller: messages at the first frame, and the longest frame | 10, 17 ms | 10, 43 ms | 10, 33 ms |
+| Loaded again at a place, 4 times: off the place at the first frame and at every frame | 0 px | 0 px | 0 px |
+| A second tab, and loaded again after going to the end | at the end | at the end | at the end |
+| Back at a place near the top while an answer is written at the end: off the place; the longest frame; the answer on the page after | 0 px; 17 ms; 0.17 to 0.20 s | 0 px; 42 to 50 ms; 0.26 to 0.27 s | 0 px; 24 to 25 ms; 0.36 to 0.37 s |
+| A wheel notch turned at a random moment of the first 400 ms: kept, before and after | 5 of 5, 8 of 8 | 5 of 5, 8 of 8 | 2 of 5, 8 of 8 |
+
+- **At a quarter of the CPU's speed,** in Chromium: the longest frame while a conversation of 100 exchanges came in was 67 ms before and 33 to 50 ms after at a place, and 33 to 67 ms before and 33 to 50 ms after at the end. The button took one frame of 1.7 to 1.9 s before, and 83 to 100 ms after.
+- **The run that was emptied:** after the change to the updates, 36 presses in Firefox, none.
+- **WebKit's wheel:** the loss of a notch turned while a conversation fills in is not ended by this. The build before this revision's last fixes kept 4 of 5.
+- **An answer written fast at the end,** 250 words a second, held nothing back: the steps came in as quickly beside it, at full speed and at a quarter.
+
+**What it leaves:**
+
+- **After the button, the conversation is whole later.** The reader is at the end after 11 to 50 ms where it took 0.4 to 0.7 s, and the rest is in above them after 0.8 to 1.3 s where everything was in after 0.5 to 0.8 s. They see none of that unless they go up at once.
+- **A reader who turns the wheel without any pause gets no older messages until they pause.** Older messages are shown only while the reader is still, 150 ms without a notch (revision "a long conversation opens newest first"), and a notch turned at the top edge of what is shown counts as one. That was so before. With 10 at once the edge is nearer: a wheel turned from the first frame on, 600 px a notch and a notch every 16 ms, far faster than a hand, met it after about 0.4 s in Firefox and WebKit where it took 0.6 to 0.8 s, and stood there until it paused, in both builds. Turned in bursts with 220 ms between them, it stood there once, for 150 to 170 ms, in Firefox and WebKit, and never in Chromium. Counting a reader at that edge as still would end it, and was not tried: what Safari does there with a trackpad, whose scroll bounces at an edge, can't be seen in these engines' test builds.
+- **The places are a tab's:** not another tab's, another window's or another device's, and none in a browser that refuses its storage, where they last as long as the page.
+- **In a window of another width the place is the same block,** and not the same line of it, as before.
+
+**Why now, and not at the start:** each was left by the revision before, named there, and asked for the same day. The order of a transition's update and an urgent one was found by measuring a press many times over, in the engine where it showed: one try in fifteen is no try in three.
