@@ -826,3 +826,33 @@ The third, in the styles alone (`forced-colors:` in each component's classes, th
 - **Seen on the way, and older than this:** WebKit reported "ResizeObserver loop completed with undelivered notifications" as an error of the page in 1 run of 144 before these changes and in 1 of 84 after them, with nothing else running. The revision "the page is laid out before its sizes are watched" ended the one at every page load; what brings this rare one about isn't known.
 
 **Why now, and not at the start:** the wait line and the pace were built in different steps, and each was tested with the events that begin an answer arriving together, as they do in the recorded streams the component tests read. The empty answer lasted 50 ms; nobody looked for it. The test that met it had passed in every run until then.
+
+### 2026-11-24: what an answer took comes a frame after its last words
+
+P1's performance run set the page beside the one from before the line of what an answer took (revision "an answer says what it took"), back to back. One of the numbers the project holds itself to was no longer held, in one engine: while an answer of up to 4,000 words arrives at 300 words a second, no frame takes longer than 50 ms. In Safari's engine the frame in which such an answer ends took 37 to 54 ms, where it had taken 26 to 35.
+
+- **What that frame holds.** When an answer ends, the page hands all of its text to the renderer once more, as markdown that is complete ([ADR 0016](0016-answers-shown-as-markdown.md), revision "an arriving answer is drawn at most every 50 ms"). Since the line, the line came onto the page in that same render, after the answer's article. With the line switched off and nothing else changed, the frame was as before; with the line drawn one frame later, too. Why the line's coming costs that engine what it does, at the end of a long answer and not of a short one, isn't known: under the test's driver the engine gives no account of where a frame's time went.
+- **The line comes one frame later** (`useSettled` in `components/chat/settled.ts`, asked by `Took` in `components/chat/message.tsx`): for an answer that arrived on this page, once the frame with its last words has been painted (`afterPaint`). A stored answer's line is there from its first render: nothing of it arrived here.
+- **The wait is kept where little is drawn.** `Took` draws the line and nothing else, so a frame later the line is drawn and the answer's words are not drawn again.
+- **The notice of how the turn ended waits the same frame** (`components/chat/chat.tsx`). It stands under the line. Said with the answer's end as before, it would be there a frame before the line, and move down when the line came in above it.
+- **Tests:** with the frames held, an answer that has ended has all of its words on the page and no line, and no notice, until a frame comes; a stored answer has its line with no frame at all (`components/chat/figures.test.tsx`). In a real browser, the first frame that finds the answer over finds no line yet (`e2e/figures.spec.ts`).
+
+**Measured** in Safari's engine (WebKit 27.2), the frame in which an answer of 4,000 words at 300 words a second ends, on the machine of this record's other measurements:
+
+| | Without the line | The line in the same frame | The line a frame later |
+|---|---|---|---|
+| The night of 2026-11-23, six runs a build, the build before the line against the one with it | 26 to 35 ms | 37 to 54 ms, three of six at 50 or more | |
+| 2026-11-24, one build with a switch for the three, eight runs each in turn, the machine busy with other work | 26 to 49 ms, 40 in the middle | 38 to 53 ms, 47 in the middle | 23 to 45 ms, 37 in the middle |
+| 2026-11-24, the committed page against this change, twelve runs each in turn, the machine busy with other work | | 43 to 63 ms, 50 in the middle, six over 50 | 31 to 54 ms, 41 in the middle, one over 50 |
+
+In Chromium and Firefox no frame of that answer took longer than 19 ms with this change, in three runs each; the phase's run had found none over 34 ms without it.
+
+**What it leaves:**
+
+- **The frame in which a long answer ends still draws all of its words once more.** That is the 26 to 35 ms of the first row, and on a machine busy with other work it reached 49 ms with no line at all. The wait gives back what the line had added; it doesn't shorten that frame.
+- **The line's own frame is the next one,** 16 ms later. What it costs there was not timed apart: no frame after the answer's end was longer than the one that ends it.
+- **An answer that is not arriving when it first comes onto the page has its line in the frame that draws its words.** That is a stored answer; it would also be one whose whole stream had been read before the page drew any of it, which was not seen and not looked for. Either way it is the frame a stored conversation is drawn in, and no answer is arriving in it.
+- **Tests that look for a notice that must not be there now look a moment after the answer's end,** since a notice would come a frame after it: the end-to-end tests through `chat.answered()`, which waits three frames, and one component test by a short wait.
+- **Seen on the way: a click through the test's driver is not a person's click.** The same run found the list of conversations a quarter slower to put away under a long conversation than before the context meter (revision "the page says how full the model's window is"). It was the driver: to click a button it finds by its name, it reads a computed style of some two hundred elements, and with a container query on the page, as the meter's line has, each such read is a layout of the page. Clicked by its place on the screen, the list is put away in one frame of 17 ms under 300 exchanges, 50 at the most the first time, as before the meter. The page's own code reads no computed style, and has to keep it so in anything that runs often.
+
+**Why now, and not at the start:** the step that added the line tested what it says, when, and where it stands. How long the frame takes in which a long answer ends was measured next at the phase's end, against the build before the line: that comparison is what the run is for.

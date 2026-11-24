@@ -104,3 +104,31 @@ A conversation is what a person and a model said to each other. Storing it has t
 ### 2026-11-19: an answer kept from a dead process is dated when it was written
 
 "`last_active_at`, the time a message was last added" doesn't hold for an answer that is kept from a dead process. A turn whose process died is given up on with what it had written by its last beat as its answer ([ADR 0022](0022-turns-that-run-apart-from-their-request.md), revision "what a dead process had written is kept"). That message is added when someone looks at the conversation, or when the worker comes by, up to ten minutes later. It is dated at the turn's last beat instead, and so is the conversation's `last_active_at`: the time it was written. Dated when it was added, the conversation would move to the top of its owner's list without its owner having done anything in it.
+
+### 2026-11-24: a branch is picked out of its conversation's messages
+
+"That branch is read by walking up from there, one parent at a time, in one recursive query" no longer holds. The branch is still the one that ends at `current_leaf_id`; how it is read has changed.
+
+- **What the query did.** It joined each message to its parent inside the database, and named the conversation at every step. How the database ran it was its planner's choice, and the planner takes a conversation to hold a couple of messages: most do, and a long one is not among the values its statistics know by name. So at every step it read every message of the conversation and picked the parent out of them. For a branch of 600 messages that was 360,000 rows, on 364,800 pages looked at, and 59 to 69 ms of the 98 ms the whole read of the conversation took. The cost grew with the square of the branch's length. And it was paid twice: by whoever opened the conversation, and by every question asked in it, since the same branch is read to show the model what led to the question.
+- **How it was found.** P1's performance run read a conversation of 600 messages in about 40 ms in some runs and in 66 to 96 ms in others, with the same code. A database that held a few long conversations and little else had the long one among its statistics' common values, and went to each parent by its id. One with many conversations in it, as an installation has, did not. Each statement of one read was timed in the database's own log, and the slow one explained (`EXPLAIN (ANALYZE, BUFFERS)`).
+- **A walk by the parent's id alone was tried, and not kept.** With the conversation carried along and compared, and no longer named at each step, the same query took 2 ms on that database. On a table of 400 rows it read the whole table at every step instead: 80,000 rows for a branch of 200. The test written for the first fault caught it. What had to end was a read whose cost depends on what the planner believes about the tables.
+- **The branch is picked out in the code** (`tree.branch_to`): one statement reads the conversation's messages, each once, and the code walks up from the last one. What is left to the planner is how to find the conversation's messages, by their index or by reading a small table through, and that choice is made once for the statement, not at every step.
+- **A test asks the database how it ran the statement** (`apps/api/tests/test_conversations.py`): among a hundred short conversations that the planner was told of, a branch of 200 messages is read by one statement, which takes 200 rows from the table. The rewrite that was tried took 80,001 there. The query as it was took 601: on that small database the planner went to each parent by its id, which it had not done on the larger one. No test can make the planner choose badly; this one holds that there is no walk for it to choose about, since any walk inside the database takes a message more than once.
+
+**Measured** on 2026-11-24, on the machine of this project's other measurements, on the stack of `make e2e` with a database of about 10,000 messages, through the proxy:
+
+| | Before | After |
+|---|---|---|
+| The statement that reads a branch of 600 messages | 59 to 69 ms, 360,000 rows read | 2.6 to 3.6 ms, 600 rows |
+| A conversation of 600 messages read whole, the same one, 30 times: the middle value | 98 ms | 39 ms |
+| Conversations of 100, 300 and 600 shorter messages read whole, two runs of each build in turn, the middle value | 16, 31 to 32, and 39 or 69 ms (93 the night before) | 13, 23 to 24, and 37 to 38 ms |
+| The first word of a short answer after 50, 150 and 300 exchanges, in the same runs | 22 to 25, 38 to 41, and 46 or 78 ms (103 the night before) | 18 to 19, 29 to 30, and 45 to 47 ms |
+
+The two values of the longest conversation are the planner's two ways through the old query, as its statistics stood at the moment. After the change there is one.
+
+**What it leaves:**
+
+- **Every message of the conversation is read, to show one branch.** A conversation in which many answers were written again has all of their versions read, with what they hold, each time: the cost grows with the conversation, not with the branch that is shown. The versions' ids were read already (`versions`).
+- **The walk down, to show another branch, is still the database's** (`tree.show_branch_through`): each step asks for the newest message that follows one, by the conversation and the parent, which one index holds together. Down a branch of 600 it took 1 to 2 ms. Nothing in the page asks for it yet.
+
+**Why now, and not at the start:** the query was written against a few messages and tested for what it finds, which was right at every size: a differential test plays random questions, answers and branch changes against a tree in plain Python. Nothing timed it against a long conversation among many, and the one timing that existed came out well or badly by the state of the database's statistics. The phase-end run is where the figure was seen to have two values.
