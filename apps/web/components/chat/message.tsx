@@ -1,6 +1,7 @@
 import { Component, memo, useEffect, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 
+import type { Turn } from "@/lib/api/client";
 import { figuresOf } from "@/lib/chat/figures";
 import { isBlank, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
@@ -8,6 +9,7 @@ import type { ChatMessage } from "@/lib/chat/messages";
 // Its type alone: the code comes apart from the page, below.
 import type Markdown from "./markdown";
 import { usePaced } from "./paced";
+import { useSettled } from "./settled";
 
 // What turns markdown into headings, tables, code and formulas is large, so it is a
 // piece apart from the page: the renderer. A page fetches it once: ahead, once it knows
@@ -188,8 +190,8 @@ export const Message = memo(function Message({
  * page, before its first word.
  *
  * What the answer took comes under it, after its article, once its words are shown and
- * its turn has ended, as its record says (`Figures`): nothing of it while the answer
- * arrives.
+ * its turn has ended, as its record says (`Took`, `Figures`): nothing of it while the
+ * answer arrives, and for an answer that arrived here, a frame after its last words.
  *
  * An answer that is over and has nothing in it to read draws nothing at all. */
 function Answer({
@@ -224,8 +226,6 @@ function Answer({
     // said in its place (`outcomeOf`, chat.tsx).
     return null;
   }
-  const turn = turnOf(message);
-  const figures = !writing && !waits && turn !== null ? figuresOf(turn) : [];
   // The article is the model's words and nothing else. What the page says about the
   // answer stands after it, as the notice of how a turn ended does (chat.tsx).
   return (
@@ -245,9 +245,27 @@ function Answer({
           })}
         {(waits || (writing && shown.length === 0)) && <Waiting />}
       </article>
-      {figures.length > 0 && <Figures figures={figures} />}
+      <Took turn={turnOf(message)} writing={writing} waits={waits} />
     </>
   );
+}
+
+/** What an answer took, once it is to be said: its words are shown, its turn has ended,
+ * and, for an answer that arrived on this page, the frame with its last words has been
+ * painted (`useSettled`, which says why). That wait is kept here, and not in `Answer`:
+ * a frame later this is drawn again, and the answer's words are not. */
+function Took({
+  turn,
+  writing,
+  waits,
+}: {
+  turn: Turn | null;
+  writing: boolean;
+  waits: boolean;
+}) {
+  const settled = useSettled(writing);
+  const figures = settled && !waits && turn !== null ? figuresOf(turn) : [];
+  return figures.length > 0 ? <Figures figures={figures} /> : null;
 }
 
 /** What an answer took, in one quiet line under it: how fast its model wrote, how long

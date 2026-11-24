@@ -17,6 +17,7 @@ import {
   streamed,
   turn,
 } from "@/tests/fake-api";
+import { holdFrames } from "@/tests/frames";
 import { ask, open } from "@/tests/open";
 import { recorded, RECORDED } from "@/tests/recorded";
 
@@ -36,6 +37,10 @@ const TOOK = ["8.5 tokens a second", "first word after 1.2 s", "1,234 credits"];
 // then `text-end`, `finish-step` and `finish`, and the line that ends the stream.
 const UP_TO_THE_WORDS = 5;
 const UP_TO_THE_FINISH = 8;
+// What the page says under an answer that reached the longest an answer may be, as
+// `cut_off.sse` does, whose events are as many.
+const CUT_OFF =
+  "The answer reached the longest a single answer may be, and stops here.";
 
 /** The turn a recorded stream ends with: what the conversation says of it once it is
  * stored. */
@@ -123,6 +128,99 @@ describe("what an answer took", () => {
     expect(line()).not.toBeInTheDocument();
 
     answering.end();
+
+    const took = await screen.findByRole("list", { name: LINE });
+    expect(said(took)).toEqual(TOOK);
+  });
+
+  // In the frame in which an answer ends, all of its words are drawn once more. The
+  // line comes with the next one: drawn in the same frame, it took Safari's engine
+  // past what a frame may take at the end of a long answer (ADR 0015, revision "what
+  // an answer took comes a frame after its last words").
+  it("comes a frame after the last words of an answer that arrived, not in the frame that draws them", async () => {
+    const answering = sentByHand("figures.sse");
+    fakeApi().on(TURNS, answering.answer);
+    const user = open();
+    await ask(user, "How fast was that?");
+    answering.send(UP_TO_THE_FINISH);
+    expect(await screen.findByText(WORDS)).toBeVisible();
+    // From here a frame comes only when the test says so.
+    const nextFrame = holdFrames();
+
+    answering.end();
+
+    // The answer has ended, with every word of it on the page: the line is not there.
+    expect(
+      await screen.findByRole("button", { name: "Send" }),
+    ).toBeInTheDocument();
+    await afterAMoment();
+    expect(screen.getByRole("article", { name: "Actio" }).textContent).toBe(
+      WORDS,
+    );
+    expect(line()).not.toBeInTheDocument();
+
+    act(() => {
+      nextFrame();
+    });
+
+    const took = await screen.findByRole("list", { name: LINE });
+    expect(said(took)).toEqual(TOOK);
+  });
+
+  it("has the notice of how the turn ended wait for the same frame: neither is there before it", async () => {
+    // An answer that reached the longest an answer may be: counted, and stopped there.
+    const answering = sentByHand("cut_off.sse");
+    fakeApi().on(TURNS, answering.answer);
+    const user = open();
+    await ask(user, "Count to a hundred.");
+    answering.send(UP_TO_THE_FINISH);
+    expect(await screen.findByText("One, two, three")).toBeVisible();
+    const nextFrame = holdFrames();
+
+    answering.end();
+
+    expect(
+      await screen.findByRole("button", { name: "Send" }),
+    ).toBeInTheDocument();
+    await afterAMoment();
+    expect(line()).not.toBeInTheDocument();
+    expect(screen.queryByText(CUT_OFF)).not.toBeInTheDocument();
+
+    act(() => {
+      nextFrame();
+    });
+
+    const took = await screen.findByRole("list", { name: LINE });
+    const notice = await screen.findByText(CUT_OFF);
+    // Both are there now, the line right after its answer and the notice after the
+    // line: where the page draws them, whenever each comes.
+    expect(
+      screen.getByRole("article", { name: "Actio" }).nextElementSibling,
+    ).toBe(took);
+    expect(
+      took.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
+  it("is said of a stored answer at once, with no frame to wait for", async () => {
+    // No frame comes in this test: a stored answer never arrived on this page.
+    holdFrames();
+    fakeApi().on(CONVERSATION, () =>
+      json(
+        200,
+        conversation(RECORDED.conversation, [
+          question(RECORDED.question, "How fast was that?"),
+          answer(
+            RECORDED.answer,
+            WORDS,
+            RECORDED.question,
+            recordedTurn("figures.sse"),
+          ),
+        ]),
+      ),
+    );
+
+    open(`/c/${RECORDED.conversation}`);
 
     const took = await screen.findByRole("list", { name: LINE });
     expect(said(took)).toEqual(TOOK);

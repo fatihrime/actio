@@ -37,6 +37,7 @@ import { Composer } from "./composer";
 import { ContextMeter } from "./context-meter";
 import { useFollow } from "./follow";
 import { fetchRenderer, Message, Waiting } from "./message";
+import { useSettled } from "./settled";
 
 const SETUP_GUIDE = "https://fatihrime.github.io/actio/getting-started/#models";
 const THINKING_KEY = "actio.thinking";
@@ -562,8 +563,12 @@ export function Chat({
   // has none, and neither has an answer of which nothing arrived, or only thoughts:
   // a turn can complete that way, and the page says so (`outcomeOf`).
   const saidSomething = last?.role === "assistant" && hasWords(last);
+  // Said a frame after an answer's last words, as what the answer took is
+  // (`useSettled`): the two come onto the page together, the notice under the line,
+  // and never the line a frame later, above a notice that was already there.
+  const settled = useSettled(answering);
   const outcome =
-    answering || turn === null ? null : outcomeOf(turn, saidSomething);
+    !settled || turn === null ? null : outcomeOf(turn, saidSomething);
   const unready = model === null ? null : notReady(model);
   const blocked = isSessionEnd(problem)
     ? "Your session has ended."

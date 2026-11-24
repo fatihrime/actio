@@ -144,10 +144,31 @@ export class Chat {
     await this.box.press("Enter");
   }
 
-  /** Wait until the answer that was being written has ended, however it ended. */
+  /** Wait until the answer that was being written has ended, however it ended, and the
+   * page has said what it says of an answer that ended: what it took, and how its turn
+   * ended, come a frame after the answer's last words (ADR 0015, revision "what an
+   * answer took comes a frame after its last words"). So a test that looks for a
+   * notice that must not be there looks once it would be. */
   async answered(): Promise<void> {
     await expect(this.send).toBeVisible();
     await expect(this.stop).toBeHidden();
+    // Three frames: the page asks for its frame once it has drawn the answer's end,
+    // which may be after this asks for its first.
+    await this.page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          const frames = (left: number) => {
+            requestAnimationFrame(() => {
+              if (left > 1) {
+                frames(left - 1);
+              } else {
+                setTimeout(resolve, 0);
+              }
+            });
+          };
+          frames(3);
+        }),
+    );
   }
 
   /** Ask a question in a new conversation, and wait for its answer. */

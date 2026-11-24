@@ -481,8 +481,10 @@ describe("an answer that doesn't arrive whole", () => {
       thinking: false,
     });
     // An answer that has words says nothing of the sort, and isn't asked for again:
-    // looked at once it is over, since nothing of the kind is said while one arrives.
+    // looked at once it is over, since nothing of the kind is said while one arrives,
+    // and a moment after that, since how a turn ended is said a frame after its end.
     expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
+    await afterAMoment();
     expect(screen.queryByText(NO_ANSWER)).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Try again" }),
