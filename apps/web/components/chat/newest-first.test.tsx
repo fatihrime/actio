@@ -987,6 +987,150 @@ async function leave(user: UserEvent): Promise<void> {
   drawing.drawn = [];
 }
 
+// Safari's engine works out anew the style of everything inside an element when that
+// element stops being the last one in its parent, or starts. So nothing is added after
+// an element that holds much, or taken away from after it: what comes and goes there is
+// on the page from the first, and what a conversation gets comes before its log's last
+// element (ADR 0015, revision "nothing is added after an element that holds much").
+describe("an element that holds much is never the last in its parent", () => {
+  it("has the way to the newest message on the page from the first, only displayed while the reader is away from the end: nothing is added beside the conversation, or taken away, as they leave the end and come back", async () => {
+    layOut();
+    const messages = exchanges(40);
+    await openStored(fakeApi(), messages);
+    await waitFor(() => {
+      expect(onThePage()).toEqual(textsOf(messages));
+    });
+    const way = () =>
+      screen.queryByRole("button", { name: "Go to the newest message" });
+    const beside = scroller().parentElement;
+    const button = document.querySelector(
+      'button[aria-label="Go to the newest message"]',
+    );
+    // At the end: there, and not displayed, which also keeps it from the keyboard and
+    // from a screen reader.
+    expect(button).not.toBeNull();
+    expect(button?.parentElement).toBe(beside);
+    expect(button).not.toBeVisible();
+    expect(way()).not.toBeInTheDocument();
+    // And the element that scrolls is not the last one in its parent.
+    expect(beside?.lastElementChild).not.toBe(scroller());
+    expect(beside?.lastElementChild).not.toBeNull();
+    const changes: MutationRecord[] = [];
+    const watching = new MutationObserver((records) => {
+      changes.push(...records);
+    });
+    onTestFinished(() => {
+      watching.disconnect();
+    });
+    if (beside !== null) {
+      watching.observe(beside, { childList: true });
+    }
+
+    scrollTo(10 * TALL);
+
+    // Away from the end: the same element, displayed now.
+    expect(way()).toBe(button);
+    expect(button).toBeVisible();
+
+    scrollTo(scroller().scrollHeight - ROOM);
+
+    expect(belowTheReader()).toBe(0);
+    expect(way()).not.toBeInTheDocument();
+    expect(button).not.toBeVisible();
+    expect([...changes, ...watching.takeRecords()]).toEqual([]);
+  });
+
+  it.each([
+    { which: "a stored conversation", stored: true },
+    { which: "a new one", stored: false },
+  ])(
+    "ends the log of $which with an element that is never displayed: a question, its answer and what is said of them come before it",
+    async ({ stored: isStored }) => {
+      const messages = isStored ? exchanges(25) : [];
+      const api = fakeApi().on(TURNS, () => streamed("answer.sse"));
+      const page = await import("@/tests/open");
+      const user = isStored
+        ? (await openStored(api, messages)).user
+        : page.open();
+      await screen.findByRole("log", { name: "Conversation" });
+      await waitFor(() => {
+        expect(onThePage()).toEqual(textsOf(messages));
+      });
+      const end = log().lastElementChild;
+      expect(end).not.toBeNull();
+      expect(end).not.toBeVisible();
+      expect(end?.textContent).toBe("");
+      // Everything added to the log itself from here on, with what it was put before.
+      const added: { node: Node; before: Node | null }[] = [];
+      const note = (records: MutationRecord[]) => {
+        for (const { addedNodes, nextSibling } of records) {
+          for (const node of addedNodes) {
+            added.push({ node, before: nextSibling });
+          }
+        }
+      };
+      const watching = new MutationObserver(note);
+      onTestFinished(() => {
+        watching.disconnect();
+      });
+      watching.observe(log(), { childList: true });
+      const lines = () =>
+        screen.queryAllByRole("list", { name: "What this answer took" }).length;
+      const stood = lines();
+
+      await page.ask(user, ASKED);
+
+      expect(await screen.findByText(ECHO)).toBeInTheDocument();
+      await screen.findByRole("button", { name: "Send" });
+      // What the answer took comes a frame after its last words.
+      await waitFor(() => {
+        expect(lines()).toBe(stood + 1);
+      });
+      note(watching.takeRecords());
+      // The control: the question and its answer were added to the log itself.
+      expect(added.length).toBeGreaterThan(1);
+      expect(added.filter(({ before }) => before === null)).toEqual([]);
+      expect(log().lastElementChild).toBe(end);
+      expect(end).not.toBeVisible();
+    },
+  );
+
+  it("ends the log with that element from the first, also while messages are still held back below what is shown", async () => {
+    layOut();
+    const messages = exchanges(40);
+    const { user } = await openAndGoToThePlace(fakeApi(), messages, {
+      afterwards: [stored(messages)],
+    });
+    await leave(user);
+    // At each change of the page while the conversation comes in around the place: how
+    // many of its messages are shown, and what its log ends with.
+    const ends = watch(() => {
+      const end = document.querySelector('[role="log"]')?.lastElementChild;
+      return end === null || end === undefined || shownMessages().length === 0
+        ? null
+        : {
+            shown: shownMessages().length,
+            end:
+              end instanceof HTMLElement && end.hidden && end.textContent === ""
+                ? "not displayed, and empty"
+                : end.textContent.slice(0, 40),
+          };
+    });
+
+    window.history.back();
+
+    await waitFor(() => {
+      expect(onThePage()).toEqual(textsOf(messages));
+    });
+    // The control: it opened with messages held back below, which came in steps.
+    expect(ends[0]?.shown).toBe(10);
+    expect(new Set(ends.map(({ shown }) => shown)).size).toBeGreaterThan(2);
+    expect(
+      ends.filter(({ end }) => end !== "not displayed, and empty"),
+    ).toEqual([]);
+  });
+});
+
 describe("a long stored conversation its reader left away from its end", () => {
   it.each([
     { how: "", strict: false },
@@ -1935,10 +2079,11 @@ describe("a long stored conversation its reader left away from its end", () => {
               Node.DOCUMENT_POSITION_FOLLOWING) !==
               0,
         );
+      // The button is on the page all along: it can be pressed while it is displayed.
       const button = document.querySelector<HTMLElement>(
         'button[aria-label="Go to the newest message"]',
       );
-      if (above && button !== null) {
+      if (above && button !== null && !button.hidden) {
         pressing.disconnect();
         pressed = true;
         watching.observe(document.body, {

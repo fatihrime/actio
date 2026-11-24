@@ -12,9 +12,11 @@ import type { Locator, Page } from "@playwright/test";
 export class Chat {
   constructor(readonly page: Page) {}
 
-  /** The box to write in. */
+  /** The box to write in: the one thing named "Message" and nothing more. The button
+   * to the newest message is on the page from a conversation's first render, and its
+   * name ends in the same word. */
   get box(): Locator {
-    return this.page.getByLabel("Message");
+    return this.page.getByLabel("Message", { exact: true });
   }
   get send(): Locator {
     return this.page.getByRole("button", { name: "Send" });

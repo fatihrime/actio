@@ -61,3 +61,35 @@ test("the page stays at the newest words, and leaves a reader who scrolls up whe
   await chat.answered();
   await expect.poll(() => chat.below()).toBeLessThanOrEqual(1);
 });
+
+test("what stands on the page from the first, so that nothing is added after the conversation, is not displayed", async ({
+  chat,
+  page,
+}) => {
+  // The button to the newest message and the element a conversation's log ends with are
+  // on the page from the conversation's first render, and `hidden` (ADR 0015, revision
+  // "nothing is added after an element that holds much"). Whether `hidden` wins over the
+  // classes that lay them out is the built stylesheet's to say, and only the real page
+  // has it: displayed, the button would lie over the conversation's end, and the log's
+  // gap would follow its last element.
+  await chat.open();
+  await chat.ask("Hello");
+  await chat.answered();
+
+  const found = await page.getByRole("log").evaluate((log) => {
+    const button = log.parentElement?.parentElement?.querySelector(
+      'button[aria-label="Go to the newest message"]',
+    );
+    const end = log.lastElementChild;
+    return {
+      button:
+        button === null || button === undefined
+          ? "missing"
+          : getComputedStyle(button).display,
+      end: end === null ? "missing" : getComputedStyle(end).display,
+      endHolds: end?.textContent ?? "missing",
+    };
+  });
+
+  expect(found).toEqual({ button: "none", end: "none", endHolds: "" });
+});

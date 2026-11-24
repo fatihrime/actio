@@ -817,19 +817,35 @@ export function Chat({
                 {outcome}
               </Notice>
             )}
+            {/* The log's last element from its first render, never displayed: whatever
+                the conversation gets comes before it, so that nothing in the log
+                stops being its last element, or starts. Without it, a question asked
+                after a stored answer of 1,500 lines of code cost Safari's engine one
+                frame of 128 to 219 ms; and under an answer of that length as it
+                arrived, the line of what it took, added after it, one of 103 to 124
+                (ADR 0015, revision "nothing is added after an element that holds
+                much"). */}
+            <div hidden />
           </div>
         </div>
-        {away && (
-          <button
-            type="button"
-            onClick={toTheEnd}
-            aria-label="Go to the newest message"
-            title="Go to the newest message"
-            className="absolute bottom-3 left-1/2 flex size-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-lg shadow-md hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-          >
-            <span aria-hidden="true">↓</span>
-          </button>
-        )}
+        {/* On the page from the conversation's first render, and not displayed until
+            its reader is away from the end: never added then, or taken away. It is the
+            last element in its parent, after the element that scrolls. Safari's engine
+            works out anew the style of everything inside an element when that element
+            stops being the last one in its parent, or starts: added at the first turn
+            of the wheel, the button cost it the styles of the whole conversation, one
+            frame of 119 to 172 ms with 600 messages (ADR 0015, revision "nothing is
+            added after an element that holds much"). */}
+        <button
+          type="button"
+          hidden={!away}
+          onClick={toTheEnd}
+          aria-label="Go to the newest message"
+          title="Go to the newest message"
+          className="absolute bottom-3 left-1/2 flex size-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-lg shadow-md hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        >
+          <span aria-hidden="true">↓</span>
+        </button>
       </div>
       <div className="mx-auto w-full max-w-3xl space-y-3 px-4 pb-4">
         {problem !== null && (
