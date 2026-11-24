@@ -7,14 +7,16 @@ Python, and requires both to show the same branch after every step.
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -354,6 +356,88 @@ async def test_questions_and_answers_form_the_branch_that_is_shown(
     assert talk.conversation.current_leaf_id == follow_up.id
     assert talk.conversation.last_active_at == later(3)  # each message was a minute apart
     assert talk.conversation.created_at == NOON
+
+
+@contextmanager
+def sent(db: AsyncSession) -> Iterator[list[tuple[str, Any]]]:
+    """The statements `db` sends to the database meanwhile, each with what it was sent
+    with."""
+    statements: list[tuple[str, Any]] = []
+
+    def note(*args: Any) -> None:
+        # before_cursor_execute(conn, cursor, statement, parameters, …)
+        statements.append((args[2], args[3]))
+
+    bind = db.get_bind()
+    event.listen(bind, "before_cursor_execute", note)
+    try:
+        yield statements
+    finally:
+        event.remove(bind, "before_cursor_execute", note)
+
+
+def rows_taken(plan: dict[str, Any], table: str) -> int:
+    """How many rows a statement took from `table`, by the database's own account of
+    how it ran (`EXPLAIN (ANALYZE, FORMAT JSON)`): each way it went to the table, the
+    rows that way gave it, times how often it went. Rows a scan looked at and left out
+    are not in it."""
+    here = plan["Actual Rows"] * plan["Actual Loops"] if plan.get("Relation Name") == table else 0
+    return int(here) + sum(rows_taken(below, table) for below in plan.get("Plans", []))
+
+
+async def test_a_branch_is_read_without_reading_its_conversation_at_every_step(
+    db: AsyncSession, talk: Talk
+) -> None:
+    """A branch is read with one statement that takes each of the conversation's
+    messages once. The walk up it was once the database's own, a query that joined each
+    message to its parent, and on an installation's tables the database read the whole
+    conversation again at every step: as many rows as the branch is long, times itself.
+    How the database runs such a walk is its planner's choice, which a test can't pin:
+    this one holds that there is no walk."""
+    # Many short conversations, and the planner told of them: what an installation's
+    # tables look like to it. A conversation holds a couple of messages.
+    owner = await someone(db)
+    for _ in range(100):
+        short = Talk(db, await started(db, owner))
+        await short.answer("Pump it up.", await short.ask("How do I fix a flat tyre?"))
+    await db.execute(text("ANALYZE messages"))
+    # And a long one, which it has not heard of, and takes for one of those.
+    last: Message | None = None
+    for turn in range(100):
+        last = await talk.answer(f"Answer {turn}.", await talk.ask(f"Question {turn}?", last))
+    long = 200
+
+    with sent(db) as statements:
+        branch = await tree.shown_branch(db, talk.conversation)
+
+    assert len(branch) == long
+    [(statement, parameters)] = statements
+    connection = await db.connection()
+    explained = await connection.exec_driver_sql(
+        f"EXPLAIN (ANALYZE, FORMAT JSON) {statement}", parameters
+    )
+    taken = rows_taken(explained.scalar_one()[0]["Plan"], "messages")
+    # Its own messages, once. A walk inside the database takes each more than once at
+    # the least: here, the query as it was took 601 rows, going to each parent by its
+    # id, and the one that was tried in its place took 80,001, the whole table at every
+    # step. On a larger database the query as it was took 360,000 for a branch of 600.
+    assert taken == long, f"{taken} rows of messages taken for a branch of {long}"
+
+
+async def test_a_branch_ends_at_a_message_of_its_own_conversation(
+    db: AsyncSession, talk: Talk
+) -> None:
+    question = await talk.ask("How do I fix a flat tyre?")
+    answer = await talk.answer("Take the wheel off first.", question)
+    elsewhere = Talk(db, await started(db, await someone(db)))
+    theirs = await elsewhere.ask("Is it going to rain?")
+
+    # Up to any message of the conversation, not only its last one.
+    assert await tree.branch_to(db, talk.conversation, question.id) == [question]
+    assert await tree.branch_to(db, talk.conversation, answer.id) == [question, answer]
+    # Nothing for a message of another conversation, or for one that doesn't exist.
+    assert await tree.branch_to(db, talk.conversation, theirs.id) == []
+    assert await tree.branch_to(db, talk.conversation, new_id()) == []
 
 
 async def test_a_message_keeps_its_parts_in_order(db: AsyncSession, talk: Talk) -> None:

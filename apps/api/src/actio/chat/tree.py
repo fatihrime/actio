@@ -91,21 +91,22 @@ async def branch_to(
     This is what a model is shown when it answers: what led to the question, and
     nothing from the branches beside it.
     """
-    # Walk up from the last message, one parent at a time, inside the database.
-    up = (
-        select(Message.id, Message.parent_id, literal(0).label("height"))
-        .where(Message.conversation_id == conversation.id, Message.id == message_id)
-        .cte("up", recursive=True)
-    )
-    up = up.union_all(
-        select(Message.id, Message.parent_id, up.c.height + 1).where(
-            Message.conversation_id == conversation.id, Message.id == up.c.parent_id
-        )
-    )
-    found = await db.scalars(
-        select(Message).join(up, Message.id == up.c.id).order_by(up.c.height.desc())
-    )
-    return list(found.all())
+    # The conversation's messages are read once, all of them, and the branch is picked
+    # out of them here: up from the last message, one parent at a time. The walk used to
+    # be the database's, a query that joined each message to its parent, and how the
+    # database ran it was its planner's choice. It chose to read every message of the
+    # conversation again at each step, or every message of a small table: 360,000 rows
+    # for a branch of 600, where 600 are needed (ADR 0012, revision "a branch is picked
+    # out of its conversation's messages").
+    found = await db.scalars(select(Message).where(Message.conversation_id == conversation.id))
+    by_id = {message.id: message for message in found}
+    branch: list[Message] = []
+    at = by_id.get(message_id)
+    while at is not None:
+        branch.append(at)
+        at = by_id.get(at.parent_id) if at.parent_id is not None else None
+    branch.reverse()
+    return branch
 
 
 async def versions(
