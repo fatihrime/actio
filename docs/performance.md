@@ -32,6 +32,7 @@ The probes, and the proxy that paces the fake model, are scripts kept outside th
     - A list of 300 conversations is shown within 150 ms.
     - 600 messages are scrolled without a frame over 50 ms.
     - The list put away or shown again beside a long conversation takes one frame.
+    - A conversation that its reader left away from its end opens at that place again, to within 2 px, from the first frame that shows it.
 - **After forty rounds of use** the page holds no more elements and listeners than after the first.
 - **The API.**
     - Its routes answer within 20 ms for 95 of 100 calls.
@@ -80,6 +81,10 @@ Each of these was a fault nobody had seen by using the page, and each is recorde
 - **A script in the document's head held back the page's own scripts** on a slow connection. It stands at the start of the body now, and on the phone profile the box can be typed into after 1.86 s where it took 2.02 s (ADR 0015, revision "the frame's script stands at the start of the body").
 - **The line under an answer cost Safari's engine a long frame** at the end of a long answer: 37 to 54 ms where 50 is the limit. The line now comes one frame after the answer's last words (ADR 0015, revision "what an answer took comes a frame after its last words").
 - **Reading a conversation read it again at every step.** The query that walked a conversation's branch read 360,000 rows for 600 messages, for whoever opened the conversation and before every answer in it. It was found because one timing had two values from run to run. The branch is now picked out of one read ([ADR 0012](adr/0012-conversations-as-a-tree-of-messages.md), revision "a branch is picked out of its conversation's messages"): a conversation of 600 messages is read in 37 to 38 ms where it took up to 93, and the first word of an answer after 300 exchanges comes after 45 to 47 ms where it took up to 103.
+
+Measuring a new piece finds things too. When a conversation was made to open where its reader had left it (ADR 0015, revision "a conversation opens where its reader left it"), the place could not be found again to the pixel, and that led to this:
+
+- **The page jumped under a reader going up through code,** in Safari's engine and in Firefox: by 134 and by 85 px each time a block of code came into view, because the markdown library draws a block that is off the screen as a placeholder. Chromium keeps a reader's place itself and hid it. A block of code has its real height from the first layout now (ADR 0016, revision "a block of code has its real height from the first"), and a long conversation takes a fifth longer to be whole behind its first screen.
 
 ## What a run got wrong
 

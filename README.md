@@ -8,7 +8,7 @@
 
 _A local model of 4 billion parameters on a 16 GB laptop, recorded by `make demo-record`: the page as the browser painted it, with waits longer than a second and a half shortened._
 
-**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API holds conversations and streams a local model's answers, and there is a chat page on top of it: `make up`, open <http://localhost:8080>, and ask. Answers are formatted, with code, formulas and diagrams, and your conversations are listed beside the chat, to open, rename and delete. A guest can sign up and keep them, and log in again from anywhere. Every answer is held to usage limits, per session and per week, and the page shows them: a meter, the time left when a limit is reached, and a model that costs nothing to carry on with, where one is offered. An answer is written at the server whether or not its page stays open, and only Stop ends it. Answers wait their turn for a local model that writes one at a time, and an account has only so many being written at once. Under each answer the page says what it took: how fast the model wrote, how soon its first word came, and what it cost. Under the box it says how full the model's context window is. The model is loaded ahead of the first question, and the page is light or dark as you choose. This README grows with each phase, and nothing below counts as done until it ships with tests.
+**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API holds conversations and streams a local model's answers, and there is a chat page on top of it: `make up`, open <http://localhost:8080>, and ask. Answers are formatted, with code, formulas and diagrams, and your conversations are listed beside the chat, to open, rename and delete. A guest can sign up and keep them, and log in again from anywhere. Every answer is held to usage limits, per session and per week, and the page shows them: a meter, the time left when a limit is reached, and a model that costs nothing to carry on with, where one is offered. An answer is written at the server whether or not its page stays open, and only Stop ends it. Answers wait their turn for a local model that writes one at a time, and an account has only so many being written at once. Under each answer the page says what it took: how fast the model wrote, how soon its first word came, and what it cost. Under the box it says how full the model's context window is. The model is loaded ahead of the first question, and the page is light or dark as you choose. A conversation you left while reading an older part of it opens there again. This README grows with each phase, and nothing below counts as done until it ships with tests.
 
 **Documentation:** <https://fatihrime.github.io/actio/>: getting started, architecture, development and the decision records.
 
@@ -82,7 +82,7 @@ Measured at the end of Phase 1 on an Apple M1 Pro with 16 GB: the production bui
 | 50 answers started at once: the first word of each | within 0.7 s for 95 of 100, none refused |
 | A conversation of 600 messages, read whole | 37 to 38 ms |
 | Memory of the stack's six containers at rest, without a model's server | 373 MiB |
-| Tests | 1,607 in Python, 605 of the web app, 71 end to end in a real browser |
+| Tests | 1,607 in Python, 643 of the web app, 76 end to end in a real browser |
 
 ## Quickstart
 

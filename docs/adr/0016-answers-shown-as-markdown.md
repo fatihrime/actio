@@ -655,3 +655,53 @@ The code as built, in the same browsers and stack, and the same way:
 #### Why now, and not at the start
 
 The revision of 2026-11-21 kept an arriving answer as it was because the renderer, asked for as soon as the session was known, was nearly always here before an answer. Since the revision before this one, it is asked for later, and the measurements above found answers that came first.
+
+### 2026-11-24: a block of code has its real height from the first
+
+#### Context
+
+Streamdown draws each block of code with `content-visibility: auto` and `contain-intrinsic-size: auto 200px`, set on the element itself. A block that is off the screen is not laid out. It is a placeholder, 218 px high with its frame, until it has been near the window, and from then on it has its real height, which the browser remembers only for as long as that element lives.
+
+Found on 2026-11-24 while a conversation was made to open where its reader left it ([ADR 0015](0015-the-web-chat-calls-the-api-from-the-browser.md), revision of that day), on production builds, in Playwright's builds of Chromium 158, Firefox 159 and WebKit 27.2:
+
+- **The page jumped under a reader who went up through a stored conversation.** A conversation of 12 exchanges with 7 blocks of code above the window, each 352 px high, was gone up through with the wheel, 120 notches of 120 px, and a block of text in the middle of the window was watched across each notch. In WebKit it moved 254 px instead of 120 at 7 of them, once for each block of code that came into view: 134 px too far, which is the block's height less the placeholder's. In Firefox it moved 205 px at 6 notches. In Chromium it moved 120 px at every notch: Chromium keeps a reader's place itself when something above them changes its height, and hid it.
+- **A place in a conversation could not be found again.** A reader who left a conversation 595 px into a message of 984 px came back to a message of 850 px, the code above them in it a placeholder again, and was 134 px from where they had been, in all three browsers. With the place measured from the block at the window's top instead, a place inside a block of code was still wrong in Chromium: at the first layout that block was a placeholder whose inside has no boxes, and a frame later it was 134 px higher.
+
+#### Options considered
+
+1. **Leave the placeholders, and have the page keep the reader's place where a browser doesn't.**
+    - Con: the page hears of a block's new height after it was drawn, so it could only put the reader back a frame late, in every browser that doesn't do it itself. And a place inside a block of code can't be restored at the first layout by any reading of positions: the height isn't known then.
+2. **A better guess at a block's height** (`contain-intrinsic-size`).
+    - Con: a guess. A block of 5 lines and one of 60 have one placeholder.
+3. **The real height from the first:** `content-visibility: visible`, by a rule of the page's own stylesheet over the library's.
+    - Pro: nothing off the screen changes its height when it comes near the window, in any browser.
+    - Con: blocks of code off the screen are laid out and painted with everything else. Measured below.
+
+#### Decision
+
+The third. **A rule in `app/globals.css` gives `[data-streamdown="code-block"]` `content-visibility: visible` and `contain-intrinsic-size: none`.** Both are `!important`: the library sets them in the element's own `style`, which only that overrides. An end-to-end test holds it (`e2e/code.spec.ts`): a block of code far above the window is as high before it has been in view as after. A second one opens a conversation again at a line inside a long block of code, and finds that line where it stood from the first frame. With the rule taken out, both fail: the heights differ by 674 px for the block of that test, and the line is 1,080 px off.
+
+**Measured** on 2026-11-24, on the machine of this record's other measurements, the page as committed against the page with the rule, the two builds in turn, twice each:
+
+| | Without the rule | With the rule |
+|---|---|---|
+| A block of code far above the window | 218 px, and 352 px once it has been in view | 352 px |
+| 120 notches up through 12 exchanges: notches at which what the reader watched moved by something other than the notch, in WebKit, Firefox and Chromium | 7 (by 254 px), 6 (by 205 px) and 0 | 0, 0 and 0 |
+| A conversation of 100 exchanges opened from the list: the longest frame, the middle of four, in Chromium, WebKit and Firefox | 16.8 ms, 33 to 34 ms, 41.7 to 41.9 ms | 16.8 ms, 37 to 39 ms, 41.7 ms |
+| The same: until all of it is shown | 216 to 333 ms, 275 to 480 ms, 292 to 542 ms | 200 to 317 ms, 294 to 466 ms, 267 to 525 ms |
+| 300 exchanges, until all of it is shown, in Chromium and WebKit | 634 to 750 ms, 1,119 to 1,217 ms | 817 to 883 ms, 1,193 to 1,265 ms |
+| 300 exchanges opened by their address, Chromium at a quarter of the CPU's speed | 3.2 to 3.3 s | 3.8 to 4.1 s |
+| A stored conversation with code in eight languages: the longest frame, in Chromium, WebKit and Firefox | 33 ms, 51 to 94 ms, 42 to 67 ms | 17 to 33 ms, 46 to 95 ms, 50 to 75 ms |
+
+No frame got longer. A long conversation takes longer to be whole on the page, behind its first screen, which is drawn at once either way: a fifth longer for 300 exchanges in Chromium.
+
+#### Consequences
+
+- **A reader who goes up through code is no longer moved by it,** in any of the three browsers.
+- **A place inside code, or under it, opens where it was left** (ADR 0015, revision "a conversation opens where its reader left it").
+- **An upgrade of Streamdown is checked against the rule too:** the end-to-end test fails if the library sizes a block of code late in some other way.
+- **What else the library sizes late was not looked for.** A diagram is drawn after the page that holds it, and its height is not known before. A place is measured from the block at the window's top for that reason, and not from its message's top.
+
+#### Why now, and not at the start
+
+Chromium hid it. The performance runs time the frames of a long conversation in all three browsers, and ask in Firefox and WebKit whether a reader's wheel is kept while older messages come in, not whether the page moves by more than the wheel when a block of code comes into view. It showed when a reader's place had to be found again to the pixel.
