@@ -166,9 +166,15 @@ export const Message = memo(function Message({
   writing?: boolean;
 }) {
   if (message.role === "user") {
-    // A question is shown as it was typed: someone who types a star means a star.
+    // A question is shown as it was typed: someone who types a star means a star. Its
+    // id is how the page finds it again, as the place where a reader left the
+    // conversation (follow.ts).
     return (
-      <article aria-label="You" className="flex justify-end">
+      <article
+        aria-label="You"
+        data-message-id={message.id}
+        className="flex justify-end"
+      >
         <div className="max-w-[85%] rounded-2xl bg-muted px-4 py-2.5 wrap-break-word whitespace-pre-wrap forced-colors:border">
           {message.parts.map((part, index) =>
             part.type === "text" ? <span key={index}>{part.text}</span> : null,
@@ -227,10 +233,15 @@ function Answer({
     return null;
   }
   // The article is the model's words and nothing else. What the page says about the
-  // answer stands after it, as the notice of how a turn ended does (chat.tsx).
+  // answer stands after it, as the notice of how a turn ended does (chat.tsx). Its id
+  // is an attribute, and no text of it, as a question's is.
   return (
     <>
-      <article aria-label="Actio" className="space-y-3">
+      <article
+        aria-label="Actio"
+        data-message-id={message.id}
+        className="space-y-3"
+      >
         {!waits &&
           parts.map((part, index) => {
             if (!drawn(part)) {

@@ -8,29 +8,80 @@
 // first").
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { Activity, useEffect, useLayoutEffect, useRef } from "react";
 import { beforeEach, expect, test, vi } from "vitest";
 
+import type { Spot } from "@/lib/chat/places";
 import { clockAt } from "@/tests/clock";
+import { holdFrames } from "@/tests/frames";
 
 import { STILL_AFTER_MS, useFollow } from "./follow";
 
 /** As much of the conversation as fits on the screen, in pixels. */
 const ROOM = 500;
 
+/** How tall a message is, where a test has messages on the page and doesn't say what
+ * they are drawn in, in pixels. */
+const TALL = 100;
+
 type Follow = ReturnType<typeof useFollow>;
+
+/** What the page hands the hook. */
+type Given = Parameters<typeof useFollow>[0];
+
+/** A block a message is drawn in: how tall it is, in pixels, and 0 for one that isn't
+ * drawn, such as what a folded thought holds; or the blocks inside it, one under
+ * another. */
+type Block = number | Block[];
+
+/** A message on the page: its id, and the blocks it is drawn in, one under another
+ * inside one element, as markdown is, which stands `INSET` pixels inside the message's
+ * own top and bottom. Its id alone for a message `TALL` pixels high, with nothing
+ * inside. */
+type Shown = string | { id: string; blocks: Block[] };
+
+/** How far inside a message drawn in blocks the element that holds them stands, above
+ * and below, in pixels: so the two can be told apart. */
+const INSET = 10;
+
+/** How tall `block` is. */
+function heightOf(block: Block): number {
+  return typeof block === "number"
+    ? block
+    : block.reduce<number>((sum, inside) => sum + heightOf(inside), 0);
+}
+
+/** `blocks` as elements: a paragraph for each height, an element for each group. */
+function Blocks({ blocks }: { blocks: Block[] }) {
+  return blocks.map((block, index) =>
+    typeof block === "number" ? (
+      <p key={index} />
+    ) : (
+      <div key={index}>
+        <Blocks blocks={block} />
+      </div>
+    ),
+  );
+}
 
 function Page({
   handOver,
   painting,
+  given,
+  messages = [],
 }: {
   /** Given what the hook hands the page, after each render. */
   handOver?: (follows: Follow) => void;
   /** Called after the hook's own layout effects: where the page is when the browser
    * first paints it. */
   painting?: () => void;
+  /** What the page hands the hook, if anything: without it, the conversation opens at
+   * its end, and nobody is told where the reader is. */
+  given?: Given;
+  /** The first messages shown, one under another. */
+  messages?: Shown[];
 }) {
-  const follows = useFollow();
+  const follows = useFollow(given);
   const { scroller, content, away, follow } = follows;
   useLayoutEffect(() => {
     painting?.();
@@ -45,7 +96,19 @@ function Page({
         <div ref={content}>
           {/* Older messages drawn and not shown yet, then the first that are. */}
           <div hidden />
-          <div data-testid="shown" />
+          <div data-testid="shown">
+            {messages.map((message) =>
+              typeof message === "string" ? (
+                <article key={message} data-message-id={message} />
+              ) : (
+                <article key={message.id} data-message-id={message.id}>
+                  <div>
+                    <Blocks blocks={message.blocks} />
+                  </div>
+                </article>
+              ),
+            )}
+          </div>
         </div>
       </div>
       {away && (
@@ -95,16 +158,49 @@ beforeEach(() => {
 });
 
 /** A conversation of `height` pixels on the page, and what a browser would do to it.
- * Nothing has said yet that a size changed: the test does, with `resize`. */
+ * Nothing has said yet that a size changed: the test does, with `resize`. The page hands
+ * the hook what is `given`, and shows `messages` first, from the top of what is shown.
+ * While the page is hidden (`hide`), or gone from the document, nothing on it has a
+ * box, as in a browser; nor has a block of no height. */
 function conversation(
   height: number,
-  { painting }: { painting?: () => void } = {},
+  {
+    painting,
+    given,
+    messages = [],
+  }: { painting?: () => void; given?: Given; messages?: Shown[] } = {},
 ) {
   let tall = height;
   let top = 0;
   // How far down the first message that is shown is.
   let above = 0;
   laidOut = (scroller) => {
+    const drawn = () =>
+      scroller.isConnected && scroller.style.display !== "none";
+    // A box `down` pixels below the top of what is shown, as the screen has it.
+    const box = (down: number, high: number) =>
+      drawn() && high > 0
+        ? new DOMRect(0, above + down - top, 800, high)
+        : new DOMRect();
+    const boxed = (element: Element, down: number, high: number) => {
+      Object.defineProperty(element, "getBoundingClientRect", {
+        value: () => box(down, high),
+      });
+    };
+    // Each of `blocks` gives its element its box, from `down` on.
+    const lay = (elements: HTMLCollection, blocks: Block[], down: number) => {
+      let from = down;
+      blocks.forEach((block, at) => {
+        const element = elements[at];
+        if (element !== undefined) {
+          boxed(element, from, heightOf(block));
+          if (typeof block !== "number") {
+            lay(element.children, block, from);
+          }
+        }
+        from += heightOf(block);
+      });
+    };
     Object.defineProperties(scroller, {
       clientHeight: { get: () => ROOM },
       scrollHeight: { get: () => tall },
@@ -113,22 +209,52 @@ function conversation(
         // A browser never scrolls past the end.
         set: (to: number) => (top = Math.max(0, Math.min(to, tall - ROOM))),
       },
+      // The top of the screen's room for the conversation.
+      getBoundingClientRect: {
+        value: () => (drawn() ? new DOMRect(0, 0, 800, ROOM) : new DOMRect()),
+      },
     });
     Object.defineProperty(
       scroller.querySelector('[data-testid="shown"]'),
       "offsetTop",
       { get: () => above },
     );
+    let down = 0;
+    scroller.querySelectorAll("article").forEach((article, index) => {
+      const message = messages[index];
+      const blocks =
+        message === undefined || typeof message === "string"
+          ? null
+          : message.blocks;
+      const holder = article.firstElementChild;
+      if (blocks === null || holder === null) {
+        boxed(article, down, TALL);
+        down += TALL;
+        return;
+      }
+      const inside = heightOf(blocks);
+      boxed(article, down, INSET + inside + INSET);
+      boxed(holder, down + INSET, inside);
+      lay(holder.children, blocks, down + INSET);
+      down += INSET + inside + INSET;
+    });
   };
   let follows: Follow | undefined;
-  render(
-    <Page
-      handOver={(given) => {
-        follows = given;
-      }}
-      painting={painting}
-    />,
+  let mode: "visible" | "hidden" = "visible";
+  let handed = given;
+  const page = () => (
+    <Activity mode={mode}>
+      <Page
+        handOver={(followed) => {
+          follows = followed;
+        }}
+        painting={painting}
+        given={handed}
+        messages={messages}
+      />
+    </Activity>
   );
+  const { rerender, unmount } = render(page());
   const scroller = screen.getByTestId("scroller");
   const end = () => tall - ROOM;
   const hook = (): Follow => {
@@ -145,6 +271,21 @@ function conversation(
     scroller,
     /** How long until the reader is still, as the hook says. */
     untilStill: () => hook().untilStill(),
+    /** The page hands the hook something else. */
+    give(changed: Given) {
+      handed = changed;
+      rerender(page());
+    },
+    /** The conversation stays on the page, hidden, as React keeps what is behind a
+     * Suspense boundary's fallback or in an Activity that is hidden. */
+    hide() {
+      mode = "hidden";
+      rerender(page());
+    },
+    /** The conversation leaves the page. */
+    leave() {
+      unmount();
+    },
     /** The conversation becomes `to` pixels tall. A browser that was scrolled past
      * the new end moves up to it, and says it scrolled. */
     resize(to: number) {
@@ -706,4 +847,297 @@ test("a clock that was put back leaves the reader still", () => {
   clock.advance(-1000);
 
   expect(page.untilStill()).toBe(0);
+});
+
+// A conversation its reader left away from its end opens where they left it: at the
+// block of a message at the top of the screen, with the top of the screen as far below
+// the block's top as it was. Where the reader is, the hook says: read after they
+// scrolled, once a frame, and when the conversation leaves the page.
+
+/** The ids of `count` messages: "m0", "m1", and so on. */
+function ids(count: number): string[] {
+  return Array.from({ length: count }, (_, index) => `m${String(index)}`);
+}
+
+test("a conversation opens at the place where its reader left it, from its first paint, and its end isn't followed", () => {
+  let painted: number | null = null;
+
+  const page = conversation(2000, {
+    messages: ids(20),
+    given: { at: { message: "m3", path: [], offset: 30 } },
+    painting: () => {
+      painted = screen.getByTestId("scroller").scrollTop;
+    },
+  });
+
+  // "m3" is 300 down: the screen begins 30 below its top.
+  expect(painted).toBe(330);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+  page.resize(3000);
+  expect(page.at()).toBe(330);
+});
+
+test("a place is the block of its message at the top of the screen: a block above it that is another height when the conversation is drawn anew moves nothing", () => {
+  holdFrames();
+  // "m3" is drawn in four blocks, the second of them 352 pixels high when the reader
+  // left, and 218 when they came back. So was a block of code, until a rule of the
+  // stylesheet gave code its real height from the first layout (app/globals.css);
+  // so may be a diagram, which is drawn later.
+  const drawn = (second: number): Shown[] => [
+    ...ids(3),
+    { id: "m3", blocks: [50, second, 60, 40] },
+    ...ids(20).slice(4),
+  ];
+  const told: (Spot | null)[] = [];
+  const before = conversation(3000, {
+    messages: drawn(352),
+    given: { remember: (spot) => told.push(spot) },
+  });
+  // The reader read the second block, and went on: the screen begins 20 into the
+  // third, which is 300 + 10 + 50 + 352 down.
+  before.scroll(732);
+  before.leave();
+  expect(told).toEqual([{ message: "m3", path: [0, 2], offset: 20 }]);
+
+  const after = conversation(3000, {
+    messages: drawn(218),
+    given: { at: told[0] ?? null },
+  });
+
+  // The third block is 300 + 10 + 50 + 218 down now.
+  expect(after.at()).toBe(598);
+});
+
+test("a place is the block at the top of the screen, found among blocks of which some aren't drawn", () => {
+  holdFrames();
+  const told: (Spot | null)[] = [];
+  // The third of "m3"'s blocks isn't drawn: its box is nothing at all, which a search
+  // by halves that took it for a box would put above the screen, and go past the second.
+  const page = conversation(3000, {
+    messages: [
+      ...ids(3),
+      { id: "m3", blocks: [50, 60, 0, 40] },
+      ...ids(20).slice(4),
+    ],
+    given: { remember: (spot) => told.push(spot) },
+  });
+  // The screen begins 20 into the second block, which is 300 + 10 + 50 down.
+  page.scroll(380);
+
+  page.leave();
+
+  expect(told).toEqual([{ message: "m3", path: [0, 1], offset: 20 }]);
+});
+
+test("a place whose block isn't drawn now goes down its way as far as there is, and no further than the end of what it finds", () => {
+  // Its message is drawn in two blocks now, and the place was in the fourth of four:
+  // the element that holds the two, from 310 down and 110 high, is as far as it goes.
+  // From the message itself, from 300 down and 130 high, the reader would be at 430.
+  const page = conversation(3000, {
+    messages: [...ids(3), { id: "m3", blocks: [50, 60] }, ...ids(20).slice(4)],
+    given: { at: { message: "m3", path: [0, 3], offset: 500 } },
+  });
+
+  expect(page.at()).toBe(420);
+});
+
+test("a place in a thought that is folded when the conversation is drawn anew is the folded thought, and draws nothing below for it", () => {
+  holdFrames();
+  // "m3" begins with a thought: a summary 40 pixels high, and what it says under it,
+  // which isn't drawn while the thought is folded, though it is still on the page.
+  const drawn = (open: boolean): Shown[] => [
+    ...ids(3),
+    { id: "m3", blocks: [[40, open ? 260 : 0], 60, 40] },
+    ...ids(20).slice(4),
+  ];
+  const told: (Spot | null)[] = [];
+  const before = conversation(3000, {
+    messages: drawn(true),
+    given: { remember: (spot) => told.push(spot) },
+  });
+  // The reader reads in the thought, open: the screen begins 100 into what it says,
+  // which is 300 + 10 + 40 down.
+  before.scroll(450);
+  before.leave();
+  expect(told).toEqual([{ message: "m3", path: [0, 0, 1], offset: 100 }]);
+  let asked = 0;
+
+  const after = conversation(3000, {
+    messages: drawn(false),
+    given: {
+      at: told[0] ?? null,
+      heldBelow: true,
+      showBelow: () => {
+        asked += 1;
+      },
+    },
+  });
+
+  // At the folded thought, from 310 down and 40 high: no further than its end.
+  expect(after.at()).toBe(350);
+  expect(asked).toBe(0);
+});
+
+test("a place whose message isn't shown is no place: the conversation opens at its end", () => {
+  const page = conversation(2000, {
+    messages: ids(20),
+    given: { at: { message: "elsewhere", path: [], offset: 30 } },
+  });
+
+  expect(page.at()).toBe(1500);
+  page.resize(3000);
+  expect(page.at()).toBe(2500);
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+
+test("while messages are held back below what is shown, a reader at its end isn't at the conversation's end", () => {
+  const at = { message: "m3", path: [], offset: 30 };
+  const page = conversation(2000, {
+    messages: ids(20),
+    given: { at, heldBelow: true },
+  });
+
+  page.scroll(page.end()); // the reader goes to the end of what is shown
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+  page.resize(2600); // the next step comes in below
+
+  expect(page.at()).toBe(1500);
+  expect(screen.getByRole("button", { name: "Newest" })).toBeVisible();
+
+  // Nothing is held back any more: the end of what is shown is the end.
+  page.give({ at, heldBelow: false });
+  page.scroll(page.end());
+  page.resize(3000);
+  expect(page.at()).toBe(2500);
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+
+test("where the reader is, is read once a frame while they scroll, and not for the page's own moves", () => {
+  const frame = holdFrames();
+  const told: (Spot | null)[] = [];
+  const page = conversation(2000, {
+    messages: ids(20),
+    given: { remember: (spot) => told.push(spot) },
+  });
+
+  page.scroll(700);
+  page.scroll(650);
+  page.scroll(640);
+  expect(told).toEqual([]);
+  act(frame);
+
+  // "m6" is 600 down: the screen begins 40 below its top.
+  expect(told).toEqual([{ message: "m6", path: [], offset: 40 }]);
+
+  // Older messages shown above, and an answer that grows at the end.
+  page.addAbove(1000);
+  page.resize(3400);
+  act(frame);
+  expect(told).toHaveLength(1);
+  expect(page.at()).toBe(1640);
+});
+
+test("a reader at the end has no place", async () => {
+  const user = userEvent.setup();
+  const frame = holdFrames();
+  const told: (Spot | null)[] = [];
+  const page = conversation(2000, {
+    messages: ids(20),
+    given: { remember: (spot) => told.push(spot) },
+  });
+  page.scroll(700);
+  act(frame);
+
+  page.scroll(page.end() - 20); // close enough
+  act(frame);
+  page.scroll(700);
+  act(frame);
+  await user.click(screen.getByRole("button", { name: "Newest" }));
+
+  expect(told).toEqual([
+    { message: "m7", path: [], offset: 0 },
+    null,
+    { message: "m7", path: [], offset: 0 },
+    null,
+  ]);
+});
+
+test.each([
+  {
+    where: "away from its end",
+    goes: (page: ReturnType<typeof conversation>) => {
+      page.scroll(640);
+    },
+    told: [{ message: "m6", path: [], offset: 40 }],
+  },
+  { where: "at its end", goes: () => undefined, told: [null] },
+])(
+  "where the reader is, is said when the conversation leaves the page $where",
+  ({ goes, told }) => {
+    // No frame comes in between.
+    holdFrames();
+    const said: (Spot | null)[] = [];
+    const page = conversation(2000, {
+      messages: ids(20),
+      given: { remember: (spot) => said.push(spot) },
+    });
+    goes(page);
+
+    page.leave();
+
+    expect(said).toEqual(told);
+  },
+);
+
+test("a conversation that is hidden, and kept, keeps its reader's place", () => {
+  // React undoes the layout effects of what it hides before it hides it, so where the
+  // reader is can still be read then.
+  holdFrames();
+  const said: (Spot | null)[] = [];
+  const page = conversation(2000, {
+    messages: ids(20),
+    given: { remember: (spot) => said.push(spot) },
+  });
+  page.scroll(640);
+
+  page.hide();
+
+  expect(said).toEqual([{ message: "m6", path: [], offset: 40 }]);
+  expect(page.scroller).not.toBeVisible();
+  page.leave();
+  expect(said).toHaveLength(1);
+});
+
+test("nothing is said of where the reader is when the conversation leaves the page while it isn't drawn", () => {
+  // Every box in it has a size of nothing then, which would read as no place at all.
+  holdFrames();
+  const said: (Spot | null)[] = [];
+  const page = conversation(2000, {
+    messages: ids(20),
+    given: { remember: (spot) => said.push(spot) },
+  });
+  page.scroll(640);
+  page.scroller.style.display = "none";
+
+  page.leave();
+
+  expect(said).toEqual([]);
+});
+
+test("nothing is said of where the reader is when the element that scrolls is gone from the page by the frame that reads it", () => {
+  const frame = holdFrames();
+  const said: (Spot | null)[] = [];
+  const page = conversation(2000, {
+    messages: ids(20),
+    given: { remember: (spot) => said.push(spot) },
+  });
+  page.scroll(640);
+  const { parentElement: parent, nextSibling: next } = page.scroller;
+
+  page.scroller.remove();
+  act(frame);
+
+  expect(said).toEqual([]);
+  // Put back, for React to take it off the page itself.
+  parent?.insertBefore(page.scroller, next);
 });

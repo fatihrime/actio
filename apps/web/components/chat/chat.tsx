@@ -26,6 +26,8 @@ import {
   notReady,
   outcomeOf,
 } from "@/lib/chat/outcomes";
+import { keepPlace, placeLeft } from "@/lib/chat/places";
+import type { Spot } from "@/lib/chat/places";
 import { turnTransport } from "@/lib/chat/turns";
 import type { JoinOptions, TurnOptions } from "@/lib/chat/turns";
 import { warmUp } from "@/lib/chat/warm-up";
@@ -58,15 +60,40 @@ const ELSEWHERE_MS = 1500;
 // line, which 10 may not.
 const DRAWN_FIRST = 20;
 const DRAWN_EACH_STEP = 20;
+// A conversation that opens where its reader left it draws the messages around that
+// place at once: this many before the place's message, and the rest of `DRAWN_FIRST`
+// from it on, which fill the screen below it.
+const DRAWN_BEFORE_PLACE = 5;
+
+/** The messages of a stored conversation of `count` that are drawn at once, from
+ * `first` up to `last`: its newest `DRAWN_FIRST`, or, when it opens at the place of its
+ * message `at`, `DRAWN_FIRST` around that message, `DRAWN_BEFORE_PLACE` of them before
+ * it, held to the conversation's two ends. */
+function drawnFirst(
+  count: number,
+  at: number | null,
+): { first: number; last: number } {
+  const first = Math.max(
+    0,
+    Math.min(
+      at === null ? count : at - DRAWN_BEFORE_PLACE,
+      count - DRAWN_FIRST,
+    ),
+  );
+  return { first, last: Math.min(count, first + DRAWN_FIRST) };
+}
 
 /** Where each step of a stored conversation of `count` messages begins, oldest first:
- * its newest `DRAWN_FIRST`, then each `DRAWN_EACH_STEP` before them. */
-function stepsOf(count: number): number[] {
-  let start = Math.max(0, count - DRAWN_FIRST);
-  const starts = [start];
-  while (start > 0) {
+ * those drawn at once, from `first` up to `last`, then each `DRAWN_EACH_STEP` before
+ * them, and each `DRAWN_EACH_STEP` after them. */
+function stepsOf(count: number, first: number, last: number): number[] {
+  const starts = [first];
+  for (let start = first; start > 0;) {
     start = Math.max(0, start - DRAWN_EACH_STEP);
     starts.unshift(start);
+  }
+  for (let start = last; start < count; start += DRAWN_EACH_STEP) {
+    starts.push(start);
   }
   return starts;
 }
@@ -162,20 +189,42 @@ export function Chat({
   const [initial] = useState(() =>
     stored === null ? [] : fromStored(stored.messages),
   );
-  // A long conversation comes onto the page newest first, and its older messages
-  // behind (below), in the steps it came in (`steps`). Only what it had when it came
-  // is held back. Whatever comes after, a question, an answer, what the server has
-  // beyond that when the conversation is read again, is drawn and shown as it comes.
-  // Only the drawing and the showing start later: everything else reads all the
-  // messages.
-  const steps = useMemo(() => stepsOf(initial.length), [initial]);
-  // How many of the conversation's oldest messages aren't drawn yet.
-  const [held, setHeld] = useState(() =>
-    Math.max(0, initial.length - DRAWN_FIRST),
+  // Where the reader left this conversation, if they left it away from its end in this
+  // session, and its message is among those it came with: it opens there, and the
+  // messages around that place are the ones drawn at once. Otherwise it opens at its
+  // end, with its newest.
+  const [opening] = useState(() => {
+    const left = stored === null ? null : placeLeft(holder, id);
+    const at =
+      left === null
+        ? -1
+        : initial.findIndex((message) => message.id === left.message);
+    return at === -1
+      ? { place: null, ...drawnFirst(initial.length, null) }
+      : { place: left, ...drawnFirst(initial.length, at) };
+  });
+  // A long conversation comes onto the page in steps (`steps`): those drawn at once,
+  // then its older messages behind them (above), and, when it opens at a place, its
+  // newer ones too (below). Only what it had when it came is held back. Whatever comes
+  // after, a question, an answer, what the server has beyond that when the
+  // conversation is read again, is drawn and shown as it comes, and everything held
+  // back below is shown before it. Only the drawing and the showing start later:
+  // everything else reads all the messages.
+  const steps = useMemo(
+    () => stepsOf(initial.length, opening.first, opening.last),
+    [initial, opening],
   );
+  // How many of the conversation's oldest messages aren't drawn yet.
+  const [held, setHeld] = useState(opening.first);
   // The first message that is shown: those from `held` up to it are drawn, out of
   // sight.
   const [shown, setShown] = useState(held);
+  // The first of the messages it came with that isn't drawn yet below what is shown:
+  // those from it on aren't. Below the reader, a step is shown as soon as it is drawn.
+  const [heldFrom, setHeldFrom] = useState(opening.last);
+  // Whether its last messages are on the page, none it came with held back below what
+  // is shown: what is said of the last one is said under it, and only then.
+  const endDrawn = heldFrom === initial.length;
   // When the conversation ends with a question: the last turn that tried to answer
   // it, as the server reports it. Nothing once the library has read an answer: what
   // it read says how its turn stands, until the server is asked again.
@@ -209,24 +258,51 @@ export function Chat({
   // What the library's last error put on the page, until the reading it ended is
   // over (`onFinish`).
   const reported = useRef<unknown>(null);
+  // Where the reader is in this conversation, as the page last read it, is noted for
+  // whoever has the session: it opens there when they come back to it.
+  const remember = useCallback(
+    (spot: Spot | null) => {
+      keepPlace(holder, id, spot);
+    },
+    [holder, id],
+  );
   const { scroller, content, away, follow, untilStill, standing, addedAbove } =
-    useFollow();
+    useFollow({
+      at: opening.place,
+      heldBelow: !endDrawn,
+      remember,
+      // Those drawn at once may be less than a window high below the place, and the
+      // reader can't be put there until more of them are drawn: the next step, at
+      // once, not as a transition.
+      showBelow: () => {
+        setHeldFrom(Math.min(initial.length, heldFrom + DRAWN_EACH_STEP));
+      },
+    });
   const box = useRef<HTMLTextAreaElement>(null);
 
-  // The older messages are drawn in steps, each once the one before it is on the
-  // page, out of sight. A step is a transition: React draws it in slices, between which
-  // the page takes the reader's input and draws its frames. What is out of sight
-  // changes nothing the reader sees or scrolls, so drawing doesn't wait for them. The
-  // next count is worked out from the one on the page, so that React running this
-  // twice on purpose (StrictMode) takes one step, not two.
+  // The messages held back are drawn in steps, each once the one before it is on the
+  // page: the nearest first, below and above in turn, below first. A step is a
+  // transition: React draws it in slices, between which the page takes the reader's
+  // input and draws its frames. Older messages are drawn out of sight, and newer ones
+  // below the reader: neither changes what the reader sees or scrolls, so drawing
+  // doesn't wait for them. The next count is worked out from the one on the page, so
+  // that React running this twice on purpose (StrictMode) takes one step, not two.
   useEffect(() => {
-    if (held === 0) {
+    const above = held > 0;
+    const below = heldFrom < initial.length;
+    if (!above && !below) {
       return;
     }
+    const back = Math.ceil((opening.first - held) / DRAWN_EACH_STEP);
+    const on = Math.ceil((heldFrom - opening.last) / DRAWN_EACH_STEP);
     startTransition(() => {
-      setHeld(Math.max(0, held - DRAWN_EACH_STEP));
+      if (below && (!above || on <= back)) {
+        setHeldFrom(Math.min(initial.length, heldFrom + DRAWN_EACH_STEP));
+      } else {
+        setHeld(Math.max(0, held - DRAWN_EACH_STEP));
+      }
     });
-  }, [held]);
+  }, [held, heldFrom, initial.length, opening]);
 
   // What is drawn is shown a step at a time, the newest first, each in a task of its
   // own, and only while the reader is still. A browser scrolls on a thread of its own,
@@ -332,6 +408,15 @@ export function Chat({
   });
   const answering = status === "submitted" || status === "streaming";
 
+  // Whatever follows the messages the conversation came with is drawn after the last of
+  // them, and never with some of them missing before it: a question, an answer that is
+  // read along with, what the server has beyond them when it is read again. So all
+  // that is held back below what is shown is shown with it, at once, in the same
+  // render. While an answer is read, the conversation's end is on the page.
+  if (!endDrawn && (messages.length > initial.length || answering)) {
+    setHeldFrom(initial.length);
+  }
+
   // Reading along again shows that the server is there, and has the turn: the
   // notice of the reading that broke off is no longer true. Any other notice stays.
   // It goes once the library reads the join's stream; at the latest when that
@@ -399,6 +484,7 @@ export function Chat({
         // place in the list where a step was held back: it must be shown as it comes.
         setHeld(0);
         setShown(0);
+        setHeldFrom(initial.length);
       }
       const unanswered = conversation?.unanswered ?? null;
       setOpen(unanswered);
@@ -415,7 +501,7 @@ export function Chat({
       }
       return unanswered?.status === "running";
     },
-    [id, setMessages, refreshUsage, onActivity],
+    [id, initial.length, setMessages, refreshUsage, onActivity],
   );
 
   function send() {
@@ -430,6 +516,8 @@ export function Chat({
     };
     sent.current = { id: question.id, text: words };
     actions.current++;
+    // It goes after the conversation's last message, with all of them above it.
+    setHeldFrom(initial.length);
     follow();
     setText("");
     setProblem(null);
@@ -589,9 +677,9 @@ export function Chat({
             role="log"
             aria-label="Conversation"
             aria-busy={answering || joining}
-            // A log is a live region: a screen reader says what is added to it. Older
-            // messages shown behind the newest are no news.
-            aria-live={shown > 0 ? "off" : undefined}
+            // A log is a live region: a screen reader says what is added to it. Stored
+            // messages shown behind the first, above them or below, are no news.
+            aria-live={shown > 0 || !endDrawn ? "off" : undefined}
             className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6"
           >
             {messages.length === 0 && (
@@ -617,7 +705,9 @@ export function Chat({
               // as the log lays out its own, and has a box, whose place says how much
               // was shown above the reader (`standing`). A step not drawn yet, or of
               // which nothing is left, has none.
-              return start < held || drawn.length === 0 ? null : (
+              return start < held ||
+                start >= heldFrom ||
+                drawn.length === 0 ? null : (
                 <div
                   key={start}
                   hidden={start < shown}
@@ -644,14 +734,18 @@ export function Chat({
                 }
               />
             ))}
-            {(answering || joining) && last?.role === "user" && <Waiting />}
-            {elsewhere && (
+            {/* What is said of the conversation's last message stands under it: not
+                under what is shown while that message is held back below. */}
+            {endDrawn && (answering || joining) && last?.role === "user" && (
+              <Waiting />
+            )}
+            {endDrawn && elsewhere && (
               <Notice>
                 An answer to this is still being written. It appears here when
                 it is done.
               </Notice>
             )}
-            {outcome !== null && turn !== null && (
+            {endDrawn && outcome !== null && turn !== null && (
               <Notice
                 actions={
                   canRetry(turn, saidSomething) &&
@@ -668,7 +762,14 @@ export function Chat({
         {away && (
           <button
             type="button"
-            onClick={follow}
+            onClick={() => {
+              // The newest message is below whatever is still held back, which is
+              // shown first, before the page goes to the end.
+              flushSync(() => {
+                setHeldFrom(initial.length);
+              });
+              follow();
+            }}
             aria-label="Go to the newest message"
             title="Go to the newest message"
             className="absolute bottom-3 left-1/2 flex size-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-lg shadow-md hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"

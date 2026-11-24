@@ -7,8 +7,16 @@ import {
 } from "react";
 import type { RefObject } from "react";
 
+import type { Spot } from "@/lib/chat/places";
+
 /** How close to the end still counts as being at the end, in pixels. */
 const NEAR = 48;
+
+/** The messages that are shown in the element that grows, from the top: those of the
+ * steps that are shown, and those after them. A message is found by its id
+ * (`data-message-id` on its article, message.tsx). */
+const SHOWN_MESSAGES =
+  ":scope > [data-message-id], :scope > :not([hidden]) > [data-message-id]";
 
 /** How long after the reader last did something that scrolls they count as still, in
  * milliseconds. Longer than the time between two events of one gesture, of a key held
@@ -35,6 +43,135 @@ export interface Place {
   offset: number;
 }
 
+/** How many levels below a message's article a place goes down, to the block that
+ * crosses the window's top edge. */
+const DEEPEST = 4;
+
+/** `element`'s box, when it is drawn: nothing when it has no height, or the browser
+ * says it isn't drawn, as what a folded thought holds may be laid out and not drawn. */
+function drawnBox(element: Element): DOMRect | null {
+  const box = element.getBoundingClientRect();
+  return box.height === 0 ||
+    (typeof element.checkVisibility === "function" &&
+      !element.checkVisibility())
+    ? null
+    : box;
+}
+
+/** The index of the first of `children` that is drawn and whose bottom edge is below
+ * `edge`, or nothing when none is. Those that are drawn stand one under another, so it
+ * is found by halves: a few reads of the layout, however many blocks an answer has. One
+ * that isn't drawn is no answer, and in the search stands for the next one after it
+ * that is. */
+function firstAcross(children: HTMLCollection, edge: number): number | null {
+  // The first child from `index` on that is drawn, with its box.
+  const drawnFrom = (index: number) => {
+    for (let at = index; at < children.length; at++) {
+      const child = children[at];
+      const box = child === undefined ? null : drawnBox(child);
+      if (box !== null) {
+        return { at, box };
+      }
+    }
+    return null;
+  };
+  let low = 0;
+  let high = children.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const drawn = drawnFrom(middle);
+    if (drawn === null || drawn.box.bottom > edge) {
+      high = middle;
+    } else {
+      low = drawn.at + 1;
+    }
+  }
+  return drawnFrom(low)?.at ?? null;
+}
+
+/** Where the reader is in `growing`, which `scrolling` scrolls: the first message shown
+ * whose bottom edge is below the top edge of `scrolling`, the block of it that crosses
+ * that edge, and how far the edge is below the block's top edge. Nothing when no
+ * message is. */
+function spotIn(scrolling: HTMLElement, growing: HTMLElement): Spot | null {
+  const messages = growing.querySelectorAll<HTMLElement>(SHOWN_MESSAGES);
+  const edge = scrolling.getBoundingClientRect().top;
+  // They stand one under another, so that message is found by halves: a few reads of
+  // the layout, however long the conversation.
+  let low = 0;
+  let high = messages.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const bottom = messages[middle]?.getBoundingClientRect().bottom ?? edge;
+    if (bottom > edge) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  const found = messages[low];
+  const id = found?.dataset.messageId;
+  if (found === undefined || id === undefined) {
+    return null;
+  }
+  // Down from the message, at each level to the first child that is drawn and whose
+  // bottom edge is below the window's top edge: what is in view.
+  const path: number[] = [];
+  let block: Element = found;
+  for (let level = 0; level < DEEPEST; level++) {
+    const index = firstAcross(block.children, edge);
+    const child = index === null ? undefined : block.children[index];
+    if (index === null || child === undefined) {
+      break;
+    }
+    path.push(index);
+    block = child;
+  }
+  return {
+    message: id,
+    path,
+    offset: edge - block.getBoundingClientRect().top,
+  };
+}
+
+/** Put the reader at `spot` in `growing`, which `scrolling` scrolls: the window's top
+ * edge at the place's block, down the place's path from its message as far as the path
+ * leads. It leads no further where the message is drawn otherwise now, as when it is
+ * shown as written, and where what it leads to isn't drawn now, as in a thought that
+ * was open and is folded: the window's top edge goes into the deepest element found
+ * that is drawn, but no further than its end. Says how far short of the place the
+ * reader is then, in pixels, when the end of what is shown held them back: 0 at the
+ * place. Nothing when the place's message isn't shown, and then nothing moved. */
+function goTo(
+  scrolling: HTMLElement,
+  growing: HTMLElement,
+  spot: Spot,
+): number | null {
+  const message = [
+    ...growing.querySelectorAll<HTMLElement>(SHOWN_MESSAGES),
+  ].find((shown) => shown.dataset.messageId === spot.message);
+  if (message === undefined) {
+    return null;
+  }
+  let block: Element = message;
+  let whole = true;
+  for (const index of spot.path) {
+    const child = block.children[index];
+    if (child === undefined || drawnBox(child) === null) {
+      whole = false;
+      break;
+    }
+    block = child;
+  }
+  const offset = whole
+    ? spot.offset
+    : Math.min(spot.offset, block.getBoundingClientRect().height);
+  const at = () =>
+    scrolling.getBoundingClientRect().top - block.getBoundingClientRect().top;
+  scrolling.scrollTop += offset - at();
+  return Math.max(0, offset - at());
+}
+
 /** Keeps the end of a growing conversation in view, until the reader scrolls away
  * from it, and again once they come back to it.
  *
@@ -46,13 +183,42 @@ export interface Place {
  * Whatever shows them waits until the reader is still (`untilStill`), asks where they
  * stand just before (`standing`), and says so just after (`addedAbove`), in the same
  * task: the reader stays at the words they were reading.
+ *
+ * A conversation that its reader left away from its end opens where they left it
+ * (`at`), and its end isn't followed. Where the reader is, the hook says (`remember`):
+ * nothing while the end is followed, and otherwise their place, read after they
+ * scrolled, at most once a frame, and when the conversation leaves the page. While
+ * messages it came with are still held back below what is shown (`heldBelow`), the end
+ * of what is shown isn't the conversation's: a reader who scrolls down to it isn't
+ * taken to follow the end, and is offered the way to the newest message. And when that
+ * end holds the reader short of their place as it opens, the next of those messages
+ * are shown (`showBelow`), until the place is reached or none is held back.
  */
-export function useFollow(): {
+export function useFollow({
+  at = null,
+  heldBelow = false,
+  remember,
+  showBelow,
+}: {
+  /** Where the reader left the conversation, when they left it away from its end: it
+   * opens there, and not at its end. Read when the hook starts. */
+  at?: Spot | null;
+  /** Whether messages the conversation came with are still held back below what is
+   * shown. */
+  heldBelow?: boolean;
+  /** Told where the reader is, each time that is read: their place, or nothing while
+   * the end is followed. */
+  remember?: (spot: Spot | null) => void;
+  /** Show the next step of the messages held back below, now: they are on the page
+   * once React has drawn the update this makes, before the browser paints. */
+  showBelow?: () => void;
+} = {}): {
   /** For the element that scrolls. */
   scroller: RefObject<HTMLDivElement | null>;
   /** For the element inside it that grows. */
   content: RefObject<HTMLDivElement | null>;
-  /** Whether the reader has scrolled away from the end, and there is more below. */
+  /** Whether the reader has scrolled away from the end, and there is more below, or
+   * messages are held back below what is shown. */
   away: boolean;
   /** Go to the end, and stay there. */
   follow: () => void;
@@ -81,6 +247,27 @@ export function useFollow(): {
   // model until it has words"). It only matters while the end isn't followed, and
   // whatever takes the reader from the end empties it first.
   const movedFrom = useRef<number | null>(null);
+  // Where the conversation opens, as the hook was first given it, and whether the
+  // reader was put there: once, also when React runs the hook's start twice on purpose
+  // (StrictMode).
+  const opensAt = useRef(at);
+  const opened = useRef(false);
+  // What the page said last, for the listeners, which are set up once.
+  const endHeld = useRef(heldBelow);
+  const tell = useRef(remember);
+  const more = useRef(showBelow);
+  // The frame at which the reader's place is to be read, once a scroll of theirs asked
+  // for it.
+  const reading = useRef(0);
+  // The place the conversation opens at, while the reader is still to be put there:
+  // the end of what was shown held them short of it, and more is being shown below.
+  const reaching = useRef<Spot | null>(null);
+
+  useLayoutEffect(() => {
+    endHeld.current = heldBelow;
+    tell.current = remember;
+    more.current = showBelow;
+  });
 
   const toEnd = useCallback(() => {
     const scrolling = scroller.current;
@@ -90,10 +277,34 @@ export function useFollow(): {
     }
   }, []);
 
+  /** Say where the reader is: nothing while the end is followed, and otherwise their
+   * place, which takes the page's layout. Nothing at all, and what was said last
+   * stands, when the element that scrolls is gone from the page or has no box: every
+   * box in it would have a size of nothing then, which reads as no place. Nor while
+   * the reader is still being put at the place it opens at, where they are isn't
+   * theirs: React's StrictMode undoes and runs again the effect below, which says it,
+   * in that moment. */
+  const say = useCallback(() => {
+    const scrolling = scroller.current;
+    const growing = content.current;
+    if (
+      scrolling === null ||
+      growing === null ||
+      reaching.current !== null ||
+      !scrolling.isConnected ||
+      scrolling.getBoundingClientRect().height === 0
+    ) {
+      return;
+    }
+    tell.current?.(following.current ? null : spotIn(scrolling, growing));
+  }, []);
+
   const follow = useCallback(() => {
     following.current = true;
     setAway(false);
     toEnd();
+    // A reader at the end has no place.
+    tell.current?.(null);
   }, [toEnd]);
 
   const untilStill = useCallback(() => {
@@ -137,11 +348,70 @@ export function useFollow(): {
     }
   }, []);
 
-  // At the end before the browser first paints the conversation. The sizes below are
-  // watched from an effect, which React runs once the browser has painted what it was
-  // given, and are first reported after that: until then the conversation was painted
-  // from its top (ADR 0015, revision "a long conversation opens newest first").
-  useLayoutEffect(toEnd, [toEnd]);
+  /** Put the reader at `spot` as the conversation opens, away from its end. Says
+   * whether its message is shown. When the end of what is shown holds them short of it,
+   * and messages are held back below, the next step of those is shown, and they are put
+   * there again once it is drawn (`reaching`). */
+  const reach = useCallback((spot: Spot): boolean => {
+    reaching.current = null;
+    const scrolling = scroller.current;
+    const growing = content.current;
+    const short =
+      scrolling === null || growing === null
+        ? null
+        : goTo(scrolling, growing, spot);
+    if (scrolling === null || short === null) {
+      return false;
+    }
+    following.current = false;
+    top.current = scrolling.scrollTop;
+    setAway(
+      scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight >=
+        NEAR,
+    );
+    if (short > 1 && endHeld.current && more.current !== undefined) {
+      reaching.current = spot;
+      more.current();
+    }
+    return true;
+  }, []);
+
+  // Held short of the place by the end of what was shown, the reader is put there again
+  // once the step below that was asked for is drawn. An update made in a layout effect
+  // is drawn before the browser paints, and its layout effects run before it paints
+  // too: so the first frame that shows the conversation is at the place.
+  useLayoutEffect(() => {
+    const spot = reaching.current;
+    if (spot !== null) {
+      reach(spot);
+    }
+  });
+
+  // At the end, or at the place where the reader left the conversation, before the
+  // browser first paints it. The sizes below are watched from an effect, which React
+  // runs once the browser has painted what it was given, and are first reported after
+  // that: until then the conversation was painted from its top (ADR 0015, revision "a
+  // long conversation opens newest first").
+  //
+  // And where the reader is, is said when the conversation leaves the page: before its
+  // elements are taken off it, which they are once this is undone.
+  useLayoutEffect(() => {
+    const spot = opensAt.current;
+    if (spot === null) {
+      toEnd();
+    } else if (!opened.current) {
+      opened.current = true;
+      if (!reach(spot)) {
+        // Its message isn't shown, which the page sees to: the end, as without one.
+        toEnd();
+      }
+    }
+    return () => {
+      cancelAnimationFrame(reading.current);
+      reading.current = 0;
+      say();
+    };
+  }, [toEnd, say, reach]);
 
   useEffect(() => {
     const scrolling = scroller.current;
@@ -157,6 +427,15 @@ export function useFollow(): {
       // anywhere else, by the reader.
       if (Math.abs(scrolling.scrollTop - top.current) >= 1) {
         moved.current = Date.now();
+        // Where they are now is read at the next frame, once however often the
+        // browser tells of their scroll before it. A move of the page's own changes
+        // nothing of their place: it is the page's to keep.
+        if (reading.current === 0) {
+          reading.current = requestAnimationFrame(() => {
+            reading.current = 0;
+            say();
+          });
+        }
       }
       const up = scrolling.scrollTop < top.current;
       const down = scrolling.scrollTop > top.current;
@@ -185,9 +464,11 @@ export function useFollow(): {
         }
       } else if (down) {
         // The reader's own scroll down. Whatever was kept is behind them now: should
-        // what is shown get shorter again, they are moved from where they are.
+        // what is shown get shorter again, they are moved from where they are. The end
+        // of what is shown is the conversation's only once nothing is held back below
+        // it: followed before, it would take them on with each step that comes.
         movedFrom.current = null;
-        if (below() < NEAR) {
+        if (below() < NEAR && !endHeld.current) {
           following.current = true;
         }
       }
@@ -258,12 +539,14 @@ export function useFollow(): {
       window.removeEventListener("keydown", pressed, { capture: true });
       sizes.disconnect();
     };
-  }, [toEnd]);
+  }, [toEnd, say]);
 
   return {
     scroller,
     content,
-    away,
+    // Held back below, the conversation's end is below what is shown, however close
+    // the reader is to the end of that.
+    away: away || heldBelow,
     follow,
     untilStill,
     standing,

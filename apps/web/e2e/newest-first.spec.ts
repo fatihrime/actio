@@ -6,13 +6,18 @@
 // and when it is shown, and the rules of scrolling, are the component tests'
 // (components/chat/newest-first.test.tsx, follow.test.tsx).
 //
+// A conversation its reader left away from its end opens where they left it, in the
+// same page: the message at the top of the screen where it stood, at every frame from
+// the first, while the rest comes in above and below. And the end of what is shown is
+// not taken for the conversation's end while messages are still to come below it.
+//
 // The page is watched from inside, at the start of each frame, by a loop that begins
 // before it shows the conversation. What the driver sees between two of its own calls
 // is no frame. No test says how long a frame took: on a machine shared with other
 // work that says little. Frame times are measured by hand, in three browsers. Nor is a
 // wheel turned here: these tests run Chromium, which keeps a reader's own scroll while
 // older messages come in, as Firefox and WebKit didn't; those are tried by hand.
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { expect, test } from "./chat";
 import type { Chat } from "./chat";
@@ -233,4 +238,295 @@ test("a reader who goes up while a long conversation is filled in stays at what 
   );
   expect(moved.length).toBeGreaterThan(0);
   expect(moved.filter((by) => Math.abs(by) > 1)).toEqual([]);
+});
+
+/** A place in a conversation: the message at the top of the screen, the first whose
+ * bottom edge is below the top edge of the part of the page that scrolls, and how far
+ * that edge is below the message's top edge, in pixels. */
+interface Place {
+  message: string;
+  offset: number;
+}
+
+/** The message the reader goes to: the answer to "Part 31", the 62nd of the 120. It
+ * opens again with the 5 before it and the 14 after it, and messages to come above
+ * and below. */
+const PLACED = 61;
+
+/** How far below its top the reader leaves the screen's top. */
+const OFFSET = 40;
+
+/** Make the conversation, open it from the list, go up to the `PLACED`th message as its
+ * reader would, and leave for a new chat. Hands back the conversation's id, the place
+ * as the page measures it, and the id of the conversation's last message. */
+async function leftAtAPlace(
+  chat: Chat,
+): Promise<{ id: string; place: Place; last: string }> {
+  const id = await aLongConversation(chat);
+  await chat.page.reload();
+  await expect(chat.listed).toHaveText(["Part 1:"]);
+  await chat.listed.first().click();
+  await allIn(chat);
+  const left = await chat.scroller.evaluate(
+    (scroller, { index, offset }) => {
+      const messages = [
+        ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+      ];
+      const top = () => scroller.getBoundingClientRect().top;
+      const message = messages[index];
+      if (message === undefined) {
+        throw new Error("The message to go to isn't on the page.");
+      }
+      scroller.scrollTop +=
+        message.getBoundingClientRect().top - top() + offset;
+      return {
+        place: {
+          message: message.dataset.messageId ?? "",
+          offset: top() - message.getBoundingClientRect().top,
+        },
+        last: messages.at(-1)?.dataset.messageId ?? "",
+      };
+    },
+    { index: PLACED, offset: OFFSET },
+  );
+  // The page took it for the reader's scroll.
+  await expect(newest(chat.page)).toBeVisible();
+  await chat.newChat.click();
+  await expect(chat.questions).toHaveCount(0);
+  return { id, ...left };
+}
+
+/** The button that leads to the conversation's newest message. */
+function newest(page: Page): Locator {
+  return page.getByRole("button", { name: "Go to the newest message" });
+}
+
+/** What the page was like at the start of one frame, as `watchPlace` sees it. */
+interface PlaceFrame {
+  /** How many messages it showed. */
+  messages: number;
+  /** How far the top of the part that scrolls was below the top of the place's
+   * message, in pixels: nothing while that message isn't shown. */
+  offset: number | null;
+  /** How far the message at the bottom of the screen had moved since the reader went
+   * down to it, in pixels: nothing before. */
+  moved: number | null;
+}
+
+/** What `watchPlace` saw. */
+interface PlaceSeen {
+  frames: PlaceFrame[];
+  /** When the reader went down to the bottom of what was shown: whether the
+   * conversation's last message was shown then. Nothing before. */
+  wentDown: { lastShown: boolean } | null;
+}
+
+/** In the page: from now on, note at the start of each frame where the place's message
+ * stands, from the first frame that shows a message, until this is called again.
+ *
+ * With `goDownTo`, the id of the conversation's last message, the reader goes to the
+ * bottom of what is shown as soon as the first step below the place's messages is on
+ * the page, and stays there. That is in the microtask after the task that put it
+ * there: the later steps below can't have landed then, each being drawn in a task of
+ * its own after it. And the page heard of the scroll in that same microtask, by an
+ * event sent there and then: the browser's own comes only at the next frame, by which
+ * time another step could have landed. */
+function watchPlace({
+  place,
+  goDownTo,
+}: {
+  place: { message: string; offset: number };
+  goDownTo: string | null;
+}): void {
+  const seen: PlaceSeen = { frames: [], wentDown: null };
+  const watching = {};
+  Reflect.set(window, "placeWatched", watching);
+  Reflect.set(window, "placeSeen", seen);
+  let watched: { message: Element; top: number } | null = null;
+  function shownIn(log: Element): HTMLElement[] {
+    return [...log.querySelectorAll<HTMLElement>("article")].filter(
+      (message) => message.closest("[hidden]") === null,
+    );
+  }
+  if (goDownTo !== null) {
+    const steps = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const added of record.addedNodes) {
+          const log = added.parentElement;
+          const scroller = log?.parentElement ?? null;
+          // A step is a child of the log; the one below the place's messages comes
+          // after the step that holds the place's message.
+          const placed = log
+            ?.querySelector(`[data-message-id="${place.message}"]`)
+            ?.closest('[role="log"] > *');
+          if (
+            log?.getAttribute("role") !== "log" ||
+            scroller === null ||
+            !(added instanceof HTMLElement) ||
+            placed === null ||
+            placed === undefined ||
+            !(
+              placed.compareDocumentPosition(added) &
+              Node.DOCUMENT_POSITION_FOLLOWING
+            )
+          ) {
+            continue;
+          }
+          steps.disconnect();
+          const now = shownIn(log);
+          seen.wentDown = {
+            lastShown: now.some((each) => each.dataset.messageId === goDownTo),
+          };
+          scroller.scrollTop = scroller.scrollHeight;
+          scroller.dispatchEvent(new Event("scroll"));
+          const bottom = now.at(-1);
+          if (bottom !== undefined) {
+            watched = {
+              message: bottom,
+              top: bottom.getBoundingClientRect().top,
+            };
+          }
+          return;
+        }
+      }
+    });
+    steps.observe(document.body, { childList: true, subtree: true });
+  }
+  function look() {
+    if (Reflect.get(window, "placeWatched") !== watching) {
+      return;
+    }
+    const log = document.querySelector('[role="log"]');
+    const scroller = log?.parentElement ?? null;
+    const shown = log === null ? [] : shownIn(log);
+    if (log !== null && scroller !== null && shown.length > 0) {
+      const message = shown.find(
+        (each) => each.dataset.messageId === place.message,
+      );
+      const top = scroller.getBoundingClientRect().top;
+      seen.frames.push({
+        messages: shown.length,
+        offset:
+          message === undefined
+            ? null
+            : top - message.getBoundingClientRect().top,
+        moved:
+          watched === null
+            ? null
+            : watched.message.getBoundingClientRect().top - watched.top,
+      });
+    }
+    requestAnimationFrame(look);
+  }
+  requestAnimationFrame(look);
+}
+
+async function placeSeen(page: Page): Promise<PlaceSeen> {
+  return page.evaluate(() => Reflect.get(window, "placeSeen") as PlaceSeen);
+}
+
+/** Expect the place's message where it stood at every frame `seen`, from the first that
+ * showed the conversation, which showed less than the whole of it: so these frames saw
+ * the rest come in. */
+function expectAtThePlace(seen: PlaceSeen, place: Place): void {
+  expect(seen.frames.length).toBeGreaterThan(0);
+  expect(seen.frames[0]?.messages).toBeLessThan(MESSAGES);
+  expect(
+    seen.frames.filter(
+      ({ offset }) => offset === null || Math.abs(offset - place.offset) > 2,
+    ),
+  ).toEqual([]);
+}
+
+test("a long conversation opened again from the list is where its reader left it, at every frame while it is filled in", async ({
+  chat,
+  page,
+}) => {
+  const { place } = await leftAtAPlace(chat);
+  await page.evaluate(watchPlace, { place, goDownTo: null });
+
+  await chat.listed.first().click();
+
+  await allIn(chat);
+  expectAtThePlace(await placeSeen(page), place);
+  // The control: the place is the one the reader went to.
+  expect(Math.abs(place.offset - OFFSET)).toBeLessThanOrEqual(1);
+  await expect(newest(page)).toBeVisible();
+
+  // The way to the newest message leads to the conversation's end, with every message
+  // on the way, in order.
+  await newest(page).click();
+
+  await expect.poll(() => chat.below()).toBeLessThanOrEqual(1);
+  await expect(chat.questions).toHaveText(
+    Array.from(
+      { length: EXCHANGES },
+      (_, index) => new RegExp(`^Part ${String(index + 1)}:`),
+    ),
+  );
+  await expect(chat.answers.last()).toContainText(`Part ${String(EXCHANGES)}:`);
+  await expect(newest(page)).toBeHidden();
+});
+
+test("a long conversation opened again by Back, and by its address, is where its reader left it, at every frame while it is filled in, and loaded again, at its end", async ({
+  chat,
+  page,
+}) => {
+  const { id, place } = await leftAtAPlace(chat);
+  await page.evaluate(watchPlace, { place, goDownTo: null });
+
+  await page.goBack();
+
+  await allIn(chat);
+  expectAtThePlace(await placeSeen(page), place);
+
+  // Left again as it was, and opened by its address, without a page being loaded: the
+  // address put into the page's history, and the page told, as Back tells it.
+  await chat.newChat.click();
+  await expect(chat.questions).toHaveCount(0);
+  await page.evaluate(watchPlace, { place, goDownTo: null });
+
+  await page.evaluate((path) => {
+    window.history.pushState(null, "", path);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/c/${id}`);
+
+  await allIn(chat);
+  expectAtThePlace(await placeSeen(page), place);
+
+  // The place is in the page's memory alone: loaded again, the conversation is at its
+  // end from its first frame, as one never left elsewhere.
+  await page.addInitScript(watchFrames, false);
+
+  await page.reload();
+
+  await allIn(chat);
+  const { frames } = await seen(page);
+  expect(frames[0]?.messages).toBeLessThan(MESSAGES);
+  expect(frames[0]?.below).toBeLessThanOrEqual(1);
+  expect(await chat.below()).toBeLessThanOrEqual(1);
+});
+
+test("a reader who goes to the bottom of what is shown, while messages still come in below it, stays there", async ({
+  chat,
+  page,
+}) => {
+  const { place, last } = await leftAtAPlace(chat);
+  await page.evaluate(watchPlace, { place, goDownTo: last });
+
+  await chat.listed.first().click();
+
+  await allIn(chat);
+  const { frames, wentDown } = await placeSeen(page);
+  // The control: the reader went down while the conversation's last message was still
+  // to come below, as it has to be at that moment.
+  expect(wentDown).toEqual({ lastShown: false });
+  const moved = frames.flatMap((frame) =>
+    frame.moved === null ? [] : [frame.moved],
+  );
+  expect(moved.length).toBeGreaterThan(0);
+  expect(moved.filter((by) => Math.abs(by) > 1)).toEqual([]);
+  // Not at the conversation's end: what came below is below them.
+  expect(await chat.below()).toBeGreaterThan(48);
+  await expect(newest(page)).toBeVisible();
 });
