@@ -82,7 +82,7 @@ Measured at the end of Phase 1 on an Apple M1 Pro with 16 GB: the production bui
 | 50 answers started at once: the first word of each | within 0.7 s for 95 of 100, none refused |
 | A conversation of 600 messages, read whole | 37 to 38 ms |
 | Memory of the stack's six containers at rest, without a model's server | 373 MiB |
-| Tests | 1,607 in Python, 679 of the web app, 76 end to end in a real browser |
+| Tests | 1,607 in Python, 683 of the web app, 77 end to end in a real browser |
 
 ## Quickstart
 
