@@ -37,6 +37,14 @@ export interface Session {
   startOver: () => void;
 }
 
+/** The account a `Session.holder` holds for. A holder is the account's id and how many
+ * sessions this page had before it: so after the page is loaded again the same account
+ * has another holder, and this tells that it is the same. */
+export function accountOf(holder: string): string {
+  const count = holder.lastIndexOf("/");
+  return count === -1 ? holder : holder.slice(0, count);
+}
+
 /** This browser's session, starting one as a guest on a first visit. For the one
  * component that holds the page together: it counts the page's sessions. */
 export function useSession(): Session {

@@ -7,9 +7,10 @@
 // (components/chat/newest-first.test.tsx, follow.test.tsx).
 //
 // A conversation its reader left away from its end opens where they left it, in the
-// same page: the message at the top of the screen where it stood, at every frame from
-// the first, while the rest comes in above and below. And the end of what is shown is
-// not taken for the conversation's end while messages are still to come below it.
+// same tab, also once the page was loaded again: the message at the top of the screen
+// where it stood, at every frame from the first, while the rest comes in above and
+// below. Another tab opens it at its end. And the end of what is shown is not taken
+// for the conversation's end while messages are still to come below it.
 //
 // The page is watched from inside, at the start of each frame, by a loop that begins
 // before it shows the conversation. What the driver sees between two of its own calls
@@ -19,8 +20,7 @@
 // older messages come in, as Firefox and WebKit didn't; those are tried by hand.
 import type { Locator, Page } from "@playwright/test";
 
-import { expect, test } from "./chat";
-import type { Chat } from "./chat";
+import { Chat, expect, test } from "./chat";
 
 // Making the conversation is most of each test: about 6 s for its 60 turns on a
 // developer's machine, and CI is two to three times slower. Playwright's own limit of
@@ -249,7 +249,7 @@ interface Place {
 }
 
 /** The message the reader goes to: the answer to "Part 31", the 62nd of the 120. It
- * opens again with the 5 before it and the 14 after it, and messages to come above
+ * opens again with the 2 before it and the 7 after it, and messages to come above
  * and below. */
 const PLACED = 61;
 
@@ -468,7 +468,7 @@ test("a long conversation opened again from the list is where its reader left it
   await expect(newest(page)).toBeHidden();
 });
 
-test("a long conversation opened again by Back, and by its address, is where its reader left it, at every frame while it is filled in, and loaded again, at its end", async ({
+test("a long conversation opened again by Back, by its address, and loaded again in the same tab, is where its reader left it, at every frame while it is filled in; and in another tab at its end", async ({
   chat,
   page,
 }) => {
@@ -494,17 +494,30 @@ test("a long conversation opened again by Back, and by its address, is where its
   await allIn(chat);
   expectAtThePlace(await placeSeen(page), place);
 
-  // The place is in the page's memory alone: loaded again, the conversation is at its
-  // end from its first frame, as one never left elsewhere.
-  await page.addInitScript(watchFrames, false);
+  // The page keeps the places for the tab when it is left: loaded again, the
+  // conversation is at the place from its first frame.
+  await page.addInitScript(watchPlace, { place, goDownTo: null });
 
   await page.reload();
 
   await allIn(chat);
-  const { frames } = await seen(page);
+  expectAtThePlace(await placeSeen(page), place);
+
+  // Another tab of the same browser, with the same session, has places of its own:
+  // none there, so the conversation is at its end from its first frame.
+  const other = await page.context().newPage();
+  // The fixture watches the test's own page: this one's errors are the test's to see.
+  const thrownThere: string[] = [];
+  other.on("pageerror", (error) => thrownThere.push(error.message));
+  await other.addInitScript(watchFrames, false);
+
+  await other.goto(`/c/${id}`);
+
+  await allIn(new Chat(other));
+  const { frames } = await seen(other);
   expect(frames[0]?.messages).toBeLessThan(MESSAGES);
   expect(frames[0]?.below).toBeLessThanOrEqual(1);
-  expect(await chat.below()).toBeLessThanOrEqual(1);
+  expect(thrownThere, "errors in the other tab's scripts").toEqual([]);
 });
 
 test("a reader who goes to the bottom of what is shown, while messages still come in below it, stays there", async ({

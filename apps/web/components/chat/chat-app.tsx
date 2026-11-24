@@ -20,6 +20,7 @@ import { ApiProblem, getConversation, listModels } from "@/lib/api/client";
 import type { Conversation, Me, Model, ModelList } from "@/lib/api/client";
 import { useConversations } from "@/lib/chat/list";
 import { explain } from "@/lib/chat/outcomes";
+import { holdPlacesFor } from "@/lib/chat/places";
 import { warmUp } from "@/lib/chat/warm-up";
 import { LIST_HIDDEN_KEY, markListAway } from "@/lib/frame";
 import { newId } from "@/lib/ids";
@@ -164,6 +165,14 @@ export function ChatApp() {
   // scheme isn't kept like the list's above: it changes only where the choice does,
   // and once here, where it has come apart from what the browser remembers.
   useLayoutEffect(() => followChoicesMadeElsewhere(), []);
+
+  // Where the reader left each conversation is kept for whoever has the session, in the
+  // tab too: when the session changes hands, the last one's places go at once, and not
+  // when a conversation next asks for one (lib/chat/places.ts).
+  const { holder } = session;
+  useEffect(() => {
+    holdPlacesFor(holder);
+  }, [holder]);
 
   const onExists = useCallback(() => {
     go(conversationPath(id), { replace: true });

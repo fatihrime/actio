@@ -17,6 +17,7 @@
 // they make up (`layOut`).
 import {
   act,
+  cleanup,
   fireEvent,
   screen,
   waitFor,
@@ -38,6 +39,7 @@ import {
   heldAfter,
   json,
   later,
+  nothing,
   problem,
   question,
   sentByHand,
@@ -115,16 +117,21 @@ function drawnAnswers(): string[] {
   return drawnTexts().filter((text) => text.startsWith("Answer "));
 }
 
-beforeEach(() => {
+/** From now on, every module is loaded anew by the next import, as on a page that was
+ * just opened, with the stand-in for the code that draws markdown. */
+function aPageJustOpened(): void {
   drawing.fetched = 0;
   drawing.drawn = [];
-  drawing.waits = null;
-  // Every module is loaded anew by the next import, as on a page that was just opened.
   vi.resetModules();
   vi.doMock("./markdown", () => {
     drawing.fetched += 1;
     return { default: StandIn };
   });
+}
+
+beforeEach(() => {
+  drawing.waits = null;
+  aPageJustOpened();
 });
 
 /** Keep the stand-in from drawing `text` until the test calls what this returns. A
@@ -271,19 +278,19 @@ describe("a long stored conversation", () => {
         expect(onThePage()).toEqual(textsOf(messages));
       });
       // The answers each step drew, in the order React first drew them: the newest
-      // 20 messages, then the 20 before them, then the first 10.
+      // 10 messages, then the 20 before them, then the first 20.
       expect([...new Set(drawnTexts())]).toEqual([
-        ...answers(15, 25),
-        ...answers(5, 15),
-        ...answers(0, 5),
+        ...answers(20, 25),
+        ...answers(10, 20),
+        ...answers(0, 10),
       ]);
     },
   );
 
   it.each([
     { count: 25, said: ["off", null] },
-    { count: 11, said: ["off", null] }, // two messages held back
-    { count: 10, said: [null] }, // twenty messages: whole at once
+    { count: 6, said: ["off", null] }, // two messages held back
+    { count: 5, said: [null] }, // ten messages: whole at once
   ])(
     "has a screen reader say nothing of its older messages, from the moment it is on the page: $count exchanges",
     async ({ count, said }) => {
@@ -351,7 +358,7 @@ describe("a long stored conversation", () => {
       // The clock stands still: a reader who scrolled is never still until it moves.
       const clock = clockAt();
       const messages = exchanges(25);
-      const newest = textsOf(messages.slice(30));
+      const newest = textsOf(messages.slice(40));
       // Nothing older is drawn before the reader has scrolled.
       const arrive = holdDrawing("Answer 10");
       await openStored(fakeApi(), messages);
@@ -383,8 +390,8 @@ describe("a long stored conversation", () => {
         expect(onThePage()).toEqual(textsOf(messages));
       });
       // A step at a time, the newest first: the 20 messages before the newest, then
-      // the first 10.
-      expect(shownFrom).toEqual(["Question 5", "Question 0"]);
+      // the first 20.
+      expect(shownFrom).toEqual(["Question 10", "Question 0"]);
       // Drawn once each, showing them included.
       expect(new Set(drawnAnswers())).toEqual(new Set(answers(0, 25)));
       expect(drawnAnswers()).toHaveLength(25);
@@ -426,8 +433,8 @@ describe("a long stored conversation", () => {
       asks: async (user, ask) => {
         await ask(user, ASKED);
       },
-      // The newest 20 stay, and the question and its answer come after them.
-      left: 20,
+      // The newest 10 stay, and the question and its answer come after them.
+      left: 10,
       came: 2,
     },
     {
@@ -443,7 +450,7 @@ describe("a long stored conversation", () => {
       asks: async (user) => {
         await user.click(screen.getByRole("button", { name: "Try again" }));
       },
-      left: 19,
+      left: 9,
       came: 1,
     },
   ])(
@@ -452,7 +459,7 @@ describe("a long stored conversation", () => {
       // The reader scrolls, and the clock stands still: nothing older is shown.
       clockAt();
       const messages = [...exchanges(25).slice(0, -1), last];
-      const newest = textsOf(messages.slice(30));
+      const newest = textsOf(messages.slice(40));
       // Nothing older is drawn before the reader has scrolled. All of it is drawn
       // before anything is typed or pressed: a drawing that waits while React answers
       // an event inside the test's `act` is left there, and the page stands still.
@@ -492,7 +499,7 @@ describe("a long stored conversation", () => {
 
   it("takes a question while its older messages are held back, and still brings them all", async () => {
     const messages = exchanges(25);
-    const newest = textsOf(messages.slice(30));
+    const newest = textsOf(messages.slice(40));
     // An answer of the first step back: that step can't land until it is drawn.
     const arrive = holdDrawing("Answer 10");
     const api = fakeApi().on(TURNS, () => streamed("answer.sse"));
@@ -531,7 +538,7 @@ describe("a long stored conversation", () => {
 
   it("is shown whole when it is read again while its older messages are held back", async () => {
     const messages = exchanges(25);
-    const newest = textsOf(messages.slice(30));
+    const newest = textsOf(messages.slice(40));
     const arrive = holdDrawing("Answer 10");
     const api = fakeApi().on(TURNS, () => streamed("model_unavailable.sse"));
     const { ask, user, SUSPENDED } = await openStored(api, messages, {
@@ -594,7 +601,7 @@ describe("a long stored conversation", () => {
       afterwards: [() => problem(404, "No such conversation.")],
     });
     await waitFor(() => {
-      expect(onThePage()).toEqual(textsOf(messages.slice(30)));
+      expect(onThePage()).toEqual(textsOf(messages.slice(40)));
     });
 
     await ask(user, ASKED);
@@ -679,14 +686,17 @@ function blocksOf(message: Element): Element[] {
 /** From now on, the page is laid out as a browser would lay it out, with sizes made up:
  * the messages that are shown stand one under another from the top of the
  * conversation, each `TALL` pixels, or as high as its blocks, of which one that begins
- * with "Code" is code. The element that scrolls has `room` for them. Nothing else has
- * a size. The page is told that a size changed only when the test calls `resized`, as a
+ * with "Code" is code. The element that scrolls has `room` for them, until the test
+ * gives it another (`windowOf`), as when the window is made larger. Nothing else has a
+ * size. The page is told that a size changed only when the test calls `resized`, as a
  * browser tells it once it has laid the page out; and code has been near the window
  * when the test calls `painted`, as a browser draws a frame. */
-function layOut({ room = ROOM }: { room?: number } = {}): {
+function layOut({ room: first = ROOM }: { room?: number } = {}): {
   resized: () => void;
   painted: () => void;
+  windowOf: (to: number) => void;
 } {
+  let room = first;
   const scrolledTo = new WeakMap<Element, number>();
   // The blocks of code that have been near the window.
   const seen = new WeakSet<Element>();
@@ -842,6 +852,9 @@ function layOut({ room = ROOM }: { room?: number } = {}): {
         }
       });
     },
+    windowOf: (to) => {
+      room = to;
+    },
     painted: () => {
       for (const message of shownMessages()) {
         for (const block of blocksOf(message)) {
@@ -928,22 +941,22 @@ async function aFrame(): Promise<void> {
 
 /** Where each test's reader leaves a conversation of 40 exchanges: at "Answer 20", its
  * 42nd message, with the top of the screen 30 pixels below the answer's top. The
- * messages drawn at once when it opens there again begin with its 37th: 5 before the
- * place, and 15 from it on. With the step below them, they end before its 77th. */
+ * messages drawn at once when it opens there again begin with its 40th: 2 before the
+ * place, and 8 from it on. With the step below them, they end before its 70th. */
 const PLACE = { message: "a20", offset: 30 };
 const PLACED = 41;
-const FIRST = 36;
-const STEP_BELOW_ENDS = 76;
+const FIRST = 39;
+const STEP_BELOW_ENDS = 69;
 
 /** What each step draws, when a conversation of 40 exchanges opens at `PLACE`: the
  * answers drawn at once, then those of the step below them, of the step above them, of
  * the next step below, and of the next above. */
 const AROUND_THE_PLACE = [
-  ...answers(18, 28),
-  ...answers(28, 38),
-  ...answers(8, 18),
-  ...answers(38, 40),
-  ...answers(0, 8),
+  ...answers(19, 24),
+  ...answers(24, 34),
+  ...answers(9, 19),
+  ...answers(34, 40),
+  ...answers(0, 9),
 ];
 
 /** The conversation of `messages`, as the API answers it. */
@@ -1007,11 +1020,11 @@ describe("a long stored conversation its reader left away from its end", () => {
         expect(onThePage()).toEqual(textsOf(messages));
       });
       expect([...new Set(drawnAnswers())]).toEqual(AROUND_THE_PLACE);
-      // From the moment it is on the page, with the 20 around the place, the place
+      // From the moment it is on the page, with the 10 around the place, the place
       // stands where it stood, and a screen reader is told nothing of what comes.
       expect(seen[0]).toEqual({
         offset: PLACE.offset,
-        messages: 20,
+        messages: 10,
         live: "off",
       });
       expect(seen.filter(({ offset }) => offset !== PLACE.offset)).toEqual([]);
@@ -1041,6 +1054,70 @@ describe("a long stored conversation its reader left away from its end", () => {
     });
     await afterAMoment();
     expect(drawnAnswers()).toEqual(AROUND_THE_PLACE);
+  });
+
+  it.each([
+    {
+      how: "ten that fill the window, and no more",
+      room: ROOM,
+      first: 10,
+    },
+    {
+      how: "and in a window ten don't fill, as many steps more as fill it, before anything is shown, and no more",
+      room: 2500,
+      // 10 and 20 are 3,000 pixels.
+      first: 30,
+    },
+  ])(
+    "opens at its end with its newest messages at once: $how",
+    async ({ room, first }) => {
+      layOut({ room });
+      const messages = exchanges(40);
+      const seen = watch(() =>
+        shownMessages().length === 0
+          ? null
+          : { messages: shownMessages().length, below: belowTheReader() },
+      );
+
+      await openStored(fakeApi(), messages);
+
+      await waitFor(() => {
+        expect(onThePage()).toEqual(textsOf(messages));
+      });
+      // At the first change a reader could see, with the reader at the end.
+      expect(seen[0]).toEqual({ messages: first, below: 0 });
+      expect([...new Set(drawnAnswers())]).toEqual([
+        ...answers(35, 40),
+        ...answers(25, 35),
+        ...answers(15, 25),
+        ...answers(5, 15),
+        ...answers(0, 5),
+      ]);
+    },
+  );
+
+  it("opens where its reader left it when the page is loaded again in the same tab", async () => {
+    layOut();
+    const messages = exchanges(40);
+    const { user } = await openAndGoToThePlace(fakeApi(), messages, {
+      afterwards: [stored(messages)],
+    });
+    await leave(user);
+    // The page is left: what it keeps for the tab is written then.
+    window.dispatchEvent(new Event("pagehide"));
+    cleanup();
+    // Loaded again: the app's modules anew, as on a page that was just opened.
+    aPageJustOpened();
+    const seen = watch(() => offsetOf(PLACE.message));
+
+    await openStored(fakeApi(), messages);
+
+    await waitFor(() => {
+      expect(onThePage()).toEqual(textsOf(messages));
+    });
+    expect(seen[0]).toBe(PLACE.offset);
+    expect(seen.filter((offset) => offset !== PLACE.offset)).toEqual([]);
+    expect([...new Set(drawnAnswers())]).toEqual(AROUND_THE_PLACE);
   });
 
   it("opens at its end when its reader left it there, and follows an answer that arrives", async () => {
@@ -1081,9 +1158,9 @@ describe("a long stored conversation its reader left away from its end", () => {
     // At its end from the moment it is on the page, newest first.
     expect(below[0]).toBe(0);
     expect([...new Set(drawnAnswers())]).toEqual([
-      ...answers(15, 25),
-      ...answers(5, 15),
-      ...answers(0, 5),
+      ...answers(20, 25),
+      ...answers(10, 20),
+      ...answers(0, 10),
     ]);
     // The answer came at the end, and the page goes on to it once it is laid out.
     resized();
@@ -1113,12 +1190,13 @@ describe("a long stored conversation its reader left away from its end", () => {
     await waitFor(() => {
       expect(onThePage()).toEqual(textsOf(changed));
     });
-    // As without a place: its newest 20 first, at its end, then the older ones.
+    // As without a place: its newest 10 first, at its end, then the older ones.
     expect([...new Set(drawnAnswers())]).toEqual([
-      ...answers(30, 40),
-      ...answers(20, 30),
-      ...answers(10, 20),
-      ...answers(0, 10),
+      ...answers(35, 40),
+      ...answers(25, 35),
+      ...answers(15, 25),
+      ...answers(5, 15),
+      ...answers(0, 5),
     ]);
     expect(below.filter((by) => by !== 0)).toEqual([]);
   });
@@ -1135,10 +1213,11 @@ describe("a long stored conversation its reader left away from its end", () => {
       signsUp: true,
       // As without a place: its newest first.
       drawn: [
-        ...answers(30, 40),
-        ...answers(20, 30),
-        ...answers(10, 20),
-        ...answers(0, 10),
+        ...answers(35, 40),
+        ...answers(25, 35),
+        ...answers(15, 25),
+        ...answers(5, 15),
+        ...answers(0, 5),
       ],
       // At the end, the place's message is far above the top of the screen.
       at: 80 * TALL - ROOM - PLACED * TALL,
@@ -1181,61 +1260,103 @@ describe("a long stored conversation its reader left away from its end", () => {
     expect(offsetOf(PLACE.message)).toBe(at);
   });
 
-  it("goes to the newest message with every message on the way there, and follows the end from then on", async () => {
-    const { resized } = layOut();
-    const messages = exchanges(40);
-    const api = fakeApi().on(TURNS, heldAfter("answer.sse", 5));
-    const { user } = await openAndGoToThePlace(api, messages, {
-      afterwards: [stored(messages)],
-    });
-    await leave(user);
-    // An answer of the first step above: that step can't land until it is drawn, and
-    // the steps after it, below and above, wait for it.
-    const arrive = holdDrawing("Answer 10");
-    window.history.back();
-    await waitFor(() => {
+  it.each([
+    {
+      how: "",
+      room: ROOM,
+      // Its last step, 11 messages, fills a window of 500 pixels.
+      endFrom: STEP_BELOW_ENDS,
+      cameFrom: [
+        "Answer 34",
+        "Answer 24",
+        "Answer 19",
+        "Answer 9",
+        "Question 0",
+      ],
+    },
+    {
+      how: ", with as many steps as fill the window",
+      room: 2000,
+      // Its last step doesn't fill a window of 2,000, with the one before it it does:
+      // that one was drawn, out of sight, and is shown again.
+      endFrom: 49,
+      cameFrom: ["Answer 24", "Answer 19", "Answer 9", "Question 0"],
+    },
+  ])(
+    "goes to the newest message as if it had been opened at its end: its last messages at once, and the rest above, a step at a time, none drawn twice$how",
+    async ({ room, endFrom, cameFrom }) => {
+      const { resized } = layOut({ room });
+      const messages = exchanges(40);
+      const api = fakeApi().on(TURNS, heldAfter("answer.sse", 5));
+      const { user } = await openAndGoToThePlace(api, messages, {
+        afterwards: [stored(messages)],
+      });
+      await leave(user);
+      // An answer of the first step above: that step can't land until it is drawn,
+      // and the steps after it, below and above, wait for it. Most of the
+      // conversation is held back below what is shown.
+      const arrive = holdDrawing("Answer 10");
+      window.history.back();
+      await waitFor(() => {
+        expect(onThePage()).toEqual(
+          textsOf(messages.slice(FIRST, STEP_BELOW_ENDS)),
+        );
+      });
+      await afterAMoment();
       expect(onThePage()).toEqual(
         textsOf(messages.slice(FIRST, STEP_BELOW_ENDS)),
       );
-    });
-    await afterAMoment();
-    expect(onThePage()).toEqual(
-      textsOf(messages.slice(FIRST, STEP_BELOW_ENDS)),
-    );
+      const changes = watch(() =>
+        shownMessages().length === 0
+          ? null
+          : {
+              shown: shownMessages().map(({ textContent }) => textContent),
+              below: belowTheReader(),
+            },
+      );
+      const shownFrom = watchShowing();
 
-    await user.click(
-      screen.getByRole("button", { name: "Go to the newest message" }),
-    );
+      await user.click(
+        screen.getByRole("button", { name: "Go to the newest message" }),
+      );
 
-    // Every message from the place on is there, in order, and the page is at the end.
-    expect(onThePage()).toEqual(textsOf(messages.slice(FIRST)));
-    expect(belowTheReader()).toBe(0);
-    expect(
-      screen.queryByRole("button", { name: "Go to the newest message" }),
-    ).not.toBeInTheDocument();
+      // At the first change, its last messages and no more than fill the window, with
+      // the reader at the end.
+      expect(changes[0]).toEqual({
+        shown: textsOf(messages.slice(endFrom)),
+        below: 0,
+      });
+      expect(
+        screen.queryByRole("button", { name: "Go to the newest message" }),
+      ).not.toBeInTheDocument();
 
-    // From then on the end is followed. While the reader begins their next question,
-    // the older messages come in above, and the page is laid out anew. (A drawing of
-    // the stand-in's that waits, and that a render of the page came in between, is
-    // tried again only at the page's next render once it may go on: the typing.)
-    arrive();
-    await user.type(screen.getByLabelText("Message"), "And");
-    await waitFor(() => {
-      expect(onThePage()).toEqual(textsOf(messages));
-    });
-    resized();
-    expect(belowTheReader()).toBe(0);
-    // And its answer is followed as it arrives.
-    await user.click(screen.getByRole("button", { name: "Send" }));
-    expect(await screen.findByText(/^Echo: Why/)).toBeInTheDocument();
-    resized();
-    expect(belowTheReader()).toBe(0);
+      // The rest comes in above, the nearest first, while the reader begins their next
+      // question. (A drawing of the stand-in's that waits, and that a render of the page
+      // came in between, is tried again only at the page's next render once it may go
+      // on: the typing.)
+      arrive();
+      await user.type(screen.getByLabelText("Message"), "And");
+      await waitFor(() => {
+        expect(onThePage()).toEqual(textsOf(messages));
+      });
+      expect(shownFrom).toEqual(cameFrom);
+      // None drawn twice, those shown around the place included.
+      expect(drawnAnswers()).toHaveLength(40);
+      expect(new Set(drawnAnswers())).toEqual(new Set(answers(0, 40)));
+      // And the end is followed from then on.
+      resized();
+      expect(belowTheReader()).toBe(0);
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      expect(await screen.findByText(/^Echo: Why/)).toBeInTheDocument();
+      resized();
+      expect(belowTheReader()).toBe(0);
 
-    // Another conversation ends the reading while the page is still there.
-    await leave(user);
-  });
+      // Another conversation ends the reading while the page is still there.
+      await leave(user);
+    },
+  );
 
-  it("takes a question right after it opens there, after its last message, and still brings the rest above", async () => {
+  it("takes a question right after it opens there, after its last message, with the end shown as if it had opened there, and still brings the rest above", async () => {
     const { resized } = layOut();
     const messages = exchanges(40);
     const api = fakeApi().on(TURNS, () => streamed("answer.sse"));
@@ -1258,28 +1379,44 @@ describe("a long stored conversation its reader left away from its end", () => {
     );
     expect(screen.queryByText(SUSPENDED)).not.toBeInTheDocument();
     expect(log()).toHaveAttribute("aria-live", "off");
+    const before = shownIds();
+    const runs = watch(shownIds);
 
     await ask(user, ASKED);
 
     expect(await screen.findByText(ECHO)).toBeInTheDocument();
     await screen.findByRole("button", { name: "Send" });
-    // It follows the conversation's last message, with all of them above it in order,
-    // and the page is at the end once it is laid out.
+    // At the first change the question makes, the conversation's last step, 11 messages
+    // that fill the window, and none of those held back: the end, as if it had opened
+    // there.
+    const storedIds = messages.map(({ id }) => id);
+    expect(
+      runs
+        .find((ids) => ids.join() !== before?.join())
+        ?.filter((id) => storedIds.includes(id)),
+    ).toEqual(storedIds.slice(STEP_BELOW_ENDS));
+    // It follows the conversation's last message, with a run of the conversation in
+    // order above it, at every change, and the page is at the end once it is laid out.
     expect(posted(api).parent_id).toBe("a39");
-    expect(onThePage()).toEqual([
-      ...textsOf(messages.slice(FIRST)),
-      ASKED,
-      ECHO,
-    ]);
+    const inOrder = [
+      ...storedIds,
+      posted(api).message?.id ?? "",
+      RECORDED.answer,
+    ];
+    expect(runs.filter((ids) => !isARunOf(ids, inOrder))).toEqual([]);
+    expect(onThePage().slice(-3)).toEqual(["Answer 39", ASKED, ECHO]);
+    const conversationThen = [...textsOf(messages), ASKED, ECHO];
     resized();
     expect(belowTheReader()).toBe(0);
     expect(log()).toHaveAttribute("aria-live", "off");
     expect(screen.queryByText(SUSPENDED)).not.toBeInTheDocument();
 
     arrive();
+    // A render of the page, at which React tries again the drawing that waited.
+    await user.type(screen.getByLabelText("Message"), "And");
 
     await waitFor(() => {
-      expect(onThePage()).toEqual([...textsOf(messages), ASKED, ECHO]);
+      expect(onThePage()).toEqual(conversationThen);
     });
     expect(log()).not.toHaveAttribute("aria-live");
     expect(screen.queryByText(SUSPENDED)).not.toBeInTheDocument();
@@ -1320,18 +1457,23 @@ describe("a long stored conversation its reader left away from its end", () => {
 
     await ask(user, ASKED);
 
-    // As the server has it, from the messages around the place on.
+    // As the server has it: its end, with the question after its last message, and a
+    // run of it in order above.
     expect(
       await screen.findByText("The model isn't on its server."),
     ).toBeInTheDocument();
-    expect(onThePage()).toEqual([...textsOf(messages.slice(FIRST)), ASKED]);
+    const conversationThen = [...textsOf(messages), ASKED];
+    expect(isARunOf(onThePage(), conversationThen)).toBe(true);
+    expect(onThePage().slice(-2)).toEqual(["Answer 39", ASKED]);
     expect(api.to(CONVERSATION)).toHaveLength(3);
     expect(screen.queryByText(SUSPENDED)).not.toBeInTheDocument();
 
     arrive();
+    // A render of the page, at which React tries again the drawing that waited.
+    await user.type(screen.getByLabelText("Message"), "And");
 
     await waitFor(() => {
-      expect(onThePage()).toEqual([...textsOf(messages), ASKED]);
+      expect(onThePage()).toEqual(conversationThen);
     });
     expect(log()).not.toHaveAttribute("aria-live");
     expect(screen.queryByText(SUSPENDED)).not.toBeInTheDocument();
@@ -1361,9 +1503,10 @@ describe("a long stored conversation its reader left away from its end", () => {
     const seen = watch(() => offsetOf("a22"));
     window.history.back();
 
-    // Around that place now: from the 41st message, and the step below.
+    // Around that place now: from the 24th message, with a step above and the two
+    // below. The next step above holds "Answer 10".
     await waitFor(() => {
-      expect(onThePage()).toEqual(textsOf(messages.slice(40)));
+      expect(onThePage()).toEqual(textsOf(messages.slice(23)));
     });
     arrive();
     await waitFor(() => {
@@ -1377,7 +1520,7 @@ describe("a long stored conversation its reader left away from its end", () => {
   it("has a screen reader say nothing of the messages that come below the place", async () => {
     layOut();
     const messages = exchanges(40);
-    // Near the top: the messages drawn at once are its first 20, and the rest come in
+    // Near the top: the messages drawn at once are its first 10, and the rest come in
     // below them alone.
     const { user } = await openStored(fakeApi(), messages, {
       afterwards: [stored(messages)],
@@ -1385,7 +1528,7 @@ describe("a long stored conversation its reader left away from its end", () => {
     await waitFor(() => {
       expect(onThePage()).toEqual(textsOf(messages));
     });
-    scrollTo(5 * TALL + 30); // "Answer 2", with 30 px
+    scrollTo(2 * TALL + 30); // "Question 1", with 30 px
     await leave(user);
     const said = watch(() =>
       shownMessages().length === 0
@@ -1402,35 +1545,36 @@ describe("a long stored conversation its reader left away from its end", () => {
       expect(onThePage()).toEqual(textsOf(messages));
     });
     expect([...new Set(drawnAnswers())]).toEqual(answers(0, 40));
-    expect(said[0]).toEqual({ messages: 20, live: "off" });
+    expect(said[0]).toEqual({ messages: 10, live: "off" });
     expect(
       said.filter(({ messages, live }) => messages < 80 && live !== "off"),
     ).toEqual([]);
     expect(log()).not.toHaveAttribute("aria-live");
-    expect(offsetOf("a2")).toBe(30);
+    expect(offsetOf("q1")).toBe(30);
   });
 
   it.each([
     {
-      how: "among its last 15 messages: those above come in steps, and its end is drawn at once",
+      how: "among its last 8 messages: those above come in steps, and its end is drawn at once",
       count: 40,
       // "Answer 36", the 74th of 80.
       place: { message: "a36", index: 73 },
-      first: 20,
+      first: 10,
       drawn: [
-        ...answers(30, 40),
-        ...answers(20, 30),
-        ...answers(10, 20),
-        ...answers(0, 10),
+        ...answers(35, 40),
+        ...answers(25, 35),
+        ...answers(15, 25),
+        ...answers(5, 15),
+        ...answers(0, 5),
       ],
     },
     {
-      how: "in a conversation of fewer than 20 messages: all of them at once",
-      count: 8,
-      // "Answer 4", the 10th of 16.
-      place: { message: "a4", index: 9 },
-      first: 16,
-      drawn: answers(0, 8),
+      how: "in a conversation of fewer than 10 messages: all of them at once",
+      count: 4,
+      // "Question 1", the 3rd of 8.
+      place: { message: "q1", index: 2 },
+      first: 8,
+      drawn: answers(0, 4),
     },
   ])("opens at a place $how", async ({ count, place, first, drawn }) => {
     layOut();
@@ -1516,6 +1660,50 @@ describe("a long stored conversation its reader left away from its end", () => {
   });
 
   it.each([
+    {
+      how: "taller than the one it was left in, the 10 drawn at once filling it: as near the place as there is room for, and no more drawn at once",
+      room: 900,
+      // Its last 10 are 1,000 pixels: the place, 330 down in them, can't come to the
+      // window's top, and what is above it changes nothing of that.
+      first: 10,
+    },
+    {
+      how: "the 10 drawn at once don't fill: the steps above are shown before anything is, as many as fill it, and no more",
+      room: 2500,
+      // 10 and 20 are 3,000 pixels.
+      first: 30,
+    },
+  ])(
+    "opens at a place near its end, with nothing held back below, in a window $how",
+    async ({ room, first }) => {
+      const { windowOf } = layOut();
+      const messages = exchanges(40);
+      const { user } = await openStored(fakeApi(), messages, {
+        afterwards: [stored(messages)],
+      });
+      await waitFor(() => {
+        expect(onThePage()).toEqual(textsOf(messages));
+      });
+      // "Answer 36", the 74th of 80, 30 pixels in: 170 pixels above the end.
+      scrollTo(73 * TALL + 30);
+      await leave(user);
+      // A window taller on the way back, as when a draft of several lines left the box,
+      // or the window was made larger.
+      windowOf(room);
+      const seen = watch(() =>
+        shownMessages().length === 0 ? null : shownMessages().length,
+      );
+
+      window.history.back();
+
+      await waitFor(() => {
+        expect(onThePage()).toEqual(textsOf(messages));
+      });
+      expect(seen[0]).toBe(first);
+    },
+  );
+
+  it.each([
     { how: "", strict: false },
     // React undoes and runs again the effects that put the reader at the place while
     // more is shown below for it. Where the reader is in that moment is no place of
@@ -1567,7 +1755,7 @@ describe("a long stored conversation its reader left away from its end", () => {
     },
   );
 
-  it("draws an answer it reads along with after its last message, with every message before it", async () => {
+  it("keeps its reader at the place while an answer is written at its end, draws nothing at once for it, and has the answer after its last message once the steps below are in", async () => {
     layOut();
     const messages = exchanges(40);
     const writing = sentByHand("answer.sse");
@@ -1587,38 +1775,275 @@ describe("a long stored conversation its reader left away from its end", () => {
       ],
     });
     await leave(user);
-    // The steps above wait for an answer of the first of them, and so the steps below
-    // after the first wait too.
-    const arrive = holdDrawing("Answer 10");
+    // The first step below, which holds "Answer 30", can't land until it is drawn, and
+    // every step after it waits for it: two steps below are still to come when the
+    // answer arrives.
+    const arrive = holdDrawing("Answer 30");
     const inOrder = [...messages.map(({ id }) => id), "q40", RECORDED.answer];
-    const shown = watch(() => {
-      const ids = shownMessages().map(({ dataset }) => dataset.messageId ?? "");
-      return ids.length === 0 ? null : ids;
+    const seen = watch(() => {
+      const ids = shownIds();
+      const offset = offsetOf(PLACE.message);
+      return ids === null || offset === null ? null : { ids, offset };
     });
     // Its first words are there as soon as the page reads along.
     writing.send(5);
 
     window.history.back();
 
-    expect(await screen.findByText(/^Echo: Why/)).toBeInTheDocument();
+    // The page reads along, and the answer waits for the steps to reach the end.
+    expect(
+      await screen.findByRole("button", { name: "Stop" }),
+    ).toBeInTheDocument();
+    await afterAMoment();
+    expect(screen.queryByText(/^Echo: /)).not.toBeInTheDocument();
+    expect(offsetOf(PLACE.message)).toBe(PLACE.offset);
+    // The control: the 10 drawn at once alone, and the two steps below still to come.
+    expect(shownIds()).toEqual(
+      messages.slice(FIRST, FIRST + 10).map(({ id }) => id),
+    );
+
     arrive();
-    writing.end();
+    // More of the answer: a render of the page, at which React tries again the drawing
+    // that waited.
+    writing.send(2);
     await waitFor(() => {
       expect(shownMessages().map(({ dataset }) => dataset.messageId)).toEqual(
         inOrder,
       );
     });
+    writing.end();
+    expect(await screen.findByText(ECHO)).toBeInTheDocument();
     // At every change, what is shown is one run of the conversation's messages, in
-    // order: nothing missing before the answer, which follows its last message.
+    // order, the reader at their place, and no more than a step more than before.
+    expect(seen.filter(({ ids }) => !isARunOf(ids, inOrder))).toEqual([]);
+    expect(seen.filter(({ offset }) => offset !== PLACE.offset)).toEqual([]);
     expect(
-      shown.filter((ids) => {
-        const from = inOrder.indexOf(ids[0] ?? "");
-        return (
-          from === -1 ||
-          ids.join() !== inOrder.slice(from, from + ids.length).join()
-        );
-      }),
+      seen.filter(
+        ({ ids }, at) => ids.length - (seen[at - 1]?.ids.length ?? 0) > 20,
+      ),
     ).toEqual([]);
+  });
+
+  it("draws what a later look at it brings while the steps below are short of its end, after its last message, once they reach it, and nothing at once for it", async () => {
+    layOut();
+    const messages = exchanges(40);
+    const asked = question("q40", "Question 40", "a39");
+    const running = conversation(
+      RECORDED.conversation,
+      [...messages, asked],
+      turn({ status: "running", finish_reason: null, credits: null }),
+    );
+    // The turn's stream can't be read along with: the page looks at the conversation
+    // every second and a half until the answer is written.
+    const api = fakeApi().on(STREAM, () => nothing());
+    const { user } = await openAndGoToThePlace(api, messages, {
+      afterwards: [
+        () => json(200, running),
+        () => json(200, running),
+        () =>
+          json(
+            200,
+            conversation(RECORDED.conversation, [
+              ...messages,
+              asked,
+              answer("a40", "Answer 40", "q40"),
+            ]),
+          ),
+      ],
+    });
+    await leave(user);
+    // The first step below waits, and every step after it.
+    const arrive = holdDrawing("Answer 30");
+    const inOrder = [...messages.map(({ id }) => id), "q40", "a40"];
+    const seen = watch(() => {
+      const ids = shownIds();
+      const offset = offsetOf(PLACE.message);
+      return ids === null || offset === null ? null : { ids, offset };
+    });
+
+    window.history.back();
+
+    // A look found the answer written: read when the page came back, when the stream
+    // couldn't be read, and once more a second and a half later.
+    await waitFor(
+      () => {
+        expect(api.to(CONVERSATION)).toHaveLength(4);
+      },
+      { timeout: 5000 },
+    );
+    await afterAMoment();
+    expect(screen.queryByText("Answer 40")).not.toBeInTheDocument();
+    expect(shownIds()).toEqual(
+      messages.slice(FIRST, FIRST + 10).map(({ id }) => id),
+    );
+
+    arrive();
+    // A render of the page, at which React tries again the drawing that waited.
+    await user.type(screen.getByLabelText("Message"), "And");
+
+    await waitFor(() => {
+      expect(shownIds()).toEqual(inOrder);
+    });
+    expect(seen.filter(({ ids }) => !isARunOf(ids, inOrder))).toEqual([]);
+    expect(seen.filter(({ offset }) => offset !== PLACE.offset)).toEqual([]);
+    expect(
+      seen.filter(
+        ({ ids }, at) => ids.length - (seen[at - 1]?.ids.length ?? 0) > 20,
+      ),
+    ).toEqual([]);
+    // The page's look waits a second and a half: more than the five seconds a test
+    // has may go by on a busy machine.
+  }, 15_000);
+
+  it("shows its end, and nothing less, when the newest message is asked for before the step decided next is", async () => {
+    layOut();
+    // 60 exchanges, so that steps below are still to come after the next one: the
+    // place's 10, then steps of 20 below to 120, and above.
+    const messages = exchanges(60);
+    const inOrder = messages.map(({ id }) => id);
+    const { user } = await openAndGoToThePlace(fakeApi(), messages, {
+      afterwards: [stored(messages)],
+    });
+    await leave(user);
+    // From the press on: what is shown at every change, and how far the reader is from
+    // the end.
+    const seen: { ids: string[]; below: number }[] = [];
+    const watching = new MutationObserver(() => {
+      if (document.querySelector('[role="log"]') !== null) {
+        seen.push({ ids: shownIds() ?? [], below: belowTheReader() });
+      }
+    });
+    // The press comes at the commit of the first step drawn above, in a transition:
+    // what an observer of the page is told comes right after a commit's changes, and
+    // before that commit's effects, of which one decides the next step below. So the
+    // press comes before that decision is made, and the decision's update after the
+    // button's.
+    let pressed = false;
+    const pressing = new MutationObserver((records) => {
+      const placed = document
+        .querySelector(`[data-message-id="${PLACE.message}"]`)
+        ?.closest('[role="log"] > *');
+      const above = records
+        .flatMap(({ addedNodes }) => [...addedNodes])
+        .some(
+          (added) =>
+            added instanceof Element &&
+            added.parentElement?.getAttribute("role") === "log" &&
+            placed !== null &&
+            placed !== undefined &&
+            (added.compareDocumentPosition(placed) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+              0,
+        );
+      const button = document.querySelector<HTMLElement>(
+        'button[aria-label="Go to the newest message"]',
+      );
+      if (above && button !== null) {
+        pressing.disconnect();
+        pressed = true;
+        watching.observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ["hidden"],
+        });
+        // As the browser sends it, and not inside `act`, which would work through every
+        // render and effect it brings before handing back: what the page shows between
+        // them is what this is about.
+        button.click();
+      }
+    });
+    pressing.observe(document.body, { subtree: true, childList: true });
+    onTestFinished(() => {
+      pressing.disconnect();
+      watching.disconnect();
+    });
+
+    window.history.back();
+
+    await waitFor(() => {
+      expect(shownIds()).toEqual(inOrder);
+    });
+    // The control: the press was made at that moment.
+    expect(pressed).toBe(true);
+    expect(seen.length).toBeGreaterThan(0);
+    // One run that ends with the conversation's last message, never nothing, and the
+    // reader at the end, at every change from the press on.
+    expect(
+      seen.filter(
+        ({ ids }) =>
+          ids.length === 0 ||
+          !isARunOf(ids, inOrder) ||
+          ids.at(-1) !== inOrder.at(-1),
+      ),
+    ).toEqual([]);
+    expect(seen.filter(({ below }) => below !== 0)).toEqual([]);
+  });
+
+  it("opens at its end once its reader went from their place to the newest message", async () => {
+    layOut();
+    const messages = exchanges(40);
+    const { user } = await openAndGoToThePlace(fakeApi(), messages, {
+      afterwards: [stored(messages)],
+    });
+    await leave(user);
+    window.history.back();
+    await waitFor(() => {
+      expect(offsetOf(PLACE.message)).toBe(PLACE.offset);
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Go to the newest message" }),
+    );
+    await leave(user);
+    const below = watch(() =>
+      shownMessages().length === 0 ? null : belowTheReader(),
+    );
+
+    window.history.back();
+
+    await waitFor(() => {
+      expect(onThePage()).toEqual(textsOf(messages));
+    });
+    // As without a place: at its end from the first change, its newest first.
+    expect(below[0]).toBe(0);
+    expect([...new Set(drawnAnswers())]).toEqual([
+      ...answers(35, 40),
+      ...answers(25, 35),
+      ...answers(15, 25),
+      ...answers(5, 15),
+      ...answers(0, 5),
+    ]);
+  });
+
+  it("lets the places kept for the tab go as soon as the session changes hands, before a conversation asks for one", async () => {
+    layOut();
+    const messages = exchanges(40);
+    const api = fakeApi().on(SIGN_UP, () =>
+      json(201, account({ id: GUEST.id })),
+    );
+    const { user } = await openAndGoToThePlace(api, messages, {
+      afterwards: [stored(messages)],
+    });
+    await leave(user);
+    // The page was left once, and the tab has the place.
+    window.dispatchEvent(new Event("pagehide"));
+    expect(window.sessionStorage.getItem("actio.places")).not.toBeNull();
+
+    // Signed up from a new chat, which goes back to a new chat: no conversation asks
+    // for its place.
+    await user.click(
+      within(screen.getByRole("banner")).getByRole("link", { name: "Sign up" }),
+    );
+    await user.type(screen.getByLabelText("Email address"), "ada@example.com");
+    await user.type(
+      screen.getByLabelText("Password", { exact: true }),
+      "correct horse battery",
+    );
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+
+    await screen.findByRole("link", { name: "Account: ada@example.com" });
+    await screen.findByText("What would you like to know?");
+    expect(window.sessionStorage.getItem("actio.places")).toBeNull();
   });
 });
 
@@ -1638,4 +2063,18 @@ function blockOffsetOf(text: string): number | null {
     ? null
     : scroller().getBoundingClientRect().top -
         block.getBoundingClientRect().top;
+}
+
+/** The ids of the messages shown, from the top: nothing while none is. */
+function shownIds(): string[] | null {
+  const ids = shownMessages().map(({ dataset }) => dataset.messageId ?? "");
+  return ids.length === 0 ? null : ids;
+}
+
+/** Whether `shown` is one run of `whole`, in its order, with nothing missing inside. */
+function isARunOf(shown: string[], whole: string[]): boolean {
+  const from = whole.indexOf(shown[0] ?? "");
+  return (
+    from !== -1 && shown.every((one, index) => whole[from + index] === one)
+  );
 }

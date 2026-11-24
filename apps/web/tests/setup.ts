@@ -39,6 +39,7 @@ afterEach(() => {
   if (onPage) {
     cleanup();
     window.localStorage.clear();
+    window.sessionStorage.clear();
     window.history.replaceState(null, "", "/");
     // The marks of a list put away and of the scheme chosen are on the page's root
     // element (lib/frame.ts), which outlives a test's components.

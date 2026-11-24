@@ -7,6 +7,7 @@ import {
 } from "react";
 import type { RefObject } from "react";
 
+import { PATH_LONGEST } from "@/lib/chat/places";
 import type { Spot } from "@/lib/chat/places";
 
 /** How close to the end still counts as being at the end, in pixels. */
@@ -42,10 +43,6 @@ export interface Place {
   first: HTMLElement | null;
   offset: number;
 }
-
-/** How many levels below a message's article a place goes down, to the block that
- * crosses the window's top edge. */
-const DEEPEST = 4;
 
 /** `element`'s box, when it is drawn: nothing when it has no height, or the browser
  * says it isn't drawn, as what a folded thought holds may be laid out and not drawn. */
@@ -118,7 +115,7 @@ function spotIn(scrolling: HTMLElement, growing: HTMLElement): Spot | null {
   // bottom edge is below the window's top edge: what is in view.
   const path: number[] = [];
   let block: Element = found;
-  for (let level = 0; level < DEEPEST; level++) {
+  for (let level = 0; level < PATH_LONGEST; level++) {
     const index = firstAcross(block.children, edge);
     const child = index === null ? undefined : block.children[index];
     if (index === null || child === undefined) {
@@ -190,15 +187,22 @@ function goTo(
  * scrolled, at most once a frame, and when the conversation leaves the page. While
  * messages it came with are still held back below what is shown (`heldBelow`), the end
  * of what is shown isn't the conversation's: a reader who scrolls down to it isn't
- * taken to follow the end, and is offered the way to the newest message. And when that
- * end holds the reader short of their place as it opens, the next of those messages
- * are shown (`showBelow`), until the place is reached or none is held back.
+ * taken to follow the end, and is offered the way to the newest message.
+ *
+ * Before the browser paints, the window is filled, or nothing is left to fill it with.
+ * When what is shown holds the reader short of their place as the conversation opens,
+ * the next of the messages held back below are shown at once (`showBelow`); when it is
+ * less than the window is high, those below, or else those above (`showAbove`). And so
+ * while the end is followed, as when it opens at its end or the reader asks for it,
+ * with those above.
  */
 export function useFollow({
   at = null,
   heldBelow = false,
+  heldAbove = false,
   remember,
   showBelow,
+  showAbove,
 }: {
   /** Where the reader left the conversation, when they left it away from its end: it
    * opens there, and not at its end. Read when the hook starts. */
@@ -206,12 +210,17 @@ export function useFollow({
   /** Whether messages the conversation came with are still held back below what is
    * shown. */
   heldBelow?: boolean;
+  /** Whether messages it came with are still held back above what is shown, drawn or
+   * not. */
+  heldAbove?: boolean;
   /** Told where the reader is, each time that is read: their place, or nothing while
    * the end is followed. */
   remember?: (spot: Spot | null) => void;
   /** Show the next step of the messages held back below, now: they are on the page
    * once React has drawn the update this makes, before the browser paints. */
   showBelow?: () => void;
+  /** The same, for the next step of those held back above. */
+  showAbove?: () => void;
 } = {}): {
   /** For the element that scrolls. */
   scroller: RefObject<HTMLDivElement | null>;
@@ -254,19 +263,25 @@ export function useFollow({
   const opened = useRef(false);
   // What the page said last, for the listeners, which are set up once.
   const endHeld = useRef(heldBelow);
+  const startHeld = useRef(heldAbove);
   const tell = useRef(remember);
   const more = useRef(showBelow);
+  const older = useRef(showAbove);
   // The frame at which the reader's place is to be read, once a scroll of theirs asked
   // for it.
   const reading = useRef(0);
   // The place the conversation opens at, while the reader is still to be put there:
-  // the end of what was shown held them short of it, and more is being shown below.
+  // what was shown held them short of it, and more is being shown.
   const reaching = useRef<Spot | null>(null);
+  // Whether more is being shown above to fill the window, at the end.
+  const filling = useRef(false);
 
   useLayoutEffect(() => {
     endHeld.current = heldBelow;
+    startHeld.current = heldAbove;
     tell.current = remember;
     more.current = showBelow;
+    older.current = showAbove;
   });
 
   const toEnd = useCallback(() => {
@@ -276,6 +291,34 @@ export function useFollow({
       top.current = scrolling.scrollTop;
     }
   }, []);
+
+  /** Whether what is shown is less than the window is high: there is nothing to
+   * scroll. A window of no height, as on a page not laid out, is filled by anything. */
+  const unfilled = useCallback(() => {
+    const scrolling = scroller.current;
+    return (
+      scrolling !== null &&
+      scrolling.clientHeight > 0 &&
+      scrolling.scrollHeight <= scrolling.clientHeight
+    );
+  }, []);
+
+  /** At the end, while it is followed: when what is shown doesn't fill the window and
+   * messages are held back above, show the next step of them now. Once it is drawn,
+   * before the browser paints, the reader is put at the end again and this asks again
+   * (`filling`). */
+  const fill = useCallback(() => {
+    filling.current = false;
+    if (
+      following.current &&
+      startHeld.current &&
+      older.current !== undefined &&
+      unfilled()
+    ) {
+      filling.current = true;
+      older.current();
+    }
+  }, [unfilled]);
 
   /** Say where the reader is: nothing while the end is followed, and otherwise their
    * place, which takes the page's layout. Nothing at all, and what was said last
@@ -305,7 +348,8 @@ export function useFollow({
     toEnd();
     // A reader at the end has no place.
     tell.current?.(null);
-  }, [toEnd]);
+    fill();
+  }, [toEnd, fill]);
 
   const untilStill = useCallback(() => {
     const since = Date.now() - moved.current;
@@ -349,41 +393,63 @@ export function useFollow({
   }, []);
 
   /** Put the reader at `spot` as the conversation opens, away from its end. Says
-   * whether its message is shown. When the end of what is shown holds them short of it,
-   * and messages are held back below, the next step of those is shown, and they are put
-   * there again once it is drawn (`reaching`). */
-  const reach = useCallback((spot: Spot): boolean => {
-    reaching.current = null;
-    const scrolling = scroller.current;
-    const growing = content.current;
-    const short =
-      scrolling === null || growing === null
-        ? null
-        : goTo(scrolling, growing, spot);
-    if (scrolling === null || short === null) {
-      return false;
-    }
-    following.current = false;
-    top.current = scrolling.scrollTop;
-    setAway(
-      scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight >=
-        NEAR,
-    );
-    if (short > 1 && endHeld.current && more.current !== undefined) {
-      reaching.current = spot;
-      more.current();
-    }
-    return true;
-  }, []);
+   * whether its message is shown. When what is shown holds them short of it, or doesn't
+   * fill the window, the next step of the messages held back is shown, below or else
+   * above, and they are put there again once it is drawn (`reaching`). */
+  const reach = useCallback(
+    (spot: Spot): boolean => {
+      reaching.current = null;
+      const scrolling = scroller.current;
+      const growing = content.current;
+      const short =
+        scrolling === null || growing === null
+          ? null
+          : goTo(scrolling, growing, spot);
+      if (scrolling === null || short === null) {
+        return false;
+      }
+      following.current = false;
+      top.current = scrolling.scrollTop;
+      setAway(
+        scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight >=
+          NEAR,
+      );
+      // Short of the place, only what is below it can bring the reader there; what is
+      // above it changes nothing of the room below. So steps above are asked for only
+      // to fill a window that isn't filled, when nothing is held back below: asked for
+      // while the reader was short, they were drawn until none was left, all 600
+      // messages of a long conversation in one frame. A reader who is short of the place
+      // with nothing below, in a window that is filled, as in a window taller than the
+      // one they left it in, stays as near it as the page lets them.
+      const filled = !unfilled();
+      const next = endHeld.current
+        ? short > 1 || !filled
+          ? more.current
+          : undefined
+        : startHeld.current && !filled
+          ? older.current
+          : undefined;
+      if (next !== undefined) {
+        reaching.current = spot;
+        next();
+      }
+      return true;
+    },
+    [unfilled],
+  );
 
-  // Held short of the place by the end of what was shown, the reader is put there again
-  // once the step below that was asked for is drawn. An update made in a layout effect
-  // is drawn before the browser paints, and its layout effects run before it paints
-  // too: so the first frame that shows the conversation is at the place.
+  // What was asked for to fill the window is drawn now: the reader is put at their
+  // place again, or at the end, and more is asked for if it isn't enough yet. An update
+  // made in a layout effect is drawn before the browser paints, and its layout effects
+  // run before it paints too: so the first frame that shows the conversation is at the
+  // place, or at the end with the window filled.
   useLayoutEffect(() => {
     const spot = reaching.current;
     if (spot !== null) {
       reach(spot);
+    } else if (filling.current) {
+      toEnd();
+      fill();
     }
   });
 
@@ -399,11 +465,13 @@ export function useFollow({
     const spot = opensAt.current;
     if (spot === null) {
       toEnd();
+      fill();
     } else if (!opened.current) {
       opened.current = true;
       if (!reach(spot)) {
         // Its message isn't shown, which the page sees to: the end, as without one.
         toEnd();
+        fill();
       }
     }
     return () => {
@@ -411,7 +479,7 @@ export function useFollow({
       reading.current = 0;
       say();
     };
-  }, [toEnd, say, reach]);
+  }, [toEnd, say, reach, fill]);
 
   useEffect(() => {
     const scrolling = scroller.current;
