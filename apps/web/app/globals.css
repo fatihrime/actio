@@ -63,6 +63,22 @@
   }
 }
 
+/* A block of code has its real height from the first layout. Streamdown sets
+   `content-visibility: auto` on it, with `contain-intrinsic-size: auto 200px`: off the
+   screen it was a placeholder 218 px high until it had been near the window, and then
+   its real height, 352 px for one of them. A reader scrolling up through a stored
+   conversation saw the text jump by the difference each time a block of code came into
+   view: in WebKit and Firefox (Chromium's own anchoring hid it). And a conversation
+   that opened where its reader had left it, inside a block of code or right under one,
+   was in Chromium put at the wrong block. Measured against the page without this: no
+   frame got longer, and a long conversation took longer to be whole behind its first
+   screen, 300 exchanges 817 to 883 ms instead of 634 to 750 in Chromium. `!important`,
+   since the library sets both on the element itself. e2e/code.spec.ts holds it. */
+[data-streamdown="code-block"] {
+  content-visibility: visible !important;
+  contain-intrinsic-size: none !important;
+}
+
 /* A border with no colour of its own takes the border colour below, not the text's.
    Streamdown is written for that. */
 @layer base {
