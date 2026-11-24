@@ -15,5 +15,6 @@ Actio is a self-hostable, local-first AI platform. It will combine:
 - **[Getting started](getting-started.md):** run Actio with one command, or set it up for development.
 - **[Architecture](architecture.md):** how the pieces fit together, today and as planned.
 - **[Development](development.md):** the toolchains, checks, tests and conventions.
+- **[Performance](performance.md):** the numbers the page and the API are held to, how they are measured, and what the measuring has found.
 - **[How AI is used](ai-workflow.md):** how an AI assistant helps build Actio, and how its work is checked.
 - **[Decisions](adr/index.md):** the architecture decision records, with the options weighed for each.

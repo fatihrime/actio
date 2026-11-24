@@ -4,7 +4,11 @@
 
 > A self-hostable, local-first AI platform: a ChatGPT/Claude-style assistant and an OpenAI- and Anthropic-compatible developer gateway, both governed by Claude-inspired usage limits whose correctness is tested.
 
-**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API holds conversations and streams a local model's answers, and there is a chat page on top of it: `make up`, open <http://localhost:8080>, and ask. Answers are formatted, with code, formulas and diagrams, and your conversations are listed beside the chat, to open, rename and delete. A guest can sign up and keep them, and log in again from anywhere. Every answer is held to usage limits, per session and per week, and the page shows them: a meter, the time left when a limit is reached, and a model that costs nothing to carry on with, where one is offered. An answer is written at the server whether or not its page stays open, and only Stop ends it. Answers wait their turn for a local model that writes one at a time, and an account has only so many being written at once. This README grows with each phase, and nothing below counts as done until it ships with tests.
+![Actio's chat answering a question on a local model: the answer arrives with its code coloured, the conversation gets a title, the usage meters move, a line says what the answer took, and the page turns dark](docs/assets/hero.gif)
+
+_A local model of 4 billion parameters on a 16 GB laptop, recorded by `make demo-record`: the page as the browser painted it, with waits longer than a second and a half shortened._
+
+**Status:** early development, Phase 1 of 7. The foundation, accounts with rate-limited logins, the usage-limits engine and the client for local models are in place. The API holds conversations and streams a local model's answers, and there is a chat page on top of it: `make up`, open <http://localhost:8080>, and ask. Answers are formatted, with code, formulas and diagrams, and your conversations are listed beside the chat, to open, rename and delete. A guest can sign up and keep them, and log in again from anywhere. Every answer is held to usage limits, per session and per week, and the page shows them: a meter, the time left when a limit is reached, and a model that costs nothing to carry on with, where one is offered. An answer is written at the server whether or not its page stays open, and only Stop ends it. Answers wait their turn for a local model that writes one at a time, and an account has only so many being written at once. Under each answer the page says what it took: how fast the model wrote, how soon its first word came, and what it cost. Under the box it says how full the model's context window is. The model is loaded ahead of the first question, and the page is light or dark as you choose. This README grows with each phase, and nothing below counts as done until it ships with tests.
 
 **Documentation:** <https://fatihrime.github.io/actio/>: getting started, architecture, development and the decision records.
 
@@ -50,7 +54,35 @@ Actio tackles these problems end to end on a 16 GB laptop and free tiers.
   - Its tests replay exchanges recorded from a real server, and live tests pin what each engine really does. With the strict settings removed, they fail.
   - [The design (ADR 0007)](docs/adr/0007-local-models-through-ollamas-native-api.md) · [what it guarantees](https://fatihrime.github.io/actio/reference/llm/) · [the tests](packages/llm/tests)
 
+- **An answer is written at the server, whoever is watching.**
+  - A turn runs apart from the request that started it. Close the tab, reload, or open a second window: the answer goes on, and a page that comes back reads along with it. Only Stop ends one.
+  - A turn that is being written says so every fifteen seconds, and saves what it has written with it. When its process dies, what it had written is kept as the answer, and nothing goes on looking busy.
+  - A local model writes one answer at a time, so answers wait their turn, and an account has only so many being written at once. Told to stop, the server lets the answers that are being written finish, or ends them while their readers are still connected.
+  - [Turns apart from their request (ADR 0022)](docs/adr/0022-turns-that-run-apart-from-their-request.md) · [answers that wait their turn (ADR 0023)](docs/adr/0023-answers-that-wait-their-turn.md) · [background jobs in Postgres (ADR 0024)](docs/adr/0024-background-jobs-in-a-queue-in-postgres.md)
+
+- **A page whose speed is measured, in three browser engines.**
+  - Every phase ends with a performance run in Chromium, Firefox and WebKit, against numbers the project holds itself to: no frame longer than 50 ms while an answer of 4,000 words arrives at 300 words a second, and a box that can be typed into within 0.3 s of a first visit on a desktop. At the end of Phase 1 that took 0.11 s, and 1.9 s on a phone profile, which is a CPU slowed four times on slow 4G.
+  - The runs found what using the page had not: a freeze of 1.5 s at the first block of TypeScript in Safari's engine, a long conversation that opened as one uninterrupted render, and a query that read a conversation again at every step of walking it, 360,000 rows for 600 messages.
+  - A run can mislead too. One reported a click as slow that was slow only in the test's own driver, and the page on performance says so.
+  - [How a run is made, the numbers, and what the runs found](https://fatihrime.github.io/actio/performance/)
+
 _More are added as each piece ships, with links to the design records (ADRs), tests and measurements._
+
+## The numbers so far
+
+Measured at the end of Phase 1 on an Apple M1 Pro with 16 GB: the production build in containers, with a fake model that answers at a set speed, so that the page and the API are measured and not a model. [How they are measured, and the rest of them](https://fatihrime.github.io/actio/performance/).
+
+| | |
+|---|---|
+| A first visit on a desktop, until the box can be typed into | 0.11 s |
+| The same on a phone profile: the CPU slowed four times, on slow 4G | 1.9 s |
+| Transferred on a first visit | 0.5 MB, in 20 requests |
+| The longest frame while 4,000 words arrive at 300 a second | 17 ms in Chromium, 9 to 41 ms in Firefox, 31 to 54 ms in WebKit over twelve runs on a busy machine, 41 ms in the middle |
+| A key typed beside an arriving answer, until it is shown, 95 times of 100 | within 17 to 19 ms in Chromium, 6 to 7 ms in Firefox, 17 ms in WebKit |
+| 50 answers started at once: the first word of each | within 0.7 s for 95 of 100, none refused |
+| A conversation of 600 messages, read whole | 37 to 38 ms |
+| Memory of the stack's six containers at rest, without a model's server | 373 MiB |
+| Tests | 1,607 in Python, 605 of the web app, 71 end to end in a real browser |
 
 ## Quickstart
 
@@ -77,7 +109,7 @@ make dev         # starts the stack; open http://localhost:8080
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: repo, tooling, CI, docs | done |
-| 1 | Local chat + usage limits | in progress: the limits engine, the model client, the chat's API and the chat page, with formatted answers, a list of conversations and accounts, are done, and so are the usage limits, in the API and in the page. Answers outlive their request, and the page reads along with one that is still being written, after a reload or from another window. Answers wait their turn for the local model, and an account has only so many at once |
+| 1 | Local chat + usage limits | in progress: the limits engine, the model client, the chat's API and the chat page, with formatted answers, a list of conversations and accounts, are done, and so are the usage limits, in the API and in the page. Answers outlive their request, and the page reads along with one that is still being written, after a reload or from another window. Answers wait their turn for the local model, and an account has only so many at once. The page says what each answer took and how full the model's window is, loads the model ahead, and is light or dark. The phase's performance run is made, with a fix for each of the two faults it found |
 | 2 | Model router + developer gateway | planned |
 | 3 | Core chat UX | planned |
 | 4 | Knowledge + web search | planned |
