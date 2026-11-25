@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live e2e build demo-record preflight
+.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live test-cloud e2e build demo-record preflight
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -83,6 +83,17 @@ test: ## Run the Python and web tests (needs Docker); fails below 90% coverage o
 # Not part of `make check`: CI has no Ollama. Pull the model first: ollama pull granite4:micro
 test-live: ## Run the model-client tests against a real Ollama server, with granite4:micro
 	ACTIO_TEST_OLLAMA_URL=$${ACTIO_TEST_OLLAMA_URL:-http://127.0.0.1:11434} uv run pytest packages/llm
+
+# Not part of `make check`: it sends the requests of the cassettes in
+# packages/llm/tests/fixtures/groq and gemini to the real servers, with your own keys:
+# about fifteen short requests, which count against your accounts' limits. Two of them
+# go to gemini-3.6-flash, of which a free account had 20 a day on 2026-11-25. A provider
+# without a key has its tests skipped. The keys are read as `make preflight` reads them:
+# the shell's, or else .env's. Arguments for pytest go in `args`: args="-k thoughts"
+# asks one exchange alone. `ACTIO_RECORD_CLOUD=1 make test-cloud` makes the answers the
+# new cassettes: review the difference. See docs/development.md.
+test-cloud: ## Run the model client's tests of Groq and the Gemini API against the real servers, with your keys
+	@if [ -f .env ]; then mine="$$(export -p)"; set -a; . ./.env; set +a; eval "$$mine"; fi; ACTIO_TEST_CLOUD=1 uv run pytest packages/llm/tests/test_cloud.py $(args)
 
 # Not part of `make check`: it builds the images and starts a stack of its own, on port
 # 8090, with its own data. CI runs it as a separate job. Arguments for Playwright go in

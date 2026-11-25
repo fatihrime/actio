@@ -149,7 +149,7 @@ async def request_json(
         raise rejection(response, response.text)
     try:
         data = response.json()
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise ProviderError(f"{provider} answered {path} with something that isn't JSON") from error
     if not isinstance(data, dict):
         raise ProviderError(f"{provider} answered {path} with JSON that isn't an object")

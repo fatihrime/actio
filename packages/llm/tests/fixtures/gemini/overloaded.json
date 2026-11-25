@@ -1,0 +1,25 @@
+{
+  "method": "POST",
+  "path": "/v1beta/openai/chat/completions",
+  "request": {
+    "model": "gemini-3.8-flash",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant. Answer briefly."
+      },
+      {
+        "role": "user",
+        "content": "What is the capital of France? Answer in one short sentence."
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "max_completion_tokens": 512
+  },
+  "status": 503,
+  "content_type": "application/json; charset=UTF-8",
+  "body": "[{\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\",\n    \"status\": \"UNAVAILABLE\"\n  }\n}\n]"
+}

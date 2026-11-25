@@ -4,7 +4,7 @@ Actio's model clients: one neutral chat format, and two adapters that speak it.
 
 - **The neutral format** (`chat`): a `ChatRequest` goes in, and text, reasoning, tool calls and one final event with token counts stream out. The rest of Actio never sees a provider's JSON.
 - **The Ollama adapter** (`Ollama`) uses [Ollama](https://ollama.com)'s native API so that a model never answers from a quietly shortened prompt, and no answer runs without a limit.
-- **The OpenAI-compatible adapter** (`OpenAICompatible`) serves every server that speaks OpenAI's Chat Completions API: [fakellm](https://fatihrime.github.io/actio/reference/fakellm/) in tests, and vLLM or hosted providers later.
+- **The OpenAI-compatible adapter** (`OpenAICompatible`) serves every server that speaks OpenAI's Chat Completions API: [fakellm](https://fatihrime.github.io/actio/reference/fakellm/) in tests, Groq and the Gemini API, and vLLM or any other.
 - **A command-line tool** (`actio-llm`) to try the Ollama adapter from a terminal.
 
 The design and its trade-offs are in [ADR 0007](https://fatihrime.github.io/actio/adr/0007-local-models-through-ollamas-native-api/).
@@ -110,13 +110,28 @@ The client carries the address and the credentials; the adapter never sees a key
 | Difference between servers | What the adapter does |
 |---|---|
 | Reasoning arrives as `reasoning` (vLLM, Groq, OpenRouter) or as `reasoning_content`, the older name | Reads both |
-| A tool call arrives in fragments: its name, then pieces of its arguments' JSON text | Joins and parses them, and yields the call whole |
+| The Gemini API sends a model's thoughts inside the text, each piece marked as a thought, the first opened with `<thought>` and the answer's first piece with `</thought>` | Reads them as reasoning. `<thought>` is taken off the start of a thought piece, and `</thought>` off the start of the first piece of text after thoughts, nowhere else: an answer may write them itself |
+| A tool call arrives in fragments: its name, then pieces of its arguments' JSON text | Joins and parses them by their `index`, and yields the call whole |
+| The Gemini API sends two calls at once as two whole calls, neither with an `index` | A fragment without one that carries a new id starts a new call |
 | Some servers ignore the request for token counts | `Finish.usage` is `None`, never zeros: zeros would be charged as a free request |
+| The Gemini API's `completion_tokens` leaves the reasoning out, which its `total_tokens` holds | The output is `total_tokens - prompt_tokens` when that is more |
+| Groq says where the time went, in seconds | `Finish.timings`, as from Ollama, with no time to load |
 | Some finish a tool call with the reason `stop` | The finish reason is `tool_calls` whenever a tool was called |
 | The output limit is `max_completion_tokens`; older servers only know `max_tokens` | Sends the first; `output_limit_field="max_tokens"` switches |
+| Groq's models and `gemini-3.5-flash-lite` refuse to be told `reasoning_effort: "none"`, and the Gemini API sends a model's thoughts only when asked to | `thinking_off` and `thinking_on` say, for each model, what goes into a request that asks for no reasoning and for some. Left out: `{"reasoning_effort": "none"}`, and nothing. An empty mapping is nothing |
+| A refusal is `{"error": {...}}`, or a list of one (the Gemini API). A 429 says how long to wait in `Retry-After`, or in its body (the Gemini API) | Reads both |
+| The Gemini API, too busy in the middle of an answer, sends that list as plain lines that are no event, and ends the stream | A `StreamInterruptedError`, whose message says what the list said |
+| The Gemini API refuses a key it doesn't know with 400, and Groq a request larger than the account takes in a minute with 413 | The first is a refusal of the credentials, as a 401 is; the second a `ContextOverflowError` |
+| The Gemini API's list of models names `models/gemini-3.6-flash`, and its chat takes `gemini-3.6-flash`. Another server may name a model `models/qwen` and take exactly that, as vLLM started with a path does | `models()` gives such an id both ways, as written and without `models/` |
 | Keep-alive comments, a missing `[DONE]` marker | Tolerated |
 
-`context_window` is not sent: these servers fix it per model. This is also why Ollama has its own adapter, although it offers this format too.
+For a model on Groq, which always reasons:
+
+```python
+provider = OpenAICompatible(client, provider="groq", thinking_off={"reasoning_effort": "low"})
+```
+
+`context_window` is not sent: these servers fix it per model. This is also why Ollama has its own adapter, although it offers this format too. What Groq and the Gemini API were seen to send, and why the adapter reads it so: [ADR 0027](https://fatihrime.github.io/actio/adr/0027-cloud-models-through-their-openai-compatible-layers/).
 
 ## Errors
 
@@ -127,7 +142,7 @@ Every failure is an `LLMError`. The subclasses answer what a caller has to decid
 | `ProviderUnavailableError` | Can't connect, the server is overloaded, or it didn't start answering in time | Try another provider: nothing was generated |
 | `RateLimitedError` | The provider answered 429. A kind of `ProviderUnavailableError` | Try another provider, or wait `retry_after_s` when the provider gave it |
 | `StreamInterruptedError` | The answer started, then broke off or went silent | Keep what arrived; retry only if nothing was shown |
-| `ContextOverflowError` | The prompt doesn't fit the context window | Shorten the history, or use a larger window |
+| `ContextOverflowError` | The prompt doesn't fit the context window, or is larger than the provider takes from the account in one request | Shorten the history, or use a larger window |
 | `UnsupportedFeatureError` | The model can't reason, or can't call tools | Ask `describe()` first |
 | `ModelNotFoundError` | The server doesn't have the model | Pull it |
 | `RequestRejectedError` | The server refused the request for another reason | Fix the request: retrying won't help |
@@ -170,6 +185,7 @@ prompt_tokens(prompt)  # 31, with what a chat template writes around the two mes
 ```sh
 uv run pytest packages/llm      # replays recorded exchanges: no Ollama needed
 make test-live                  # the same requests, sent to a real Ollama server
+make test-cloud                 # those of Groq and the Gemini API, sent to the real servers
 ```
 
 - **Recorded exchanges.** `tests/fixtures/ollama/` holds real responses from an Ollama server, one file per request. The tests replay them, and fail if the adapter no longer sends exactly the recorded request.
@@ -177,5 +193,10 @@ make test-live                  # the same requests, sent to a real Ollama serve
     - Set `ACTIO_TEST_OLLAMA_THINKING_MODEL` to a model that can reason, to test reasoning against it too.
     - Set `ACTIO_TEST_OLLAMA_MLX_MODEL` to a model that runs on the MLX engine, to pin that engine's behaviour. On an Apple Silicon Mac, `qwen3.5:4b` serves for both.
     - Add `ACTIO_RECORD_OLLAMA=1` to save the server's answers as the new recordings, after an Ollama upgrade.
+- **Groq and the Gemini API.** `tests/fixtures/groq/` and `gemini/` hold real exchanges with the two, through the OpenAI-compatible adapter, replayed the same way. A test compares what the adapter yields with the recorded lines, read apart from the adapter.
+    - `make test-cloud` sends the same requests to the real servers, with the keys in `GROQ_API_KEY` and `GEMINI_API_KEY`: about fifteen short requests, which count against the accounts' limits. A provider without a key has its tests skipped.
+    - Add `ACTIO_RECORD_CLOUD=1` to save the answers as the new recordings. What is saved holds no header of the request, and a fixed stand-in for Groq's ids of a request and of a chat completion, for the account's organization and for a thought's signature. The Gemini API's ids of a chat and the tool calls' ids stay: they name no account. A test fails at an organization's id other than the stand-in, a longer signature, or a header named `authorization`.
+    - Two of the requests go to `gemini-3.6-flash`, of which a free account had 20 a day on 2026-11-25. The Gemini API's other exchanges are `gemini-3.5-flash-lite`'s, which had 500. `make test-cloud args="-k thoughts"` asks one alone.
+    - Five exchanges depend on the account's or the provider's state, such as a limit that was reached or a model too busy. They were written from real answers, and are never asked live.
 - **Hand-written responses** cover what a healthy server won't produce on demand: dropped connections, stalls, malformed lines, old versions.
 - **The OpenAI-compatible adapter runs against fakellm,** in process. fakellm is a separate implementation of the format, itself checked with OpenAI's official SDK, so neither is only tested against itself. Directives in the prompt script its reasoning, tool calls and failures.

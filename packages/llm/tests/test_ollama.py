@@ -533,6 +533,7 @@ async def test_an_unreadable_version_is_an_error(reported: dict[str, str]) -> No
         (500, '{"error":"model requires more system memory"}', ProviderError),
         (400, '{"error":"invalid options"}', RequestRejectedError),
         (400, "not json at all", RequestRejectedError),
+        (400, "[" * 200_000, RequestRejectedError),  # too deep to read: no `ValueError`
         (400, '{"error":"prompt exceeds the available context size"}', ContextOverflowError),
     ],
 )
@@ -636,6 +637,7 @@ async def test_an_answer_that_breaks_off_is_an_interruption(
     [
         b"<html>not ollama</html>\n",
         b"[1, 2, 3]\n",
+        b"[" * 200_000 + b"\n",  # too deep for the JSON reader: no `ValueError`
         ndjson(piece(tool_calls=[{"function": {"name": "", "arguments": {}}}])),
         ndjson(piece(tool_calls=[{"function": {"name": "f", "arguments": "not an object"}}])),
         ndjson(piece(tool_calls=["nonsense"])),

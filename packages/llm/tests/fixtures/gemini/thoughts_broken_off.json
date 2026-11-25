@@ -1,0 +1,29 @@
+{
+  "method": "POST",
+  "path": "/v1beta/openai/chat/completions",
+  "request": {
+    "model": "gemini-3.5-flash-lite",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Five friends (Ada, Ben, Cem, Dua, Eli) sit in a row. Ada is not at either end. Ben sits left of Cem. Dua sits next to Eli. Cem is not next to Ada. Eli is at an end. Work out one seating that fits, checking each rule, then give it in one line."
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "max_completion_tokens": 4096,
+    "extra_body": {
+      "google": {
+        "thinking_config": {
+          "include_thoughts": true,
+          "thinking_level": "high"
+        }
+      }
+    }
+  },
+  "status": 200,
+  "content_type": "text/event-stream",
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"<thought>**Analyzing the Rules**\\n\\nI'm currently focused on dissecting the seating arrangement rules. I've broken down the constraints, like who can't sit next to whom, and I'm visualizing the potential restrictions on the row. I'm aiming to find the most efficient method for rule application in seating, making sure I can efficiently apply those restrictions to reduce the search space.\\n\\n\\n\",\"extra_content\":{\"google\":{\"thought\":true}},\"role\":\"assistant\"},\"index\":0}],\"created\":1795598646,\"id\":\"NKkGa4SWLIio28oPi9uZoQ8\",\"model\":\"gemini-3.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":69,\"total_tokens\":454}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"**Deducing Possible Arrangements**\\n\\nI'm now methodically working through potential arrangements, starting with the implications of Eli being at an end. I've considered both E=1 and E=5. I'm exploring the implications of Dua's position in relation to Eli, then mapping out the available positions for the remaining individuals. For E=1 I've considered that, A can't be at 5, so A can be either 3 or 4. I'm building out from the restrictions to create valid options.\\n\\n\\n\\n\",\"extra_content\":{\"google\":{\"thought\":true}},\"role\":\"assistant\"},\"index\":0}],\"created\":1795598647,\"id\":\"NKkGa4SWLIio28oPi9uZoQ8\",\"model\":\"gemini-3.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":69,\"total_tokens\":1068}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"**Confirming a Solution**\\n\\nI've just successfully validated a seating arrangement: [E, D, A, B, C]. I've methodically checked it against every rule. The solution satisfies all the given conditions. Now, I'm focusing on the clarity and format of the output, making sure it follows the instruction of expressing the solution in a concise line.\\n\\n\\n\",\"extra_content\":{\"google\":{\"thought\":true}},\"role\":\"assistant\"},\"index\":0}],\"created\":1795598648,\"id\":\"NKkGa4SWLIio28oPi9uZoQ8\",\"model\":\"gemini-3.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":69,\"total_tokens\":1172}}\n\n[{\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\",\n    \"status\": \"UNAVAILABLE\"\n  }\n}\n]\n"
+}

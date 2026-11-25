@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/v1beta/openai/models",
+  "request": null,
+  "status": 400,
+  "content_type": "application/json; charset=UTF-8",
+  "body": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Please pass a valid API key\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n"
+}

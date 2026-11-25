@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/openai/v1/models",
+  "request": null,
+  "status": 200,
+  "content_type": "application/json",
+  "body": "{\"data\": [{\"id\": \"meta-llama/llama-prompt-guard-2-22m\"}, {\"id\": \"canopylabs/orpheus-arabic-saudi\"}, {\"id\": \"qwen/qwen3.8-27b\"}, {\"id\": \"openai/gpt-oss-safeguard-20b\"}, {\"id\": \"whisper-large-v3\"}, {\"id\": \"openai/gpt-oss-120b\"}, {\"id\": \"meta-llama/llama-prompt-guard-2-86m\"}, {\"id\": \"whisper-large-v3-turbo\"}, {\"id\": \"openai/gpt-oss-20b\"}, {\"id\": \"canopylabs/orpheus-v1-english\"}, {\"id\": \"allam-2-7b\"}]}"
+}

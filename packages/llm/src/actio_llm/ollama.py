@@ -285,7 +285,7 @@ class _Parser:
     def feed(self, line: str) -> list[StreamEvent]:
         try:
             chunk = json.loads(line)
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise ProviderError(f"Ollama sent a line that isn't JSON: {line[:200]!r}") from error
         if not isinstance(chunk, dict):
             raise ProviderError(f"Ollama sent a line that isn't a JSON object: {line[:200]!r}")
@@ -441,7 +441,7 @@ def _rejection(status: int, body: str, model: str) -> LLMError:
 def _error_text(body: str) -> str:
     try:
         data = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         data = None
     if isinstance(data, dict) and isinstance(data.get("error"), str):
         return str(data["error"])

@@ -1,0 +1,26 @@
+{
+  "method": "POST",
+  "path": "/v1beta/openai/chat/completions",
+  "request": {
+    "model": "gemini-3.6-flash",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant. Answer briefly."
+      },
+      {
+        "role": "user",
+        "content": "A train leaves at 9:40 and takes 95 minutes. When does it arrive? Answer in one short sentence."
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "reasoning_effort": "none"
+  },
+  "status": 200,
+  "content_type": "text/event-stream",
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"The train\",\"role\":\"assistant\"},\"index\":0}],\"created\":1795598131,\"id\":\"M6cGa5LIC8HznsEP-42twAc\",\"model\":\"gemini-3.6-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":38,\"total_tokens\":40}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" arrives at 11:15.\",\"role\":\"assistant\"},\"index\":0}],\"created\":1795598131,\"id\":\"M6cGa5LIC8HznsEP-42twAc\",\"model\":\"gemini-3.6-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":11,\"prompt_tokens\":38,\"total_tokens\":49}}\n\ndata: {\"choices\":[{\"delta\":{\"extra_content\":{\"google\":{\"thought_signature\":\"c2lnbmF0dXJl\"}},\"role\":\"assistant\"},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1795598131,\"id\":\"M6cGa5LIC8HznsEP-42twAc\",\"model\":\"gemini-3.6-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":11,\"prompt_tokens\":38,\"total_tokens\":49}}\n\ndata: [DONE]\n\n"
+}

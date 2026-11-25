@@ -1,0 +1,42 @@
+{
+  "method": "POST",
+  "path": "/v1beta/openai/chat/completions",
+  "request": {
+    "model": "gemini-3.5-flash-lite",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What is the weather in Paris and in Rome right now? Call the tool once for each city, both calls at once."
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "max_completion_tokens": 512,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "The weather in a city, right now.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string",
+                "description": "The city's name"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "status": 200,
+  "content_type": "text/event-stream",
+  "body": "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"extra_content\":{\"google\":{\"thought_signature\":\"c2lnbmF0dXJl\"}},\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\",\"name\":\"get_weather\"},\"id\":\"call_9722157196056389135\",\"type\":\"function\"}]},\"index\":0}],\"created\":1795598141,\"id\":\"PKcGa-67Ouv0vdIP5Zq54QE\",\"model\":\"gemini-3.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":16,\"prompt_tokens\":82,\"total_tokens\":98}}\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Rome\\\"}\",\"name\":\"get_weather\"},\"id\":\"call_9722157196056389044\",\"type\":\"function\"}]},\"index\":0}],\"created\":1795598141,\"id\":\"PKcGa-67Ouv0vdIP5Zq54QE\",\"model\":\"gemini-3.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":32,\"prompt_tokens\":82,\"total_tokens\":114}}\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1795598141,\"id\":\"PKcGa-67Ouv0vdIP5Zq54QE\",\"model\":\"gemini-3.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":32,\"prompt_tokens\":82,\"total_tokens\":114}}\n\ndata: [DONE]\n\n"
+}

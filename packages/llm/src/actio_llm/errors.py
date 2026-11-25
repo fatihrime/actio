@@ -61,6 +61,8 @@ class ContextOverflowError(RequestRejectedError):
     """The prompt is longer than the model's context window.
 
     The provider refused it rather than silently cutting it: nothing was generated.
+    Also raised when what was sent is larger than the provider takes from this account
+    in one request: no wait changes that, though another provider may have the room.
     """
 
     def __init__(
