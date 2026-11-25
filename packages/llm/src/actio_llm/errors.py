@@ -17,6 +17,16 @@ class ProviderUnavailableError(LLMError):
     """
 
 
+class ConnectionFailedError(ProviderUnavailableError):
+    """No connection to the provider could be made, and that was known at once: nothing
+    listens at its address, its name doesn't resolve, or it hung up while the connection
+    was being made. Nothing was sent.
+
+    A connection that was never answered is not this one: its time ran out, and it is a
+    plain `ProviderUnavailableError`. Neither is a connection that was made and then
+    closed: the request may have been read by then."""
+
+
 class RateLimitedError(ProviderUnavailableError):
     """The provider is refusing requests for now: a rate limit or a spent quota."""
 
@@ -82,9 +92,10 @@ FOR_NOW: tuple[type[LLMError], ...] = (
     ProviderError,
 )
 """The errors that another try may not meet again: a server away, overloaded or refusing
-for now (`RateLimitedError` is a `ProviderUnavailableError`), an answer that broke off, a
-provider that failed. A request the provider refused, or a server older than its client
-knows, would be the same the next time: those, and any other `LLMError`, are not.
+for now (`ConnectionFailedError` and `RateLimitedError` are `ProviderUnavailableError`s),
+an answer that broke off, a provider that failed. A request the provider refused, or a
+server older than its client knows, would be the same the next time: those, and any
+other `LLMError`, are not.
 
 `isinstance(error, FOR_NOW)` says it. The walk down a chain of models (`actio_llm.router`)
 raises the first of these when every model failed, and a title that failed with one is

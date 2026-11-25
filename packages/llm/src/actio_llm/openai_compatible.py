@@ -138,6 +138,11 @@ class OpenAICompatible:
         )
         self._thinking_on = copy.deepcopy(dict(thinking_on or {}))
 
+    @property
+    def timeouts(self) -> Timeouts:
+        """How long it waits at each stage of a call."""
+        return self._timeouts
+
     async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
         """Send `request` and yield the answer as it is written; a `Finish` comes last.
 

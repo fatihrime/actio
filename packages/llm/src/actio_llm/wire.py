@@ -14,6 +14,7 @@ from typing import Any
 import httpx2
 
 from actio_llm.errors import (
+    ConnectionFailedError,
     LLMError,
     ProviderError,
     ProviderUnavailableError,
@@ -57,7 +58,9 @@ async def stream_lines(
 ) -> AsyncGenerator[str]:
     """POST `body` as JSON and yield the answer's non-empty lines as they arrive.
 
-    - Nothing within `first_event_s`: `ProviderUnavailableError`. Nothing was generated.
+    - No connection, known at once: `ConnectionFailedError`. Nothing was sent.
+    - Nothing within `first_event_s`, or the connection failed otherwise before the
+      answer began: `ProviderUnavailableError`. Nothing was generated.
     - A gap longer than `idle_s`, or a dropped connection, after the first line:
       `StreamInterruptedError`.
     - A status other than 200: whatever `rejection` returns.
@@ -84,6 +87,8 @@ async def stream_lines(
                     raise rejection(response, text)
         except TimeoutError as error:
             raise too_slow from error
+        except httpx2.ConnectError as error:
+            raise ConnectionFailedError(f"can't reach {provider}: {error!r}") from error
         except httpx2.TransportError as error:
             raise ProviderUnavailableError(f"can't reach {provider}: {error!r}") from error
         except httpx2.DecodingError as error:
@@ -131,7 +136,8 @@ async def request_json(
     rejection: Rejection,
     body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One of the small calls: send a request and return the JSON object it answers with."""
+    """One of the small calls: send a request and return the JSON object it answers with.
+    No connection, known at once, is a `ConnectionFailedError`, as for `stream_lines`."""
     try:
         response = await client.request(
             method,
@@ -139,6 +145,8 @@ async def request_json(
             json=body,
             timeout=httpx2.Timeout(timeouts.request_s, connect=timeouts.connect_s),
         )
+    except httpx2.ConnectError as error:
+        raise ConnectionFailedError(f"can't reach {provider}: {error!r}") from error
     except httpx2.TransportError as error:
         raise ProviderUnavailableError(f"can't reach {provider}: {error!r}") from error
     except httpx2.DecodingError as error:

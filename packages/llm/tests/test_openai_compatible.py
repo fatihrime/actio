@@ -21,6 +21,7 @@ from actio_fakellm.app import create_app
 from actio_llm import (
     Assistant,
     ChatRequest,
+    ConnectionFailedError,
     ContextOverflowError,
     Finish,
     FinishReason,
@@ -935,6 +936,40 @@ async def test_other_error_shapes_are_understood(
     assert type(caught.value) is error
     if isinstance(caught.value, RateLimitedError):
         assert caught.value.retry_after_s is None  # absent, or a date: not a number of seconds
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        (httpx2.ConnectError, ConnectionFailedError),
+        (httpx2.ConnectTimeout, ProviderUnavailableError),
+        (httpx2.ReadError, ProviderUnavailableError),
+        (httpx2.RemoteProtocolError, ProviderUnavailableError),
+    ],
+    ids=["refused", "never answered", "closed", "hung up on the request"],
+)
+@pytest.mark.parametrize("call", ["a chat", "a small call"])
+async def test_a_server_that_cant_be_reached_is_unavailable(
+    serve: Serve, failure: type[httpx2.TransportError], error: type[Exception], call: str
+) -> None:
+    """A connection that failed at once, with nothing sent, is a kind of its own, which
+    is worth asking again at once. Any other failure of the connection before an answer
+    is a plain one: its time is spent, or the request may have been read."""
+
+    def fail(request: httpx2.Request) -> httpx2.Response:
+        raise failure("the connection failed", request=request)
+
+    adapter = serve(fail)
+
+    async def called() -> object:
+        if call == "a chat":
+            return await collect(adapter.stream(ask("hi")))
+        return await adapter.models()
+
+    with pytest.raises(ProviderUnavailableError, match="can't reach Example") as caught:
+        await called()
+
+    assert type(caught.value) is error
 
 
 async def test_an_error_in_a_list_of_one_says_its_own_message(serve: Serve) -> None:

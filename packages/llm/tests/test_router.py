@@ -7,7 +7,8 @@ ever fails its test instead of hanging the run.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator
+import math
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 from typing import Any
 
@@ -16,6 +17,7 @@ import pytest
 from actio_llm import (
     FOR_NOW,
     ChatRequest,
+    ConnectionFailedError,
     ContextOverflowError,
     Finish,
     FinishReason,
@@ -31,6 +33,7 @@ from actio_llm import (
     StreamInterruptedError,
     TextDelta,
     ToolCall,
+    UnsupportedFeatureError,
     UnsupportedServerError,
     Usage,
     User,
@@ -50,21 +53,35 @@ bound to its own event loop."""
 
 class Model:
     """A provider that follows a script: events to yield, errors to raise, and `NEVER`.
-    It notes in `log` when it is asked, and when its stream is closed."""
+    It notes in `log` when it is asked, and when its stream is closed, and the event
+    loop's time of each. `then` is the script of every ask after the first: without it,
+    each ask plays the same script."""
 
-    def __init__(self, name: str, log: list[str], *script: Any) -> None:
+    def __init__(
+        self, name: str, log: list[str], *script: Any, then: Sequence[Any] | None = None
+    ) -> None:
         self.name = name
         self.log = log
         self.script = [asyncio.Event() if item is NEVER else item for item in script]
+        self.then = (
+            self.script
+            if then is None
+            else [asyncio.Event() if item is NEVER else item for item in then]
+        )
         self.requests: list[ChatRequest] = []
+        self.asked_at: list[float] = []
+        self.closed_at: list[float] = []
         self.waiting = asyncio.Event()
         """Set while it waits for what `NEVER` stands for."""
 
     async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        script = self.then if self.requests else self.script
+        loop = asyncio.get_running_loop()
         self.requests.append(request)
+        self.asked_at.append(loop.time())
         self.log.append(f"{self.name} asked")
         try:
-            for item in self.script:
+            for item in script:
                 if isinstance(item, BaseException):
                     raise item
                 if isinstance(item, asyncio.Event):
@@ -73,6 +90,7 @@ class Model:
                 else:
                     yield item
         finally:
+            self.closed_at.append(loop.time())
             self.log.append(f"{self.name} closed")
 
 
@@ -113,6 +131,34 @@ class Failures:
     def __call__(self, failed: Link, error: LLMError, later: Link | None) -> None:
         self.told.append((failed.name, error, None if later is None else later.name))
         self.log.append(f"told that {failed.name} failed")
+
+
+class Again:
+    """What `on_again` was told, in order, each noted in the log too."""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+        self.told: list[tuple[str, LLMError, float]] = []
+
+    def __call__(self, failed: Link, error: LLMError, pause: float) -> None:
+        self.told.append((failed.name, error, pause))
+        self.log.append(f"told that {failed.name} is asked again")
+
+
+class Pauses:
+    """Stands in for the walk's pause, `asyncio.sleep`: notes each wait it is given, in
+    the log too, and waits none of it. It lets the event loop run once, as the real
+    pause does: a walk that asked a link over and over would otherwise never let a
+    test's time limit end it."""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+        self.waited: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.waited.append(seconds)
+        self.log.append(f"paused {seconds:g} s")
+        await asyncio.sleep(0)
 
 
 async def walked(walk: Walk) -> list[StreamEvent]:
@@ -174,7 +220,7 @@ async def test_a_later_link_is_asked_only_after_the_one_before_it_failed() -> No
     "error",
     [
         ProviderUnavailableError("connection refused"),
-        RateLimitedError("429: slow down", retry_after_s=2),
+        RateLimitedError("429: slow down", retry_after_s=20),  # longer than is waited
         ContextOverflowError("413: larger than the account takes in a minute"),
         RequestRejectedError("400: no such option"),
         ModelNotFoundError("first-model"),
@@ -277,6 +323,407 @@ async def test_a_model_that_finishes_without_a_word_has_answered() -> None:
     assert second.requests == []
     assert walk.answered is not None
     assert walk.answered.name == "first"
+
+
+# --- Asked once more -----------------------------------------------------------------
+
+
+async def test_a_connection_that_failed_at_once_is_asked_again_at_once() -> None:
+    """With the same request, before any later link: nothing was sent, and a second try
+    that is refused too costs as little. The second try's answer is the link's."""
+    log: list[str] = []
+    failures, again, pauses = Failures(log), Again(log), Pauses(log)
+    error = ConnectionFailedError("can't reach first: connection refused")
+    first = Model("first", log, error, then=[TextDelta("Hello"), DONE])
+    second = Model("second", log, TextDelta("Never"), DONE)
+    links = [link(first), link(second)]
+    walk = Walk(links, on_failed=failures, on_again=again, pause=pauses)
+
+    events = await walked(walk)
+
+    assert events == [TextDelta("Hello"), DONE]
+    assert first.requests == [links[0].request, links[0].request]
+    assert second.requests == []
+    assert walk.answered is links[0]
+    assert failures.told == []
+    assert again.told == [("first", error, 0)]
+    assert again.told[0][1] is error
+    assert sum(pauses.waited) == 0  # at once
+
+
+@pytest.mark.parametrize("wait", [0, 0.25, 2.0], ids=["none", "a fraction", "the most"])
+async def test_a_server_that_asks_for_a_short_wait_is_asked_again_after_it(wait: float) -> None:
+    log: list[str] = []
+    again, pauses = Again(log), Pauses(log)
+    error = RateLimitedError("429: try again in a moment", retry_after_s=wait)
+    first = Model("first", log, error, then=[TextDelta("Hello"), DONE])
+    second = Model("second", log, TextDelta("Never"), DONE)
+    walk = Walk([link(first), link(second)], on_again=again, pause=pauses)
+
+    events = await walked(walk)
+
+    assert events == [TextDelta("Hello"), DONE]
+    assert (len(first.requests), second.requests) == (2, [])
+    assert pauses.waited == [wait]
+    assert again.told == [("first", error, wait)]
+    assert log == [
+        "first asked",
+        "first closed",
+        "told that first is asked again",
+        f"paused {wait:g} s",
+        "first asked",
+        "first closed",
+    ]
+
+
+@pytest.mark.parametrize(
+    "wait",
+    [None, 2.001, 20, math.inf, math.nan, -1],
+    ids=["none said", "just over the most", "twenty seconds", "for ever", "nan", "less than none"],
+)
+async def test_a_server_that_names_no_wait_or_a_longer_one_is_asked_once(
+    wait: float | None,
+) -> None:
+    """The next link is asked at once: a model that stands in is there for that."""
+    log: list[str] = []
+    failures, again, pauses = Failures(log), Again(log), Pauses(log)
+    error = RateLimitedError("429: slow down", retry_after_s=wait)
+    first = Model("first", log, error, then=[TextDelta("Never"), DONE])
+    second = Model("second", log, TextDelta("Answered"), DONE)
+    walk = Walk([link(first), link(second)], on_failed=failures, on_again=again, pause=pauses)
+
+    events = await walked(walk)
+
+    assert events == [TextDelta("Answered"), DONE]
+    assert (len(first.requests), len(second.requests)) == (1, 1)
+    assert (again.told, pauses.waited) == ([], [])
+    assert failures.told == [("first", error, "second")]
+
+
+async def test_the_pause_is_the_wait_the_server_asked_for_and_nothing_is_asked_during_it() -> None:
+    """The walk's own pause, by the event loop's clock: a twentieth of a second here."""
+    log: list[str] = []
+    told = asyncio.Event()
+
+    def again(_failed: Link, _error: LLMError, _pause: float) -> None:
+        told.set()
+
+    first = Model(
+        "first",
+        log,
+        RateLimitedError("429", retry_after_s=0.05),
+        then=[TextDelta("Hello"), DONE],
+    )
+    walking = asyncio.create_task(walked(Walk([link(first)], on_again=again)))
+    await asyncio.wait_for(told.wait(), PATIENCE_S)
+    await asyncio.sleep(0.02)
+    asked_meanwhile = len(first.requests)
+
+    events = await asyncio.wait_for(walking, PATIENCE_S)
+
+    assert asked_meanwhile == 1
+    assert events == [TextDelta("Hello"), DONE]
+    paused = first.asked_at[1] - first.closed_at[0]
+    assert 0.049 <= paused < 1.0
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        pytest.param((ProviderUnavailableError("503: too busy"),), id="too busy"),
+        pytest.param(
+            (ProviderUnavailableError("didn't start answering within 90 s"),),
+            id="too late to begin",
+        ),
+        pytest.param(
+            (ProviderUnavailableError("can't reach first: ConnectTimeout()"),),
+            id="a connection never answered",
+        ),
+        pytest.param((StreamInterruptedError("the connection dropped"),), id="broke off"),
+        pytest.param((), id="ended without its finish"),
+        pytest.param((ProviderError("500"),), id="failed"),
+        pytest.param((RequestRejectedError("400: no such option"),), id="refused"),
+        pytest.param((ContextOverflowError("413: too large"),), id="too large"),
+        pytest.param((ModelNotFoundError("first-model"),), id="missing"),
+        pytest.param((UnsupportedFeatureError("can't reason"),), id="can't do it"),
+        pytest.param((UnsupportedServerError("Ollama 0.31 is too old"),), id="too old"),
+        pytest.param((LLMError("something new"),), id="anything else"),
+    ],
+)
+async def test_any_other_failure_is_not_asked_again(script: tuple[LLMError, ...]) -> None:
+    """Nothing says that it is over in a moment, or another try may meet it again: the
+    next link is asked at once. The link here would answer a second try."""
+    log: list[str] = []
+    again = Again(log)
+    first = Model("first", log, *script, then=[TextDelta("Never"), DONE])
+    second = Model("second", log, TextDelta("Answered"), DONE)
+    walk = Walk([link(first), link(second)], on_again=again)
+
+    events = await walked(walk)
+
+    assert events == [TextDelta("Answered"), DONE]
+    assert (len(first.requests), len(second.requests)) == (1, 1)
+    assert again.told == []
+
+
+@pytest.mark.parametrize(
+    "then",
+    [
+        ConnectionFailedError("can't reach first: connection refused again"),
+        RateLimitedError("429: try again in a moment", retry_after_s=1),
+    ],
+    ids=["a connection that failed again", "a server that asks for a short wait"],
+)
+async def test_a_link_is_asked_twice_at_most_and_its_second_error_is_its_failure(
+    then: LLMError,
+) -> None:
+    """Whatever the second try fails with, one that would be worth asking again too:
+    `on_failed` is told once, of that error."""
+    log: list[str] = []
+    failures, again, pauses = Failures(log), Again(log), Pauses(log)
+    error = ConnectionFailedError("can't reach first: connection refused")
+    first = Model("first", log, error, then=[then])
+    second = Model("second", log, TextDelta("Answered"), DONE)
+    walk = Walk([link(first), link(second)], on_failed=failures, on_again=again, pause=pauses)
+
+    events = await walked(walk)
+
+    assert events == [TextDelta("Answered"), DONE]
+    assert (len(first.requests), len(second.requests)) == (2, 1)
+    assert again.told == [("first", error, 0)]
+    assert failures.told == [("first", then, "second")]
+    assert failures.told[0][1] is then
+    assert sum(pauses.waited) == 0  # the second's wait isn't waited
+
+
+async def test_when_every_link_failed_a_links_second_error_is_the_one_that_counts() -> None:
+    """By the rule of `FOR_NOW`, as ever. Here the first link's first error is one that
+    another try may not meet, and its second isn't: so the last link's is raised. Alone,
+    a link's second error is."""
+    log: list[str] = []
+    failures = Failures(log)
+    too_long, too_long_too = ContextOverflowError("too long"), ContextOverflowError("too long")
+    first = Model("first", log, ConnectionFailedError("refused"), then=[too_long])
+    second = Model("second", log, too_long_too)
+    busy = ProviderUnavailableError("busy")
+    alone = Model("alone", log, ConnectionFailedError("refused"), then=[busy])
+
+    with pytest.raises(LLMError) as chain_failed:
+        await walked(Walk([link(first), link(second)], on_failed=failures))
+    with pytest.raises(LLMError) as alone_failed:
+        await walked(Walk([link(alone)]))
+
+    assert chain_failed.value is too_long_too
+    assert [error for _, error, _ in failures.told] == [too_long, too_long_too]
+    assert alone_failed.value is busy
+    assert (len(first.requests), len(second.requests), len(alone.requests)) == (2, 1, 2)
+
+
+async def test_each_link_of_a_chain_has_a_second_try_of_its_own() -> None:
+    """Not one for the whole walk."""
+    log: list[str] = []
+    again = Again(log)
+    first = Model(
+        "first", log, ConnectionFailedError("refused"), then=[ProviderUnavailableError("busy")]
+    )
+    second = Model(
+        "second", log, ConnectionFailedError("refused too"), then=[TextDelta("Answered"), DONE]
+    )
+    walk = Walk([link(first), link(second)], on_again=again)
+
+    events = await walked(walk)
+
+    assert events == [TextDelta("Answered"), DONE]
+    assert log == [
+        "first asked",
+        "first closed",
+        "told that first is asked again",
+        "first asked",
+        "first closed",
+        "second asked",
+        "second closed",
+        "told that second is asked again",
+        "second asked",
+        "second closed",
+    ]
+    assert walk.answered is not None
+    assert walk.answered.name == "second"
+
+
+async def test_a_link_asked_again_keeps_its_hold_through_both_tries() -> None:
+    """Entered once, and given back once the second try's stream is closed: a turn that
+    waited at a gate isn't sent to the back of the line to be asked again. The first
+    try's stream is closed before the link is said to be asked again."""
+    log: list[str] = []
+    walk = Walk(
+        [
+            link(
+                Model(
+                    "first",
+                    log,
+                    ConnectionFailedError("refused"),
+                    then=[TextDelta("Answered"), DONE],
+                ),
+                Hold("gate 1", log),
+            )
+        ],
+        on_again=Again(log),
+    )
+
+    await walked(walk)
+
+    assert log == [
+        "gate 1 waited for",
+        "gate 1 held",
+        "first asked",
+        "first closed",
+        "told that first is asked again",
+        "first asked",
+        "first closed",
+        "gate 1 given back",
+    ]
+
+
+async def test_a_link_asked_again_gives_its_hold_back_before_the_next_ones_is_waited_for() -> None:
+    log: list[str] = []
+    walk = Walk(
+        [
+            link(
+                Model(
+                    "first",
+                    log,
+                    ConnectionFailedError("refused"),
+                    then=[ProviderUnavailableError("busy")],
+                ),
+                Hold("gate 1", log),
+            ),
+            link(Model("second", log, TextDelta("Answered"), DONE), Hold("gate 2", log)),
+        ],
+        on_failed=Failures(log),
+        on_again=Again(log),
+    )
+
+    await walked(walk)
+
+    assert log == [
+        "gate 1 waited for",
+        "gate 1 held",
+        "first asked",
+        "first closed",
+        "told that first is asked again",
+        "first asked",
+        "first closed",
+        "gate 1 given back",
+        "told that first failed",
+        "gate 2 waited for",
+        "gate 2 held",
+        "second asked",
+        "second closed",
+        "gate 2 given back",
+    ]
+
+
+async def test_a_cancellation_during_the_pause_passes_through() -> None:
+    """As a stop does: the hold is given back, the link isn't asked again, and no later
+    link is asked. The pause is the walk's own, of two seconds, and isn't waited out."""
+    log: list[str] = []
+    told = asyncio.Event()
+
+    def again(_failed: Link, _error: LLMError, _pause: float) -> None:
+        told.set()
+
+    first = Model(
+        "first",
+        log,
+        RateLimitedError("429", retry_after_s=2.0),
+        then=[TextDelta("Never"), DONE],
+    )
+    second = Model("second", log, TextDelta("Never"), DONE)
+    walking = asyncio.create_task(
+        walked(Walk([link(first, Hold("gate 1", log)), link(second)], on_again=again))
+    )
+    await asyncio.wait_for(told.wait(), PATIENCE_S)
+
+    walking.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(walking, 0.5)
+
+    assert len(first.requests) == 1
+    assert second.requests == []
+    assert log[-2:] == ["first closed", "gate 1 given back"]
+
+
+async def test_another_exception_from_the_second_try_passes_through() -> None:
+    log: list[str] = []
+    mistake = RuntimeError("a mistake")
+    first = Model("first", log, ConnectionFailedError("refused"), then=[mistake])
+    second = Model("second", log, TextDelta("Never"), DONE)
+
+    with pytest.raises(RuntimeError) as failure:
+        await walked(Walk([link(first), link(second)]))
+
+    assert failure.value is mistake
+    assert (len(first.requests), second.requests) == (2, [])
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionFailedError("can't reach first: connection refused"),
+        RateLimitedError("429: try again in a moment", retry_after_s=0),
+    ],
+    ids=["a connection that failed", "a server that asks for no wait"],
+)
+async def test_after_something_was_handed_on_nothing_is_asked_again(error: LLMError) -> None:
+    """The error is raised as it came, though it would be worth another try before."""
+    log: list[str] = []
+    again = Again(log)
+    first = Model("first", log, TextDelta("Half an"), error, then=[TextDelta("Never"), DONE])
+    second = Model("second", log, TextDelta("Never"), DONE)
+    walk = Walk([link(first), link(second)], on_again=again)
+    seen: list[StreamEvent] = []
+
+    with pytest.raises(LLMError) as failure:
+        await walked_into(walk, seen)
+
+    assert failure.value is error
+    assert seen == [TextDelta("Half an")]
+    assert (len(first.requests), second.requests) == (1, [])
+    assert again.told == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        StreamInterruptedError("the connection dropped"),
+        ConnectionFailedError("can't reach first: connection refused"),
+    ],
+    ids=["broke off", "a failure worth asking again before"],
+)
+async def test_what_a_second_try_handed_on_is_the_links_answer_as_a_first_trys_is(
+    error: LLMError,
+) -> None:
+    """A second try is a try like the first: once it has handed something on, its error
+    is raised as it came, the link isn't asked a third time, and no later link is asked,
+    whose answer would follow the half that a reader was shown."""
+    log: list[str] = []
+    failures = Failures(log)
+    first = Model(
+        "first", log, ConnectionFailedError("refused"), then=[TextDelta("Half an"), error]
+    )
+    second = Model("second", log, TextDelta("Never"), DONE)
+    links = [link(first), link(second)]
+    walk = Walk(links, on_failed=failures)
+    seen: list[StreamEvent] = []
+
+    with pytest.raises(LLMError) as failure:
+        await walked_into(walk, seen)
+
+    assert failure.value is error
+    assert seen == [TextDelta("Half an")]
+    assert (len(first.requests), second.requests) == (2, [])
+    assert walk.answered is links[0]
+    assert failures.told == []
 
 
 # --- What passes through ---------------------------------------------------------------

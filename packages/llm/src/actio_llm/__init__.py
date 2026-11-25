@@ -33,6 +33,7 @@ from actio_llm.chat import (
 )
 from actio_llm.errors import (
     FOR_NOW,
+    ConnectionFailedError,
     ContextOverflowError,
     LLMError,
     ModelNotFoundError,
@@ -55,6 +56,7 @@ __all__ = [
     "Assistant",
     "ChatProvider",
     "ChatRequest",
+    "ConnectionFailedError",
     "ContextOverflowError",
     "Finish",
     "FinishReason",

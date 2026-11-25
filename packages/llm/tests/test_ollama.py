@@ -18,6 +18,7 @@ import pytest
 from actio_llm import (
     Assistant,
     ChatRequest,
+    ConnectionFailedError,
     ContextOverflowError,
     Finish,
     FinishReason,
@@ -545,12 +546,38 @@ async def test_http_errors_become_typed_errors(
         await collect(ollama.stream(ask("hi")))
 
 
-async def test_an_unreachable_server_is_unavailable(serve: Serve) -> None:
-    def refuse(request: httpx2.Request) -> httpx2.Response:
-        raise httpx2.ConnectError("connection refused", request=request)
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        (httpx2.ConnectError, ConnectionFailedError),
+        (httpx2.ConnectTimeout, ProviderUnavailableError),
+        (httpx2.ReadError, ProviderUnavailableError),
+        (httpx2.RemoteProtocolError, ProviderUnavailableError),
+    ],
+    ids=["refused", "never answered", "closed", "hung up on the request"],
+)
+@pytest.mark.parametrize("call", ["a chat", "a small call"])
+async def test_an_unreachable_server_is_unavailable(
+    serve: Serve, failure: type[httpx2.TransportError], error: type[Exception], call: str
+) -> None:
+    """A connection that failed at once, with nothing sent, is a kind of its own, which
+    is worth asking again at once. Any other failure of the connection before an answer
+    is a plain one: its time is spent, or the request may have been read."""
 
-    with pytest.raises(ProviderUnavailableError, match="can't reach Ollama"):
-        await collect(serve(refuse, check_version=False).stream(ask("hi")))
+    def fail(request: httpx2.Request) -> httpx2.Response:
+        raise failure("the connection failed", request=request)
+
+    ollama = serve(fail, check_version=False)
+
+    async def called() -> object:
+        if call == "a chat":
+            return await collect(ollama.stream(ask("hi")))
+        return await ollama.describe(MODEL)
+
+    with pytest.raises(ProviderUnavailableError, match="can't reach Ollama") as caught:
+        await called()
+
+    assert type(caught.value) is error
 
 
 async def test_events_before_a_break_are_delivered_then_the_break_is_reported(serve: Serve) -> None:

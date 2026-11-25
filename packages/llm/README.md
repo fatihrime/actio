@@ -141,6 +141,7 @@ Every failure is an `LLMError`. The subclasses answer what a caller has to decid
 | Error | Meaning | What a caller can do |
 |---|---|---|
 | `ProviderUnavailableError` | Can't connect, the server is overloaded, or it didn't start answering in time | Try another provider: nothing was generated |
+| `ConnectionFailedError` | No connection could be made, and that was known at once: nothing listens, the name doesn't resolve, or the server hung up while it was made. Nothing was sent. A kind of `ProviderUnavailableError`; a connection that was never answered, or that was made and then closed, is a plain one | Ask the same provider again at once, then another |
 | `RateLimitedError` | The provider answered 429. A kind of `ProviderUnavailableError` | Try another provider, or wait `retry_after_s` when the provider gave it |
 | `StreamInterruptedError` | The answer started, then broke off or went silent | Keep what arrived; retry only if nothing was shown |
 | `ContextOverflowError` | The prompt doesn't fit the context window, or is larger than the provider takes from the account in one request | Shorten the history, or use a larger window |
@@ -150,9 +151,9 @@ Every failure is an `LLMError`. The subclasses answer what a caller has to decid
 | `ProviderError` | The server failed, refused Actio's credentials, or didn't speak its own protocol | Report it; another provider may work |
 | `UnsupportedServerError` | Ollama is older than 0.40 | Upgrade Ollama |
 
-Deadlines (`Timeouts`) apply to connecting, to the first chunk, and to the gap between chunks. They time each read from Ollama, never the caller's own work between two chunks.
+Deadlines (`Timeouts`) apply to connecting, to the first chunk, and to the gap between chunks. They time each read from Ollama, never the caller's own work between two chunks. An adapter says which it was given (`timeouts`).
 
-`FOR_NOW` names the errors that another try may not meet again: `isinstance(error, FOR_NOW)` is true for `ProviderUnavailableError`, `RateLimitedError` with it, `StreamInterruptedError` and `ProviderError`.
+`FOR_NOW` names the errors that another try may not meet again: `isinstance(error, FOR_NOW)` is true for `ProviderUnavailableError`, `ConnectionFailedError` and `RateLimitedError` with it, `StreamInterruptedError` and `ProviderError`.
 
 ## Asking another model in one's place
 
@@ -168,9 +169,14 @@ def told(failed: Link, error: LLMError, later: Link | None) -> None:
     print(f"{failed.name} failed ({type(error).__name__}), next: {later and later.name}")
 
 
+def again(failed: Link, error: LLMError, pause: float) -> None:
+    print(f"{failed.name} failed ({type(error).__name__}), asked again after {pause:g} s")
+
+
 walk = Walk(
     [Link("groq", groq, groq_request), Link("local", ollama, local_request)],
     on_failed=told,
+    on_again=again,
 )
 async with aclosing(walk.stream()) as events:
     async for event in events:
@@ -180,13 +186,14 @@ print(walk.answered.name)  # the link whose request the answer was written for
 
 - **One at a time, in order:** a link is asked only after the one before it failed.
 - **Before anything was handed on, any `LLMError` moves on to the next link:** too busy, a limit, a request too large or refused, a model missing, a provider that failed, a server too old, an answer that broke off with nothing in it yet, a stream that ended without its `Finish`.
-- **After something was handed on, nothing moves on,** and the error is raised as it came. Something is a piece of text or reasoning with text in it, a tool call, or a `Finish`: a thought counts, since a page that showed it can't take it back. A piece with no text in it doesn't.
-- **A cancellation, or any exception that isn't an `LLMError`, passes through as it came,** and no later link is asked.
-- **One hold at a time:** a link that failed has its stream closed and its hold given back before the next link's hold is waited for. Closing the walk's stream early closes the open link's, and gives its hold back.
+- **But a link whose failure may be gone in a moment is asked once more first,** with the same request: after a `ConnectionFailedError` at once, and after a `RateLimitedError` whose `retry_after_s` is from 0 to 2 seconds (`WAITS_AT_MOST_S`), once that wait is over. No other failure is, nor a longer wait, or none. Each link is asked twice at most, each with a second try of its own, and the second try's error is the link's failure.
+- **After something was handed on, nothing moves on, and nothing is asked again:** the error is raised as it came. Something is a piece of text or reasoning with text in it, a tool call, or a `Finish`: a thought counts, since a page that showed it can't take it back. A piece with no text in it doesn't.
+- **A cancellation, or any exception that isn't an `LLMError`, passes through as it came,** from a hold, a stream or the pause before a second try, and nothing more is asked.
+- **One hold at a time:** a link's hold is entered once, and kept through its pause and its second try. Each try's stream is closed before the next begins, and a link that failed has its last stream closed and its hold given back before the next link's hold is waited for. Closing the walk's stream early closes the open link's, and gives its hold back.
 - **When every link failed,** the first error in `FOR_NOW` is raised, and without one the last link's: the object itself.
-- **`on_failed` is told of each link that failed,** with its error and the link asked next, as it happens. `answered` says which link answered.
+- **`on_failed` is told of each link that failed,** once, after its last try, with that try's error and the link asked next, as it happens. **`on_again` is told of each link asked once more,** with its first error and the pause, before the pause. `answered` says which link answered.
 
-With one link, the walk is that provider. How Actio uses it, and why a thought counts: [ADR 0028](https://fatihrime.github.io/actio/adr/0028-a-model-names-those-that-stand-in-for-it/).
+With one link, the walk is that provider, asked once more by the same rule. How Actio uses it, and why a thought counts: [ADR 0028](https://fatihrime.github.io/actio/adr/0028-a-model-names-those-that-stand-in-for-it/).
 
 ## A guess at token counts
 
@@ -215,7 +222,7 @@ prompt_tokens(prompt)  # 31, with what a chat template writes around the two mes
 - **Images and structured output** (a JSON schema for the answer). They arrive with the features that use them.
 - **Unloading and pulling models.** They arrive with the model manager.
 - **A guess that learns.** The estimate uses the same rules for every model. Correcting it per model, from the counts providers report, comes with the rest of the router.
-- **The rest of the router:** a second try of the same model, a patience of its own for each kind of server, and a provider's health beyond its last answer. The walk above is its first part.
+- **The rest of the router:** a limit on how long a whole answer may take, and a provider's health beyond its last answer. The walk above is its first part.
 
 ## Tests
 
@@ -237,4 +244,4 @@ make test-cloud                 # those of Groq and the Gemini API, sent to the 
     - Five exchanges depend on the account's or the provider's state, such as a limit that was reached or a model too busy. They were written from real answers, and are never asked live.
 - **Hand-written responses** cover what a healthy server won't produce on demand: dropped connections, stalls, malformed lines, old versions.
 - **The OpenAI-compatible adapter runs against fakellm,** in process. fakellm is a separate implementation of the format, itself checked with OpenAI's official SDK, so neither is only tested against itself. Directives in the prompt script its reasoning, tool calls and failures.
-- **The walk runs against providers and holds scripted in its test,** which note in one log, in order, when each is asked, closed, held and given back.
+- **The walk runs against providers and holds scripted in its test,** which note in one log, in order, when each is asked, closed, held and given back, and when a link is said to be asked again. A test that names a server's wait gives the walk a pause that waits nothing, or waits a twentieth of a second, or names two seconds and cancels the walk in them: none waits longer than that twentieth.

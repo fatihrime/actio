@@ -139,6 +139,11 @@ class Ollama:
         self._timeouts = timeouts or Timeouts()
         self._version_ok = not check_version
 
+    @property
+    def timeouts(self) -> Timeouts:
+        """How long it waits at each stage of a call."""
+        return self._timeouts
+
     # --- Chat ------------------------------------------------------------------------
 
     async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
