@@ -346,8 +346,8 @@ def groq_offered(asking: Asking) -> dict[str, Listed]:
 
 
 def groq_described(_asking: Asking, _model: str, listed: Listed) -> list[str]:
-    """What Groq's list says of a model. Its documentation doesn't show whether an entry
-    of the list holds the longest answer, as the description of one model does."""
+    """What Groq's list says of a model. Seen on 2026-11-25, each entry of the list
+    carried the model's window and its longest answer."""
     return sizes(listed.get("context_window"), listed.get("max_completion_tokens"))
 
 
@@ -424,11 +424,12 @@ GEMINI = Provider(
     key_variable="GEMINI_API_KEY",
     keys_at="https://aistudio.google.com/apikey",
     limits_at="https://aistudio.google.com/rate-limit",
-    # Its documentation names no header of its limits and no endpoint for them: an
-    # answer that states none says where to read them.
+    # Seen on 2026-11-25, no answer of the API carried a header about limits, and its
+    # documentation names no endpoint for them: an answer that states none says where to
+    # read them.
     unstated=None,
     counts={},
-    models=("gemini-3.8-flash", "gemini-3.5-flash-lite"),
+    models=("gemini-3.6-flash", "gemini-3.5-flash-lite"),
     chat_at=f"{GEMINI_API}/openai/chat/completions",
     offered=gemini_offered,
     described=gemini_described,

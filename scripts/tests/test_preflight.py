@@ -2,7 +2,10 @@
 
 `scripts/preflight.py` runs here against a fake of both providers. Its lists, answers
 and headers are shaped as the providers' documentation shows them, and its refusals of
-a key as each provider answered a request made with a made-up key. Two refusals are
+a key as each provider answered a request made with a made-up key. Seen with real keys
+on 2026-11-25, Groq's list entries carried the window and the longest answer, and no
+answer of the Gemini API carried a header about limits: the fake leaves the longest
+answer out of some entries, to show what is said without it. Two refusals are
 made up here, in no shape either was seen to give: Groq's at a rate limit, and the
 Gemini API's 403. So are the bodies that are broken on purpose. A request the fake
 doesn't expect fails the test, and a test that must see no request at all gives it a
@@ -40,8 +43,8 @@ GROQ_LIMITS = {
     "x-ratelimit-reset-tokens": "7.66s",
 }
 
-# Groq's list of models. Whether an entry carries the longest answer its documentation
-# doesn't show: one here does, the others don't.
+# Groq's list of models. Its entries carried the longest answer on 2026-11-25: one here
+# does, and the others don't, to show what is said without it.
 GROQ_MODELS: list[dict[str, Any]] = [
     {
         "id": "openai/gpt-oss-120b",
@@ -360,14 +363,14 @@ def test_what_groq_says_of_a_model_and_how_it_answered() -> None:
 )
 def test_what_the_gemini_api_says_of_a_model(thinking: bool | None, said: str | None) -> None:
     providers = Providers()
-    providers.answers["gemini describe gemini-3.8-flash"] = lambda _request: httpx2.Response(
-        200, json=gemini_model("gemini-3.8-flash", thinking=thinking)
+    providers.answers["gemini describe gemini-3.6-flash"] = lambda _request: httpx2.Response(
+        200, json=gemini_model("gemini-3.6-flash", thinking=thinking)
     )
 
     status, printed = run("gemini", environ={"GEMINI_API_KEY": GEMINI_KEY}, providers=providers)
 
     assert status == 0
-    described = under(printed, "gemini-3.8-flash")
+    described = under(printed, "gemini-3.6-flash")
     assert "window of 1,048,576 tokens" in described
     assert "answers up to 65,536 tokens" in described
     assert "7 tokens in the question" in described
@@ -376,7 +379,7 @@ def test_what_the_gemini_api_says_of_a_model(thinking: bool | None, said: str | 
         assert said in described
     else:
         assert "reason" not in described
-    assert "gemini describe gemini-3.8-flash" in providers.calls()
+    assert "gemini describe gemini-3.6-flash" in providers.calls()
 
 
 def test_the_gemini_apis_list_of_models_is_read_to_its_last_page() -> None:
@@ -593,12 +596,12 @@ def test_a_limit_that_cant_be_read_is_shown_as_it_came_and_fails_nothing() -> No
             "openai/gpt-oss-120b",
             "https://console.groq.com/settings/limits",
         ),
-        # The Gemini API's documentation names no header of its limits: its answers
-        # here have none.
+        # No answer of the Gemini API carried a header about limits on 2026-11-25: its
+        # answers here have none.
         (
             "gemini",
             {"GEMINI_API_KEY": GEMINI_KEY},
-            "gemini-3.8-flash",
+            "gemini-3.6-flash",
             "https://aistudio.google.com/rate-limit",
         ),
     ],
@@ -718,7 +721,7 @@ def cant_connect(request: httpx2.Request) -> httpx2.Response:
             ["429", "Rate limit reached for model", "7 s"],
         ),
         (
-            "gemini ask gemini-3.8-flash",
+            "gemini ask gemini-3.6-flash",
             lambda _request: httpx2.Response(400, json=GEMINI_REFUSES_THE_QUESTION),
             ["400", "Please pass a valid API key"],
         ),
@@ -730,7 +733,7 @@ def cant_connect(request: httpx2.Request) -> httpx2.Response:
             ["isn't JSON"],
         ),
         (
-            "gemini ask gemini-3.8-flash",
+            "gemini ask gemini-3.6-flash",
             lambda _request: httpx2.Response(200, json={"object": "list", "data": []}),
             ["isn't shaped as expected"],
         ),
@@ -741,7 +744,7 @@ def cant_connect(request: httpx2.Request) -> httpx2.Response:
             ["isn't shaped as expected"],
         ),
         ("groq ask openai/gpt-oss-120b", cant_connect, ["can't reach Groq", "ConnectError"]),
-        ("gemini ask gemini-3.8-flash", times_out, ["didn't answer within 30 s"]),
+        ("gemini ask gemini-3.6-flash", times_out, ["didn't answer within 30 s"]),
         ("groq ask openai/gpt-oss-120b", connects_too_slowly, ["couldn't connect", "within 5 s"]),
     ],
 )
