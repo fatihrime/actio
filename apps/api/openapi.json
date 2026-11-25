@@ -755,7 +755,7 @@
           "conversations"
         ],
         "summary": "Start Turn",
-        "description": "Ask a model something, and stream its answer.\n\nWhen the model can't answer before its first word, a model asked in its place does,\nas `GET /api/models` lists them (`then`). The turn is the asked model's all the\nsame, and costs what a question to it costs.\n\nThe answer is written whether or not this response is read to its end. To stop it,\ncancel the turn: closing the connection doesn't.",
+        "description": "Ask a model something, and stream its answer.\n\nWhen the model can't answer before its first word, a model asked in its place does,\nas `GET /api/models` lists them (`then`). The turn is the asked model's all the\nsame, and costs what a question to it costs: its `answered_by` says which model\nwrote the answer.\n\nThe answer is written whether or not this response is read to its end. To stop it,\ncancel the turn: closing the connection doesn't.",
         "operationId": "start_turn",
         "parameters": [
           {
@@ -1806,7 +1806,19 @@
           "model": {
             "type": "string",
             "title": "Model",
-            "description": "The model's name in `GET /api/models`."
+            "description": "The model that was asked, by its `id` in `GET /api/models`. The turn is its own\nwhoever answered, and costs what a question to it costs."
+          },
+          "answered_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered By",
+            "description": "The model that answered, by its `id` in `GET /api/models`: the one that was\nasked, or one asked in its place (`then`) because that one couldn't answer before\nits first word. A model that ended its answer without writing a word has answered\ntoo. Empty while the turn runs; when no model answered, because every one failed\nbefore its first word, or the turn was stopped or interrupted while it waited; for a\nturn that was given up on; and for turns recorded before this was kept."
           },
           "thinking": {
             "type": "boolean",
@@ -1892,7 +1904,7 @@
               }
             ],
             "title": "Context Tokens",
-            "description": "About how many tokens of the model's context window the conversation takes after\nthis turn: what the model was shown, and the words it answered with. What it only\nthought isn't kept for the next question, and isn't counted: where it thought and\nthen answered, the words' share of what it wrote is a guess, by characters. Empty\nwhile the turn runs, and when the model's server counted nothing, as for a stopped\nor failed turn, or one whose answer was cut at its time."
+            "description": "About how many tokens of the context window of the model that answered,\n`answered_by`, the conversation takes after this turn: what the model was shown, and\nthe words it answered with. What it only thought isn't kept for the next question,\nand isn't counted: where it thought and then answered, the words' share of what it\nwrote is a guess, by characters. Empty while the turn runs, and when the model's\nserver counted nothing, as for a stopped or failed turn, or one whose answer was cut\nat its time."
           },
           "load_ms": {
             "anyOf": [
@@ -1979,6 +1991,7 @@
         "required": [
           "id",
           "model",
+          "answered_by",
           "thinking",
           "status",
           "finish_reason",

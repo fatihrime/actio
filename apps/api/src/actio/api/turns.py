@@ -203,7 +203,8 @@ async def start_turn(
 
     When the model can't answer before its first word, a model asked in its place does,
     as `GET /api/models` lists them (`then`). The turn is the asked model's all the
-    same, and costs what a question to it costs.
+    same, and costs what a question to it costs: its `answered_by` says which model
+    wrote the answer.
 
     The answer is written whether or not this response is read to its end. To stop it,
     cancel the turn: closing the connection doesn't."""
@@ -712,6 +713,7 @@ def _ended(running: TurnOut, ended: Ended) -> TurnOut:
             "generation_ms": timings.generation_ms if timings else None,
             "credits": ended.credits,
             "first_word_at": ending.first_word_at,
+            "answered_by": ending.answered_by,
             "finished_at": ended.at,
         }
     )

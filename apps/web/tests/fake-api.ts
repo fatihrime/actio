@@ -358,6 +358,29 @@ export function freeModel(changes: Partial<Model> = {}): Model {
   });
 }
 
+/** A second model on offer, which the default one names to stand in for it when it
+ * can't answer (`then`, ADR 0028): the one the recorded `stood_in.sse` names, with a
+ * window of its own, a quarter of the default one's. */
+export function secondModel(changes: Partial<Model> = {}): Model {
+  return model({
+    id: "second",
+    title: "Second model",
+    model: "second-model:1b",
+    context_window: 2048,
+    thinking: false,
+    ...changes,
+  });
+}
+
+/** What `GET /api/models` answers where the default model names `secondModel` to stand
+ * in for it. `changes` says how the default one differs. */
+export function chained(changes: Partial<Model> = {}): ModelList {
+  return {
+    default: "standard",
+    models: [model({ then: ["second"], ...changes }), secondModel()],
+  };
+}
+
 /** What `GET /api/usage` answers: a guest's plan, of which nothing is used. `windows`
  * replaces its two windows. */
 export function usage(
@@ -388,6 +411,7 @@ export function turn(changes: Partial<Turn> = {}): Turn {
   const made: Turn = {
     id: "01900000-0000-7000-8000-000000000001",
     model: "standard",
+    answered_by: "standard",
     thinking: false,
     status: "completed",
     finish_reason: "stop",
@@ -414,6 +438,11 @@ export function turn(changes: Partial<Turn> = {}): Turn {
   // have a figure says so.
   if (!("context_tokens" in changes) && made.status !== "completed") {
     made.context_tokens = null;
+  }
+  // The model asked wrote its answer, unless the turn is still running: a test of a
+  // model that stood in for it, or of a turn whose record names none, says so.
+  if (!("answered_by" in changes)) {
+    made.answered_by = made.status === "running" ? null : made.model;
   }
   return made;
 }

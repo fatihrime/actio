@@ -20,6 +20,8 @@ interface Metadata {
   parent_id: string | null;
   versions: string[];
   turn: {
+    model: string;
+    answered_by: string | null;
     status: string;
     finish_reason: string | null;
     error: string | null;
@@ -246,6 +248,42 @@ describe("a recorded turn, read by the ai package", () => {
     });
   });
 
+  it("carries in the metadata which model wrote an answer, when one stood in for the model asked", async () => {
+    // The model asked failed before its first word, and the one it names to stand in
+    // for it answered, with a window of its own.
+    const { states, errors } = await replay("stood_in.sse");
+
+    expect(errors).toEqual([]);
+    expect(last(states).parts).toEqual([
+      { type: "step-start" },
+      { type: "text", text: "From the model that stood in.", state: "done" },
+    ]);
+    // Nobody had answered when the turn began.
+    expect(states[0]?.metadata?.turn).toMatchObject({
+      model: "standard",
+      answered_by: null,
+      status: "running",
+    });
+    // The turn is the asked model's, and its record names the one that answered, whose
+    // figure the window's is: 1,500 tokens read and 36 written.
+    expect(last(states).metadata?.turn).toMatchObject({
+      model: "standard",
+      answered_by: "second",
+      status: "completed",
+      finish_reason: "stop",
+      context_tokens: 1536,
+    });
+  });
+
+  it("says in the metadata that the model asked wrote its own answer", async () => {
+    const { states } = await replay("answer.sse");
+
+    expect(last(states).metadata?.turn).toMatchObject({
+      model: "standard",
+      answered_by: "standard",
+    });
+  });
+
   it("takes a usage warning as a chunk of the stream, and keeps it out of the message", async () => {
     const { states, errors } = await replay("usage_warning.sse");
     const chunks = await chunksOf("usage_warning.sse");
@@ -324,6 +362,8 @@ describe("a recorded turn, read by the ai package", () => {
     expect(message.metadata?.turn).toMatchObject({
       status: "failed",
       error: "model_unavailable",
+      // No model wrote anything.
+      answered_by: null,
     });
     expect(message.metadata?.versions).toEqual([]); // no answer was written
   });

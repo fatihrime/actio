@@ -149,6 +149,11 @@ class Turn(Base):
     answer_id: Mapped[uuid.UUID | None]
     model: Mapped[str]
     """The model's name in the catalog, such as `standard`, as it was asked for."""
+    answered_by: Mapped[str | None]
+    """The name in the catalog of the model that wrote the turn's answer: the one asked,
+    or one asked in its place (ADR 0028). Written with the turn's outcome. Empty while
+    the turn runs, when no model handed anything on, for a turn that was given up on,
+    whose process said nothing of it, and for the turns recorded before it was kept."""
     thinking: Mapped[bool]
     """Whether the model was asked to reason before answering."""
     status: Mapped[TurnStatus] = mapped_column(String)

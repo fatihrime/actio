@@ -77,7 +77,15 @@ class TurnOut(Described):
 
     id: uuid.UUID
     model: str
-    """The model's name in `GET /api/models`."""
+    """The model that was asked, by its `id` in `GET /api/models`. The turn is its own
+    whoever answered, and costs what a question to it costs."""
+    answered_by: str | None
+    """The model that answered, by its `id` in `GET /api/models`: the one that was
+    asked, or one asked in its place (`then`) because that one couldn't answer before
+    its first word. A model that ended its answer without writing a word has answered
+    too. Empty while the turn runs; when no model answered, because every one failed
+    before its first word, or the turn was stopped or interrupted while it waited; for a
+    turn that was given up on; and for turns recorded before this was kept."""
     thinking: bool
     """Whether the model was asked to reason before answering."""
     status: TurnStatus
@@ -101,12 +109,13 @@ class TurnOut(Described):
     cached_input_tokens: int | None
     output_tokens: int | None
     context_tokens: int | None
-    """About how many tokens of the model's context window the conversation takes after
-    this turn: what the model was shown, and the words it answered with. What it only
-    thought isn't kept for the next question, and isn't counted: where it thought and
-    then answered, the words' share of what it wrote is a guess, by characters. Empty
-    while the turn runs, and when the model's server counted nothing, as for a stopped
-    or failed turn, or one whose answer was cut at its time."""
+    """About how many tokens of the context window of the model that answered,
+    `answered_by`, the conversation takes after this turn: what the model was shown, and
+    the words it answered with. What it only thought isn't kept for the next question,
+    and isn't counted: where it thought and then answered, the words' share of what it
+    wrote is a guess, by characters. Empty while the turn runs, and when the model's
+    server counted nothing, as for a stopped or failed turn, or one whose answer was cut
+    at its time."""
     load_ms: int | None
     prompt_ms: int | None
     generation_ms: int | None
@@ -134,6 +143,7 @@ class TurnOut(Described):
         return cls(
             id=turn.id,
             model=turn.model,
+            answered_by=turn.answered_by,
             thinking=turn.thinking,
             status=turn.status,
             finish_reason=turn.finish_reason,

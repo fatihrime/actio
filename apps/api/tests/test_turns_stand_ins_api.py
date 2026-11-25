@@ -142,6 +142,17 @@ async def until(condition: Callable[[], bool]) -> None:
             await asyncio.sleep(0.005)
 
 
+async def answered_by(chat: Chat, response: httpx.Response) -> Any:
+    """Which model the turn's record says wrote its answer, as the stream's last
+    metadata says it, which the conversation read afterwards says too: the turn of its
+    answer, or of the question it left open. Asserted equal, the whole turn."""
+    streamed = turn_of(response)
+    conversation = await chat.read()
+    stored = conversation["unanswered"] or conversation["messages"][-1]["metadata"]["turn"]
+    assert stored == streamed
+    return streamed["answered_by"]
+
+
 def told(caplog: pytest.LogCaptureFixture, turn_id: str) -> list[str]:
     """What the log says of a turn, in order, but the waits at a gate."""
     return [
@@ -452,6 +463,101 @@ async def test_a_stand_in_that_reaches_the_end_of_its_own_window_says_so(
     assert chunk(response, "finish")["finishReason"] == "length"
 
 
+# --- Which model answered, in the turn's record ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("asked", "stand_in", "answered", "has_answer"),
+    [
+        pytest.param(
+            [TextDelta("Mine."), DONE],
+            [TextDelta("Never."), DONE],
+            "standard",
+            True,
+            id="the asked model's own answer",
+        ),
+        pytest.param(
+            [ProviderUnavailableError("busy")],
+            [TextDelta("From the stand-in."), DONE],
+            "second",
+            True,
+            id="a stand-in's answer",
+        ),
+        pytest.param(
+            None,
+            [TextDelta("From the stand-in."), DONE],
+            "second",
+            True,
+            id="the asked model passed over, not ready",
+        ),
+        pytest.param(
+            [ProviderUnavailableError("busy")],
+            [ContextOverflowError("too long")],
+            None,
+            False,
+            id="every model failed before a word",
+        ),
+        pytest.param(
+            [ProviderUnavailableError("busy")],
+            [TextDelta("Half an "), ProviderUnavailableError("gone")],
+            "second",
+            True,
+            id="a stand-in that failed after a word",
+        ),
+        pytest.param(
+            [ProviderUnavailableError("busy")],
+            [ReasoningDelta("Let me think"), StreamInterruptedError("broke off")],
+            "second",
+            True,
+            id="a stand-in that failed after a thought alone",
+        ),
+        pytest.param(
+            [ProviderUnavailableError("busy")],
+            [TextDelta("Half an "), TookTooLongError("still answering")],
+            "second",
+            True,
+            id="a stand-in's answer cut at its time",
+        ),
+        pytest.param(
+            [ProviderUnavailableError("busy")],
+            [Finish(FinishReason.STOP, Usage(input_tokens=5, output_tokens=0))],
+            "second",
+            False,
+            id="a stand-in that finished and wrote nothing",
+        ),
+    ],
+)
+async def test_a_turns_record_names_the_model_that_wrote_its_answer(
+    asked: list[Any] | None,
+    stand_in: list[Any],
+    answered: str | None,
+    has_answer: bool,
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+) -> None:
+    """Whichever ending it is recorded with: the model that handed something on, a word,
+    a thought or its last event, and none when nothing was. The stream's last metadata
+    says it, and so does the conversation read afterwards. The stream's first said none:
+    nobody had answered yet. The turn is the asked model's all the same."""
+    assert migrated
+    if asked is None:
+        lineup.add("standard", state="unreachable", then=["second"])
+    else:
+        lineup.add("standard", *asked, then=["second"])
+    lineup.add("second", *stand_in)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask()
+
+    assert await answered_by(chat, response) == answered
+    assert turn_of(response)["model"] == "standard"
+    assert chunk(response, "start")["messageMetadata"]["turn"]["answered_by"] is None
+    conversation = await chat.read()
+    assert (conversation["unanswered"] is None) == has_answer
+
+
 # --- Gates ----------------------------------------------------------------------------
 
 
@@ -527,6 +633,9 @@ async def test_a_turn_stopped_while_it_waits_at_its_stand_ins_gate_is_stopped(
     assert stand_in.requests == []
     assert said(response) == ""
     assert await db.scalar(select(func.count()).select_from(UsageEntry)) == 1  # `other`'s
+    # Nobody had answered: the record names no model, in the stop's answer too.
+    assert stopped.json()["answered_by"] is None
+    assert await answered_by(chat, response) is None
 
 
 async def test_a_turn_stopped_while_its_stand_in_writes_keeps_what_had_arrived(
@@ -548,6 +657,9 @@ async def test_a_turn_stopped_while_its_stand_in_writes_keeps_what_had_arrived(
     assert said(response) == "Half an "
     assert (await chat.read())["messages"][1]["parts"] == [{"type": "text", "text": "Half an "}]
     assert stand_in.closed.is_set()
+    # What had arrived is the stand-in's, and the record says so, in the stop's answer too.
+    assert stopped.json()["answered_by"] == "second"
+    assert await answered_by(chat, response) == "second"
 
 
 # --- A model asked once more ----------------------------------------------------------

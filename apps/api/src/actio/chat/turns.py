@@ -131,6 +131,10 @@ class Ending:
     """When the first piece of the answer came, its reasoning included. `None` when the
     model wrote nothing, and for a turn that is given up on: its process said nothing of
     it."""
+    answered_by: str | None = None
+    """The name of the model that wrote the answer: the one asked, or one asked in its
+    place. `None` when no model handed anything on, and for a turn that is given up on,
+    as for `first_word_at`."""
 
 
 class Draft(BaseModel):
@@ -587,8 +591,8 @@ async def _end(
 
     The answer is a message under `answer_id`, shown by the conversation, and dated
     `answered_at`, or `now` when that isn't given. The turn ends at `now`, with the
-    moment its first word came, if the ending has one. Its draft is emptied in the
-    statement that writes the outcome."""
+    moment its first word came and the model that wrote its answer, if the ending has
+    them. Its draft is emptied in the statement that writes the outcome."""
     if ending.parts:
         assert answer_id is not None  # noqa: S101 - whoever has parts has their message's id
         await tree.append(
@@ -613,6 +617,7 @@ async def _end(
         turn.prompt_ms = ending.timings.prompt_ms
         turn.generation_ms = ending.timings.generation_ms
     turn.first_word_at = ending.first_word_at
+    turn.answered_by = ending.answered_by
     turn.credits = credits
     turn.draft = None
     turn.finished_at = now

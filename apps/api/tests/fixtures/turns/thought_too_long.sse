@@ -1,4 +1,4 @@
-data: {"type":"start","messageId":"01900000-0000-7000-8000-000000000002","messageMetadata":{"parent_id":"01900000-0000-7000-8000-0000000000a1","created_at":"2026-11-10T12:00:00Z","versions":["01900000-0000-7000-8000-000000000002"],"turn":{"id":"01900000-0000-7000-8000-000000000001","model":"standard","thinking":true,"status":"running","finish_reason":null,"error":null,"input_tokens":null,"cached_input_tokens":null,"output_tokens":null,"context_tokens":null,"load_ms":null,"prompt_ms":null,"generation_ms":null,"credits":null,"capped_by_usage":false,"started_at":"2026-11-10T12:00:00Z","first_word_at":null,"finished_at":null}}}
+data: {"type":"start","messageId":"01900000-0000-7000-8000-000000000002","messageMetadata":{"parent_id":"01900000-0000-7000-8000-0000000000a1","created_at":"2026-11-10T12:00:00Z","versions":["01900000-0000-7000-8000-000000000002"],"turn":{"id":"01900000-0000-7000-8000-000000000001","model":"standard","answered_by":null,"thinking":true,"status":"running","finish_reason":null,"error":null,"input_tokens":null,"cached_input_tokens":null,"output_tokens":null,"context_tokens":null,"load_ms":null,"prompt_ms":null,"generation_ms":null,"credits":null,"capped_by_usage":false,"started_at":"2026-11-10T12:00:00Z","first_word_at":null,"finished_at":null}}}
 
 data: {"type":"start-step"}
 
@@ -12,7 +12,7 @@ data: {"type":"reasoning-end","id":"reasoning-0"}
 
 data: {"type":"finish-step"}
 
-data: {"type":"finish","finishReason":"length","messageMetadata":{"parent_id":"01900000-0000-7000-8000-0000000000a1","created_at":"2026-11-10T12:00:00Z","versions":["01900000-0000-7000-8000-000000000002"],"turn":{"id":"01900000-0000-7000-8000-000000000001","model":"standard","thinking":true,"status":"completed","finish_reason":"length","error":null,"input_tokens":30,"cached_input_tokens":0,"output_tokens":512,"context_tokens":30,"load_ms":null,"prompt_ms":null,"generation_ms":null,"credits":542,"capped_by_usage":false,"started_at":"2026-11-10T12:00:00Z","first_word_at":"2026-11-10T12:00:00Z","finished_at":"2026-11-10T12:00:00Z"}}}
+data: {"type":"finish","finishReason":"length","messageMetadata":{"parent_id":"01900000-0000-7000-8000-0000000000a1","created_at":"2026-11-10T12:00:00Z","versions":["01900000-0000-7000-8000-000000000002"],"turn":{"id":"01900000-0000-7000-8000-000000000001","model":"standard","answered_by":"standard","thinking":true,"status":"completed","finish_reason":"length","error":null,"input_tokens":30,"cached_input_tokens":0,"output_tokens":512,"context_tokens":30,"load_ms":null,"prompt_ms":null,"generation_ms":null,"credits":542,"capped_by_usage":false,"started_at":"2026-11-10T12:00:00Z","first_word_at":"2026-11-10T12:00:00Z","finished_at":"2026-11-10T12:00:00Z"}}}
 
 data: [DONE]
 

@@ -166,6 +166,8 @@ async def test_a_question_is_answered_as_a_stream(chat: Chat, server_ids: Any) -
     assert finish["messageMetadata"]["turn"] == {
         "id": turn_id,
         "model": "standard",
+        # The model asked wrote the answer itself: none stood in for it.
+        "answered_by": "standard",
         "thinking": False,
         "status": "completed",
         "finish_reason": "stop",

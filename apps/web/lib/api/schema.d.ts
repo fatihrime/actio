@@ -280,7 +280,8 @@ export interface paths {
          *
          *     When the model can't answer before its first word, a model asked in its place does,
          *     as `GET /api/models` lists them (`then`). The turn is the asked model's all the
-         *     same, and costs what a question to it costs.
+         *     same, and costs what a question to it costs: its `answered_by` says which model
+         *     wrote the answer.
          *
          *     The answer is written whether or not this response is read to its end. To stop it,
          *     cancel the turn: closing the connection doesn't.
@@ -764,9 +765,20 @@ export interface components {
             id: string;
             /**
              * Model
-             * @description The model's name in `GET /api/models`.
+             * @description The model that was asked, by its `id` in `GET /api/models`. The turn is its own
+             *     whoever answered, and costs what a question to it costs.
              */
             model: string;
+            /**
+             * Answered By
+             * @description The model that answered, by its `id` in `GET /api/models`: the one that was
+             *     asked, or one asked in its place (`then`) because that one couldn't answer before
+             *     its first word. A model that ended its answer without writing a word has answered
+             *     too. Empty while the turn runs; when no model answered, because every one failed
+             *     before its first word, or the turn was stopped or interrupted while it waited; for a
+             *     turn that was given up on; and for turns recorded before this was kept.
+             */
+            answered_by: string | null;
             /**
              * Thinking
              * @description Whether the model was asked to reason before answering.
@@ -807,12 +819,13 @@ export interface components {
             output_tokens: number | null;
             /**
              * Context Tokens
-             * @description About how many tokens of the model's context window the conversation takes after
-             *     this turn: what the model was shown, and the words it answered with. What it only
-             *     thought isn't kept for the next question, and isn't counted: where it thought and
-             *     then answered, the words' share of what it wrote is a guess, by characters. Empty
-             *     while the turn runs, and when the model's server counted nothing, as for a stopped
-             *     or failed turn, or one whose answer was cut at its time.
+             * @description About how many tokens of the context window of the model that answered,
+             *     `answered_by`, the conversation takes after this turn: what the model was shown, and
+             *     the words it answered with. What it only thought isn't kept for the next question,
+             *     and isn't counted: where it thought and then answered, the words' share of what it
+             *     wrote is a guess, by characters. Empty while the turn runs, and when the model's
+             *     server counted nothing, as for a stopped or failed turn, or one whose answer was cut
+             *     at its time.
              */
             context_tokens: number | null;
             /** Load Ms */

@@ -2165,6 +2165,8 @@ async def test_an_answer_a_shutdown_interrupted_keeps_when_its_first_word_came(
         noon + timedelta(seconds=1),
         noon + timedelta(seconds=6),
     )
+    # And which model wrote what it keeps: named with every ending its process records.
+    assert turn.answered_by == "standard"
 
 
 async def test_a_turn_cancelled_from_outside_keeps_when_its_first_word_came(
@@ -2192,6 +2194,7 @@ async def test_a_turn_cancelled_from_outside_keeps_when_its_first_word_came(
         "2026-11-10T12:00:01Z",
         "2026-11-10T12:00:06Z",
     )
+    assert turn["answered_by"] == "standard"  # and which model wrote what it keeps
 
 
 async def test_a_turn_that_failed_inside_actio_keeps_when_its_first_word_came(
@@ -2216,13 +2219,15 @@ async def test_a_turn_that_failed_inside_actio_keeps_when_its_first_word_came(
         "2026-11-10T12:00:01Z",
         "2026-11-10T12:00:06Z",
     )
+    assert turn["answered_by"] == "standard"  # and which model had written them
 
 
 async def test_a_turn_given_up_on_says_nothing_of_its_first_word(
     scripted: Any, db: AsyncSession, clock: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Its process noted when the first word came, and then fell silent: what it noted
-    went with it. Its beats saved what the answer held, and nothing of that moment."""
+    went with it. Its beats saved what the answer held, and nothing of that moment, nor
+    which model was writing it."""
     monkeypatch.setattr(turns, "BEAT", timedelta(milliseconds=10))
     hold = asyncio.Event()
     model, browser = await scripted(
@@ -2245,6 +2250,7 @@ async def test_a_turn_given_up_on_says_nothing_of_its_first_word(
 
     assert given_up_on["status"] == "interrupted"
     assert moments(given_up_on) == ("2026-11-10T12:00:00Z", None, "2026-11-10T12:01:21Z")
+    assert given_up_on["answered_by"] is None
 
 
 # --- The description ------------------------------------------------------------------

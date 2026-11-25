@@ -40,6 +40,7 @@ from actio.core.settings import Settings
 from actio_llm import (
     Finish,
     FinishReason,
+    ProviderUnavailableError,
     ReasoningDelta,
     TextDelta,
     Timings,
@@ -137,6 +138,30 @@ async def test_an_answer_cut_at_its_servers_time_streams_what_was_recorded(scrip
     response = await turn(browser, "Count to a hundred.")
 
     as_recorded("took_too_long.sse", response.text)
+
+
+async def test_an_answer_by_a_model_that_stood_in_streams_what_was_recorded(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any
+) -> None:
+    """The model asked failed before its first word, and the one it names to stand in for
+    it answered: the turn is the asked model's, `standard`, and its record says that
+    `second` wrote the answer. The stand-in has a window of its own, half the asked
+    one's. For the web app, which says under the answer who wrote it, and how full the
+    stand-in's own window is: 1,500 tokens read and 36 written."""
+    assert migrated
+    lineup.add("standard", ProviderUnavailableError("busy"), then=["second"])
+    lineup.add(
+        "second",
+        TextDelta("From the model "),
+        TextDelta("that stood in."),
+        Finish(FinishReason.STOP, Usage(input_tokens=1_500, output_tokens=36)),
+        context_window=2048,
+    )
+    browser = await start_app(settings, catalog=lineup.catalog())
+
+    response = await turn(browser, "Who answers?")
+
+    as_recorded("stood_in.sse", response.text)
 
 
 async def test_a_thought_that_used_up_the_answer_streams_what_was_recorded(

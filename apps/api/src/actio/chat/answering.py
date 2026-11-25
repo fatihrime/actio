@@ -18,7 +18,8 @@ the way, the turn doesn't stay `running`:
 
 However it ends, a turn that got some of the model's answer says when the first piece
 came, by the clock it is given: what the person waited for the first word, from the
-moment they asked, the wait at the gate below included (`Ending.first_word_at`).
+moment they asked, the wait at the gate below included (`Ending.first_word_at`). And it
+says which model wrote that answer (`Ending.answered_by`).
 
 Nobody has to be listening. A turn runs apart from the request that started it
 (`actio.chat.running`), and a reader who leaves ends nothing. So while a turn runs, it
@@ -38,7 +39,9 @@ A model whose failure may be gone in a moment, a connection that failed at once 
 server that asked to wait two seconds at most, is asked once more first, keeping its
 place at its gate (ADR 0028, revision of 2026-11-25). A model that failed gives its
 place at its gate back before the next one's is waited at. Whoever answers, the turn is
-the asked model's: its name, and the credits held at its price. The log says which
+the asked model's: its name, and the credits held at its price. Its record names the
+model that answered all the same, whichever ending it is recorded with (ADR 0028,
+revision "a turn says which model answered, and the page says so"). The log says which
 model was asked once more, which failed and was passed over, and which answered in
 another's place, never what an error said.
 
@@ -55,7 +58,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import aclosing, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 from typing import Literal
@@ -441,6 +444,11 @@ async def answer(
                 "turn %s: model %s answered in place of %s", turn_id, walk.answered.name, model
             )
         if ending is not None:
+            # Whatever ended it, its record names the model whose answer it holds: the
+            # one that handed something on, if one did.
+            ending = replace(
+                ending, answered_by=None if walk.answered is None else walk.answered.name
+            )
             # Shielded: if this task is being cancelled, an unshielded write would be
             # cancelled with it, leaving the turn `running`.
             finished = clock()

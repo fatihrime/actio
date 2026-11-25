@@ -88,7 +88,9 @@ async def test_a_member_is_described_by_the_words_under_it(description: dict[str
     schemas = description["components"]["schemas"]
 
     of_an_answer = schemas["TurnOut"]["properties"]["context_tokens"]["description"]
-    assert of_an_answer.startswith("About how many tokens of the model's context window")
+    assert of_an_answer.startswith(
+        "About how many tokens of the context window of the model that answered"
+    )
     # As it is written, on its lines, without the code's indentation.
     assert "\n " not in of_an_answer
     of_a_body = schemas["TurnRequest"]["properties"]["answer_to"]["description"]
