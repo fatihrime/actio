@@ -51,6 +51,7 @@ from actio_llm import (
     RequestRejectedError,
     StreamEvent,
     TextDelta,
+    TookTooLongError,
     UnsupportedServerError,
     Usage,
     User,
@@ -366,6 +367,29 @@ async def test_a_turn_through_the_api_asks_for_a_title_when_the_models_file_name
 
     assert answered.status_code == 200
     assert await queued(migrated) == ([] if for_titles is None else asked_for(conversation_id))
+
+
+async def test_a_turn_whose_answer_was_cut_at_its_servers_time_asks_for_a_title_too(
+    offer: Any, start_app: Any, settings: Settings, migrated: str
+) -> None:
+    """It completed: what its model wrote is an answer, which reached a limit."""
+    _, catalog = offer(
+        TextDelta("Take the wheel off first."),
+        TookTooLongError("still answering"),
+        titles="standard",
+    )
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    conversation_id = new_id()
+    question = {"id": str(new_id()), "parts": [{"type": "text", "text": QUESTION}]}
+
+    answered = await browser.post(
+        f"/api/conversations/{conversation_id}/turns", json={"message": question}
+    )
+
+    assert answered.status_code == 200
+    assert '"finish_reason":"time_limit"' in answered.text
+    assert await queued(migrated) == asked_for(conversation_id)
 
 
 async def test_a_turn_whose_title_the_queue_refuses_is_recorded_and_counted_all_the_same(

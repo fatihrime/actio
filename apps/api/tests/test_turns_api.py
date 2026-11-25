@@ -28,6 +28,7 @@ from actio.chat.parts import TextPart
 from actio.core.ids import new_id
 from actio.core.rate_limit import Rate
 from actio.core.settings import Settings
+from actio.usage.models import UsageEntry
 from actio_llm import (
     Assistant,
     ContextOverflowError,
@@ -38,9 +39,12 @@ from actio_llm import (
     ReasoningDelta,
     RequestRejectedError,
     TextDelta,
+    TookTooLongError,
     ToolCall,
     Usage,
     User,
+    prompt_tokens,
+    tokens_in,
 )
 
 pytestmark = pytest.mark.anyio
@@ -357,6 +361,117 @@ async def test_an_answer_cut_at_what_its_usage_limit_left_it_reached_no_window(
     assert (turn["finish_reason"], turn["capped_by_usage"]) == ("length", True)
     stored = (await chat.read())["messages"][1]["metadata"]["turn"]
     assert (stored["finish_reason"], stored["capped_by_usage"]) == ("length", True)
+
+
+# --- The longest an answer may take ---------------------------------------------------
+
+STILL_WRITING = (
+    "turn {}: model standard was still writing when its server's time for an answer was over,"
+    " and the answer stops here"
+)
+"""What the log says of a turn whose answer was cut at its server's time."""
+
+
+@pytest.mark.parametrize(
+    ("written", "kind", "kept"),
+    [
+        pytest.param(
+            [TextDelta("One, two, "), TextDelta("three")],
+            "text",
+            {"type": "text", "text": "One, two, three"},
+            id="words",
+        ),
+        pytest.param(
+            [ReasoningDelta("Let me count "), ReasoningDelta("them all.")],
+            "reasoning",
+            {"type": "reasoning", "text": "Let me count them all."},
+            id="a thought alone",
+        ),
+    ],
+)
+async def test_an_answer_its_server_was_still_writing_when_its_time_was_over_is_completed_at_a_limit(
+    scripted: Any,
+    db: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+    written: list[Any],
+    kind: str,
+    kept: dict[str, str],
+) -> None:
+    """Something of it was handed on, and the client cut it there: an answer that reached
+    a limit, not a failure, which would cost nothing. It is counted by guess, as a stream
+    that is closed sends no count, and it says nothing of its tokens or of the window.
+    The stream ends as a completed answer's does, and the log names neither the error's
+    text nor anything written."""
+    model, browser = await scripted(*written, TookTooLongError("still answering, 4471"))
+    chat = Chat(browser)
+
+    response = await chat.ask("Count to a hundred.", thinking=True)
+
+    assert kinds(response) == [
+        "start",
+        "start-step",
+        f"{kind}-start",
+        f"{kind}-delta",
+        f"{kind}-delta",
+        f"{kind}-end",
+        "finish-step",
+        "finish",
+        "[DONE]",
+    ]
+    assert said(response, kind) == kept["text"]
+    finish = chunk(response, "finish")
+    assert finish["finishReason"] == "other"
+    turn = finish["messageMetadata"]["turn"]
+    answer = (await chat.read())["messages"][1]
+    assert answer["parts"] == [kept]
+    assert answer["metadata"]["turn"] == turn
+    guessed = prompt_tokens(model.requests[0].messages) + tokens_in(kept["text"])
+    assert (turn["status"], turn["finish_reason"], turn["error"], turn["credits"]) == (
+        "completed",
+        "time_limit",
+        None,
+        guessed,
+    )
+    assert (turn["input_tokens"], turn["output_tokens"], turn["context_tokens"]) == (
+        None,
+        None,
+        None,
+    )
+    assert turn["first_word_at"] == "2026-11-10T12:00:00Z"
+    [entry] = (await db.scalars(select(UsageEntry))).all()
+    assert (entry.credits, entry.estimated) == (guessed, True)
+    told = [r.getMessage() for r in caplog.records if r.name == "actio.chat.answering"]
+    assert told == [STILL_WRITING.format(turn["id"])]
+    assert "4471" not in caplog.text
+
+
+async def test_a_model_that_wrote_nothing_before_its_time_was_over_fails_the_turn(
+    scripted: Any, db: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Its server sent lines with no word in them. No model stands in for it here, and
+    the turn fails, as any that wrote nothing: it costs nothing, and says why in words
+    of its own, not those of an answer whose connection was lost."""
+    _, browser = await scripted(TextDelta(""), TookTooLongError("still answering, 4471"))
+    chat = Chat(browser)
+
+    response = await chat.ask("Count to a hundred.")
+
+    assert kinds(response) == ["start", "start-step", "message-metadata", "error", "[DONE]"]
+    assert chunk(response, "error")["errorText"] == "The model took too long, and wrote no answer."
+    turn = chunk(response, "message-metadata")["messageMetadata"]["turn"]
+    assert (turn["status"], turn["error"], turn["credits"], turn["first_word_at"]) == (
+        "failed",
+        "model_too_slow",
+        None,
+        None,
+    )
+    assert (await chat.read())["unanswered"] == turn
+    assert (await db.scalars(select(UsageEntry))).all() == []
+    told = [r.getMessage() for r in caplog.records if r.name == "actio.chat.answering"]
+    assert told == [
+        f"turn {turn['id']}: the model failed (TookTooLongError), recorded as model_too_slow"
+    ]
+    assert "4471" not in caplog.text
 
 
 # --- What the model is shown ----------------------------------------------------------

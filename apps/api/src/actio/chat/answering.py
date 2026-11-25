@@ -6,6 +6,10 @@ or was found given up on or deleted meanwhile (`Ended.recorded`). Whatever happe
 the way, the turn doesn't stay `running`:
 
 - the model finishes: `completed`, with the whole answer;
+- the model is still writing when its server's time for a whole answer is over
+  (`actio_llm.TookTooLongError`): `completed` too, with what it had written, and the
+  reason `time_limit`, counted by guess. With nothing written, the models that stand in
+  were asked already, and the turn is `failed`, as `model_too_slow`;
 - the model fails: `failed`, with a short code for what went wrong, and whatever it
   had written until then;
 - the turn is halted (`Halt`): `stopped`, when whoever asked stopped it, or
@@ -82,6 +86,7 @@ from actio_llm import (
     StreamInterruptedError,
     TextDelta,
     Timings,
+    TookTooLongError,
     Usage,
     Walk,
     tokens_in,
@@ -101,6 +106,7 @@ EXPLANATIONS = {
     ),
     "model_refused": "The model's server refused the request.",
     "answer_interrupted": "The answer broke off: the connection to the model was lost.",
+    "model_too_slow": "The model took too long, and wrote no answer.",
     "model_error": "The model's server failed.",
     "internal_error": "Something went wrong while the answer was being written.",
 }
@@ -118,6 +124,8 @@ def code_for(error: LLMError) -> str:
             return "model_refused"
         case ProviderUnavailableError():
             return "model_unavailable"
+        case TookTooLongError():
+            return "model_too_slow"
         case StreamInterruptedError():
             return "answer_interrupted"
         case _:
@@ -391,16 +399,31 @@ async def answer(
         else:
             raise StreamInterruptedError("the model's answer ended without saying why")
     except LLMError as error:
-        # Its kind, never its text: that can quote what the model had written, or what
-        # its server said of the request (ADR 0008, revision of 2026-11-23).
-        failed_as = code_for(error)
-        logger.warning(
-            "turn %s: the model failed (%s), recorded as %s",
-            turn_id,
-            type(error).__name__,
-            failed_as,
-        )
-        ending = Ending("failed", collected.parts, error=failed_as, first_word_at=first_word)
+        if isinstance(error, TookTooLongError) and collected.parts:
+            # Its model was still writing when its server's time for a whole answer was
+            # over: an answer that reached a limit, as one at its longest does, and is
+            # paid for, by guess, since a stream that is closed sends no count. Never a
+            # failure, which costs nothing: anyone can ask for a long answer on purpose.
+            logger.warning(
+                "turn %s: model %s was still writing when its server's time for an answer "
+                "was over, and the answer stops here",
+                turn_id,
+                model if walk.answered is None else walk.answered.name,
+            )
+            ending = Ending(
+                "completed", collected.parts, finish_reason="time_limit", first_word_at=first_word
+            )
+        else:
+            # Its kind, never its text: that can quote what the model had written, or
+            # what its server said of the request (ADR 0008, revision of 2026-11-23).
+            failed_as = code_for(error)
+            logger.warning(
+                "turn %s: the model failed (%s), recorded as %s",
+                turn_id,
+                type(error).__name__,
+                failed_as,
+            )
+            ending = Ending("failed", collected.parts, error=failed_as, first_word_at=first_word)
         for step in collected.close():
             await emit(step)
     except Exception:

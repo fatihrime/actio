@@ -30,6 +30,7 @@ from actio_llm import (
     StreamInterruptedError,
     System,
     TextDelta,
+    TookTooLongError,
     ToolCall,
     UnsupportedFeatureError,
     UnsupportedServerError,
@@ -142,6 +143,9 @@ def test_a_tool_call_nobody_asked_for_is_the_models_error() -> None:
         (UnsupportedFeatureError("does not support thinking"), "model_refused"),
         (RequestRejectedError("no such option"), "model_refused"),
         (StreamInterruptedError("connection lost"), "answer_interrupted"),
+        # Its kind of its own, though it is an answer that broke off to whoever doesn't
+        # know it: that one's words say the connection was lost.
+        (TookTooLongError("still answering after 300 s"), "model_too_slow"),
         (ProviderError("HTTP 500"), "model_error"),
         (UnsupportedServerError("Ollama 0.31 is too old"), "model_error"),
         (LLMError("something new"), "model_error"),

@@ -1835,7 +1835,7 @@
               }
             ],
             "title": "Finish Reason",
-            "description": "Why the model stopped, when it did by itself. `stop`: it had finished. `length`:\nit ran into the limit on a single answer's size. `context_window`: the conversation\nand the answer together filled the model's context window. A model's server that\ndoesn't count what it read and wrote says `length` for both limits, and so do turns\nrecorded before the two were told apart. A provider may give other reasons, such as\n`content_filter`."
+            "description": "Why the answer of a completed turn ended. `stop`: the model had finished.\n`length`: it ran into the limit on a single answer's size. `context_window`: the\nconversation and the answer together filled the model's context window. A model's\nserver that doesn't count what it read and wrote says `length` for both limits, and\nso do turns recorded before the two were told apart. `time_limit`: the model was\nstill writing when its server's time for a whole answer was over, and the answer\nstops there. A provider may give other reasons, such as `content_filter`."
           },
           "error": {
             "anyOf": [
@@ -1847,7 +1847,7 @@
               }
             ],
             "title": "Error",
-            "description": "For a failed turn, what went wrong, as a code: `model_unavailable`,\n`model_missing`, `context_overflow`, `model_refused`, `answer_interrupted`,\n`model_error`, `internal_error`."
+            "description": "For a failed turn, what went wrong, as a code: `model_unavailable`,\n`model_missing`, `context_overflow`, `model_refused`, `answer_interrupted`,\n`model_too_slow`, `model_error`, `internal_error`. `model_too_slow`: its server's\ntime for a whole answer was over before the model had written anything."
           },
           "input_tokens": {
             "anyOf": [
@@ -1892,7 +1892,7 @@
               }
             ],
             "title": "Context Tokens",
-            "description": "About how many tokens of the model's context window the conversation takes after\nthis turn: what the model was shown, and the words it answered with. What it only\nthought isn't kept for the next question, and isn't counted: where it thought and\nthen answered, the words' share of what it wrote is a guess, by characters. Empty\nwhile the turn runs, and when the model's server counted nothing, as for a stopped\nor failed turn."
+            "description": "About how many tokens of the model's context window the conversation takes after\nthis turn: what the model was shown, and the words it answered with. What it only\nthought isn't kept for the next question, and isn't counted: where it thought and\nthen answered, the words' share of what it wrote is a guess, by characters. Empty\nwhile the turn runs, and when the model's server counted nothing, as for a stopped\nor failed turn, or one whose answer was cut at its time."
           },
           "load_ms": {
             "anyOf": [

@@ -37,6 +37,7 @@ from actio_llm import (
     ReasoningDelta,
     StreamInterruptedError,
     TextDelta,
+    TookTooLongError,
     Usage,
 )
 
@@ -286,6 +287,107 @@ async def test_a_model_that_fails_after_its_first_word_fails_the_turn_and_no_sta
     assert (turn["status"], turn["error"]) == ("failed", code)
     assert (await chat.read())["messages"][1]["parts"] == [kept]
     assert stand_in.requests == []
+
+
+@pytest.mark.parametrize(
+    ("written", "kept"),
+    [
+        (TextDelta("Half an "), {"type": "text", "text": "Half an "}),
+        (ReasoningDelta("Let me think"), {"type": "reasoning", "text": "Let me think"}),
+    ],
+    ids=["after a word", "after a thought alone"],
+)
+async def test_an_answer_cut_at_its_servers_time_is_the_turns_and_no_stand_in_is_asked(
+    written: Any,
+    kept: dict[str, str],
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+) -> None:
+    """What was shown is that model's answer, which reached a limit: the turn completes
+    with it, and the model that stands in isn't asked."""
+    assert migrated
+    asked = lineup.add("standard", written, TookTooLongError("still answering"), then=["second"])
+    stand_in = lineup.add("second", TextDelta("Never."), DONE)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask()
+
+    turn = turn_of(response)
+    assert (turn["status"], turn["finish_reason"], turn["error"]) == (
+        "completed",
+        "time_limit",
+        None,
+    )
+    assert (await chat.read())["messages"][1]["parts"] == [kept]
+    assert (len(asked.requests), stand_in.requests) == (1, [])
+
+
+async def test_a_model_that_wrote_nothing_before_its_servers_time_was_over_is_answered_for(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Its server sent lines with no word in them until its time for an answer was over:
+    nothing was shown, and the model that stands in answers, as after any failure before
+    the first word. It isn't asked once more. The log names the error's kind, never its
+    text."""
+    assert migrated
+    asked = lineup.add(
+        "standard",
+        TextDelta(""),
+        TookTooLongError(f"still answering, {SECRET}"),
+        then=["second"],
+    )
+    stand_in = lineup.add("second", TextDelta("From the stand-in."), DONE)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask()
+
+    assert said(response) == "From the stand-in."
+    turn = turn_of(response)
+    assert (turn["status"], turn["finish_reason"], turn["error"]) == ("completed", "stop", None)
+    assert (len(asked.requests), len(stand_in.requests)) == (1, 1)
+    assert told(caplog, turn["id"]) == [
+        f"turn {turn['id']}: model standard failed (TookTooLongError), and second is asked next",
+        f"turn {turn['id']}: model second answered in place of standard",
+    ]
+    assert SECRET not in caplog.text
+
+
+async def test_a_stand_ins_answer_cut_at_its_servers_time_is_said_of_the_stand_in(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The time that was over is the server's of the model that was writing. The turn is
+    the asked model's, as ever, and the log names the one that answered."""
+    assert migrated
+    lineup.add("standard", ProviderUnavailableError("busy"), then=["second"])
+    lineup.add("second", TextDelta("Half an "), TookTooLongError(f"still answering, {SECRET}"))
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask()
+
+    turn = turn_of(response)
+    assert (turn["model"], turn["status"], turn["finish_reason"]) == (
+        "standard",
+        "completed",
+        "time_limit",
+    )
+    assert told(caplog, turn["id"]) == [
+        f"turn {turn['id']}: model standard failed (ProviderUnavailableError),"
+        " and second is asked next",
+        f"turn {turn['id']}: model second was still writing when its server's time for an"
+        " answer was over, and the answer stops here",
+        f"turn {turn['id']}: model second answered in place of standard",
+    ]
+    assert SECRET not in caplog.text
 
 
 @pytest.mark.parametrize(

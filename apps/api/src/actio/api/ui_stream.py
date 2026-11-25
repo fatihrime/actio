@@ -68,6 +68,9 @@ FINISH_REASONS = {
     "length": "length",
     # The library has no finer word: the turn's record in the metadata says which limit.
     "context_window": "length",
+    # The library's `length` is a limit on tokens, and this one is on time: the turn's
+    # record in the metadata says which.
+    "time_limit": "other",
     "tool_calls": "tool-calls",
     "content_filter": "content-filter",
 }

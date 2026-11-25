@@ -37,7 +37,15 @@ from actio.api import turns as turn_routes
 from actio.api import ui_stream
 from actio.chat import events
 from actio.core.settings import Settings
-from actio_llm import Finish, FinishReason, ReasoningDelta, TextDelta, Timings, Usage
+from actio_llm import (
+    Finish,
+    FinishReason,
+    ReasoningDelta,
+    TextDelta,
+    Timings,
+    TookTooLongError,
+    Usage,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -115,6 +123,20 @@ async def test_an_answer_cut_off_at_the_limit_streams_what_was_recorded(scripted
     response = await turn(browser, "Count to a hundred.")
 
     as_recorded("cut_off.sse", response.text)
+
+
+async def test_an_answer_cut_at_its_servers_time_streams_what_was_recorded(scripted: Any) -> None:
+    """Its model was still writing when its server's time for a whole answer was over:
+    the turn completes at a limit of its own, which the library's words can't say, and
+    is counted by guess, with none of a model's counts. For the web app, which says so,
+    and offers no other try."""
+    _, browser = await scripted(
+        TextDelta("One, two, "), TextDelta("three"), TookTooLongError("still answering")
+    )
+
+    response = await turn(browser, "Count to a hundred.")
+
+    as_recorded("took_too_long.sse", response.text)
 
 
 async def test_a_thought_that_used_up_the_answer_streams_what_was_recorded(
