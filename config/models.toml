@@ -115,6 +115,24 @@ kind = "ollama"
 #
 #   tokens_a_minute = 8000
 #
+# requests_a_minute  the same, of the requests the server takes in a minute
+# requests_a_day     ... in a day
+# tokens_a_day       ... and of the tokens it takes in a day, a request's and its answer's.
+#                    With tokens_a_minute, these are the model's budget: Actio counts
+#                    what it sends to the model, its requests and their tokens, in Valkey,
+#                    and keeps to nine tenths of each figure. A ready model that has
+#                    nothing left of one for a request isn't sent it while another model
+#                    of the same chain has some; when none has, each is asked all the
+#                    same. Each is the provider's own figure, a whole number of 1 or
+#                    more, and may be there without the others. Two models of this file
+#                    that are the same model on the same provider share one budget, and
+#                    state the same figures. Left out, the server has no such limit.
+#                    See docs/adr/0030-the-providers-budgets-are-counted.md:
+#
+#   requests_a_minute = 30
+#   requests_a_day = 1000
+#   tokens_a_day = 200000
+#
 # Several models on one Ollama: it keeps in memory what it decides it has room for, and
 # was seen to unload one model to load another on a machine with room for both. The page
 # asks for the model that answers to be loaded ahead, so with two models in use their

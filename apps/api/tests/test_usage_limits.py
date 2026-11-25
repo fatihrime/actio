@@ -23,6 +23,7 @@ from valkey.asyncio import Valkey
 
 from actio.catalog import OfferedModel
 from actio.chat import answering
+from actio.core.budget import Budgets
 from actio.core.database import create_engine, create_session_factory
 from actio.core.ids import new_id
 from actio.usage import ledger
@@ -698,7 +699,11 @@ class OneAnswer:
 
 
 async def test_a_turn_whose_outcome_cannot_be_written_is_not_counted(
-    limits: UsageLimits, db: AsyncSession, guest: Account, caplog: pytest.LogCaptureFixture
+    limits: UsageLimits,
+    valkey: Valkey,
+    db: AsyncSession,
+    guest: Account,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The ledger comes first. A turn that the database never heard the end of is not
     in the ledger, so the counters must not have it either: its hold is given back."""
@@ -724,6 +729,8 @@ async def test_a_turn_whose_outcome_cannot_be_written_is_not_counted(
             clock=lambda: NOON,
             usage=limits,
             reserved=reserved,
+            budgets=Budgets(valkey, prefix=f"test-{uuid.uuid4().hex}"),  # the model has none
+            tokens=reserved.prompt_tokens,
             emit=to_nobody,
             halt=answering.Halt(),
         )

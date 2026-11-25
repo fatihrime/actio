@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from actio import catalog as catalogs
 from actio.api.dependencies import get_clock, get_new_id
 from actio.app import create_app
-from actio.catalog import Catalog, CatalogFile, Gate, ModelStatus, OfferedModel
+from actio.catalog import Catalog, CatalogFile, Gate, ModelStatus, OfferedModel, budget_of
 from actio.chat import running as turn_runner
 from actio.core import jobs, schema
 from actio.core.database import create_engine, create_session_factory
@@ -533,6 +533,9 @@ def catalog_of(
 
 type State = Literal["ready", "missing", "unreachable"]
 
+SCRIPTED = "scripted"
+"""The provider of a `Lineup`'s models, as their budgets' keys name it."""
+
 
 class Lineup:
     """Models a test offers, each with a script of its own, on servers of the test's
@@ -541,8 +544,12 @@ class Lineup:
 
     A model may name others that stand in for it (`then`), and say what its server says
     of it (`state`), and whether it can reason (`thinking`). Each has a window of 4,096
-    tokens and answers of 512 at most, and no limit of tokens a minute, unless a test
-    says otherwise."""
+    tokens and answers of 512 at most, no limit of tokens a minute, and no budget, unless
+    a test says otherwise.
+
+    Each is on a provider called `scripted`, as `scripted-<its name>`, unless a test
+    gives it another name there (`on_server`): two models with the same name there that
+    each have a budget share it, as two models of a models file do."""
 
     def __init__(self) -> None:
         self._offered: dict[str, OfferedModel] = {}
@@ -561,6 +568,8 @@ class Lineup:
         context_window: int = 4096,
         max_output_tokens: int = 512,
         tokens_a_minute: int | None = None,
+        budget: Mapping[str, int] | None = None,
+        on_server: str | None = None,
     ) -> ScriptedModel:
         """Offer a model called `name` that follows `script`, behind `gate` if any. See
         `ScriptedModel` for `closes_when`, and `offer` for the rest."""
@@ -575,6 +584,8 @@ class Lineup:
             context_window=context_window,
             max_output_tokens=max_output_tokens,
             tokens_a_minute=tokens_a_minute,
+            budget=budget,
+            on_server=on_server,
         )
         return model
 
@@ -590,24 +601,33 @@ class Lineup:
         context_window: int = 4096,
         max_output_tokens: int = 512,
         tokens_a_minute: int | None = None,
+        budget: Mapping[str, int] | None = None,
+        on_server: str | None = None,
     ) -> None:
         """Offer `chat` as the model called `name`, behind `gate` if any: for a model
         that is more than its script, such as one whose server can load it ahead. `then`
         names the models asked in its place, `state` is what its server says of it,
         `thinking` whether it can reason, which a model that isn't ready never can, and
         `tokens_a_minute` how many tokens its server takes in a minute, which with its
-        window makes its room (`OfferedModel.room`)."""
+        window makes its room (`OfferedModel.room`), and nothing else.
+
+        `budget` gives it a budget, from what a models file would state of its
+        provider's limits, such as `{"requests_a_day": 10}`: each figure is kept as the
+        catalog keeps it (`actio.catalog.budget_of`). `on_server` is its name on its
+        server, `scripted-<name>` unless given."""
+        model = on_server or f"scripted-{name}"
         self._offered[name] = OfferedModel(
             name=name,
             title=name.capitalize(),
             kind="openai-compatible",
-            model=f"scripted-{name}",
+            model=model,
             context_window=context_window,
             max_output_tokens=max_output_tokens,
             chat=chat,
             gate=gate,
             then=tuple(then),
             tokens_a_minute=tokens_a_minute,
+            budget=None if budget is None else budget_of(SCRIPTED, model, budget),
         )
         self._thinking[name] = thinking
         self._states[name] = state

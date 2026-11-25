@@ -62,11 +62,15 @@ context_window = 8192
 max_output_tokens = 2048
 
 # Each of these two models holds 131,072 tokens, as Groq's list of models says: its
-# context_window. Groq's free plan takes 8,000 tokens a minute for each, as its answers'
-# headers said on 2026-11-25, and refuses a request larger than that whole: its
-# tokens_a_minute. A request larger than that, by Actio's guess, isn't sent to Groq
-# while another model that may answer it has room for it. `make preflight` prints the
-# figure for your account: raise it on a paid plan.
+# context_window. Groq's free plan takes, for each of them, 8,000 tokens a minute and
+# 1,000 requests a day, as its answers' headers said on 2026-11-25, and 30 requests a
+# minute and 200,000 tokens a day, as its documentation said that day: tokens_a_minute,
+# requests_a_day, requests_a_minute and tokens_a_day. It refuses a request larger than
+# its tokens a minute whole: a request larger than that, by Actio's guess, isn't sent to
+# Groq while another model that may answer it has room for it. Actio counts what it
+# sends to each model, and keeps to nine tenths of each figure: a model that has nothing
+# left of one for a request is passed over while another of its chain has some. `make
+# preflight` prints the headers' figures for your account: raise them on a paid plan.
 #
 # These models always reason, and "low" is the least they can be told: a turn that asks
 # for no reasoning gets that, and one that asks for reasoning gets "medium". Told "high",
@@ -82,6 +86,9 @@ provider = "groq"
 model = "openai/gpt-oss-120b"
 context_window = 131072
 tokens_a_minute = 8000
+tokens_a_day = 200000
+requests_a_minute = 30
+requests_a_day = 1000
 max_output_tokens = 2048
 thinking = true
 thinking_off = { reasoning_effort = "low" }
@@ -101,6 +108,9 @@ provider = "groq"
 model = "openai/gpt-oss-20b"
 context_window = 131072
 tokens_a_minute = 8000
+tokens_a_day = 200000
+requests_a_minute = 30
+requests_a_day = 1000
 max_output_tokens = 2048
 thinking = true
 thinking_off = { reasoning_effort = "low" }
@@ -110,7 +120,10 @@ thinking_on = { reasoning_effort = "medium" }
 # gemini-3.6-flash 5 requests a minute, 250,000 tokens a minute and 20 requests a day;
 # gemini-3.5-flash-lite 15 requests a minute, 250,000 tokens a minute and 500 requests
 # a day. So flash-lite is the one for more than a few questions a day. Yours are at
-# https://aistudio.google.com/rate-limit: no answer's headers state them.
+# https://aistudio.google.com/rate-limit: no answer's headers state them. They are each
+# model's requests_a_minute, tokens_a_minute and requests_a_day below. As for Groq's,
+# Actio keeps to nine tenths of each figure, and a model that has nothing left of one
+# for a request is passed over while another of its chain has some.
 #
 # context_window is the model's own window, 1,048,576 tokens, and tokens_a_minute the
 # 250,000 that the free tier allowed each model that day, which the Gemini API's
@@ -129,6 +142,8 @@ provider = "gemini"
 model = "gemini-3.6-flash"
 context_window = 1048576
 tokens_a_minute = 250000
+requests_a_minute = 5
+requests_a_day = 20
 max_output_tokens = 8192
 thinking = true
 thinking_on = { extra_body = { google = { thinking_config = { include_thoughts = true } } } }
@@ -145,6 +160,8 @@ provider = "gemini"
 model = "gemini-3.5-flash-lite"
 context_window = 1048576
 tokens_a_minute = 250000
+requests_a_minute = 15
+requests_a_day = 500
 max_output_tokens = 8192
 thinking = true
 thinking_off = {}

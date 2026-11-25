@@ -45,6 +45,10 @@ revision "a turn says which model answered, and the page says so"). The log says
 model was asked once more, which failed and was passed over, and which answered in
 another's place, never what an error said.
 
+A model whose provider's plan limits what this installation sends to it has a budget,
+and what each request to it takes is counted there, a second try's too, without ever
+failing the answer (`actio.catalog.counted`, ADR 0030).
+
 Recording a turn also settles what it cost. Credits were held for it before it started
 (`actio.usage.limits`). What it used goes into the usage ledger in the transaction that
 records its outcome, and only then are the counters told: see `_record`.
@@ -67,10 +71,11 @@ import anyio
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from actio.catalog import Gate, OfferedModel
+from actio.catalog import Gate, OfferedModel, counted
 from actio.chat import turns
 from actio.chat.parts import Part, ReasoningPart, TextPart
 from actio.chat.turns import Ending
+from actio.core.budget import Budgets
 from actio.core.text import storable
 from actio.usage.limits import Reserved, UsageLimits, can_be_recorded
 from actio_llm import (
@@ -317,6 +322,8 @@ async def answer(
     clock: Callable[[], datetime],
     usage: UsageLimits,
     reserved: Reserved,
+    budgets: Budgets,
+    tokens: int,
     emit: Callable[[Step], Awaitable[None]],
     halt: Halt,
     on_beat: Callable[[], Awaitable[None]] | None = None,
@@ -330,6 +337,10 @@ async def answer(
     one before it failed before anything of its answer was handed on, and was asked once
     more first when its failure could be gone in a moment. When every one of them
     failed, the turn records the error `actio_llm.Walk` raises.
+
+    A model that has a budget is asked through a client that counts in `budgets` what
+    each of its requests takes, from `tokens`, the guess at the prompt that the turn
+    was started with, by `clock` (`actio.catalog.counted`, ADR 0030).
 
     The turn was started before (`turns.ask`), and `reserved` holds the credits it may
     cost. This writes its outcome, and what it used, in a transaction of its own, from
@@ -355,7 +366,7 @@ async def answer(
         [
             Link(
                 asking.offered.name,
-                asking.offered.chat,
+                counted(asking.offered, budgets, tokens, clock),
                 asking.request,
                 _through(asking.offered.gate, turn_id, clock),
             )

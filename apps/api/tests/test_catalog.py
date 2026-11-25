@@ -8,39 +8,57 @@ and an OpenAI-compatible server by fakellm.
 import asyncio
 import json
 import tomllib
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx2
 import pytest
+from valkey.asyncio import Valkey
+from valkey.exceptions import ValkeyError
 
 from actio import catalog as catalogs
 from actio.catalog import (
+    LIMITS,
     Asked,
+    Budget,
     CatalogError,
     CatalogFile,
     Chain,
     Gate,
     ModelStatus,
     OfferedModel,
+    Spent,
     UnknownModelError,
+    budget_of,
+    counted,
+    kept,
     read_file,
 )
+from actio.core.budget import Bucket, Budgets, BudgetsUnavailableError
 from actio_fakellm.app import DEFAULT_MODELS as FAKE_MODELS
 from actio_fakellm.app import QUIET
 from actio_fakellm.app import create_app as create_fake_llm
 from actio_llm import (
+    ChatProvider,
     ChatRequest,
+    Finish,
+    FinishReason,
     Ollama,
     OpenAICompatible,
     ProviderUnavailableError,
+    ReasoningDelta,
     StreamEvent,
+    TextDelta,
     Timeouts,
     TookTooLongError,
+    Usage,
     User,
+    tokens_in,
 )
 
 pytestmark = pytest.mark.anyio
@@ -137,8 +155,10 @@ def test_the_file_in_the_repository_is_valid() -> None:
     assert [provider.begins_within_seconds for provider in file.providers.values()] == [None]
     assert [provider.answers_within_seconds for provider in file.providers.values()] == [None]
     assert [provider.timeouts.answer_s for provider in file.providers.values()] == [300]
-    # A local server takes as many tokens as the model holds: its room is its window.
+    # A local server takes as many tokens as the model holds: its room is its window. And
+    # as many requests as come: it has no budget.
     assert [model.tokens_a_minute for model in file.models.values()] == [None]
+    assert [model.stated for model in file.models.values()] == [dict.fromkeys(LIMITS)]
 
 
 def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() -> None:
@@ -181,7 +201,9 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
         for name, entry in file.providers.items()
     } == {standard.provider: (None, 300), hurried.provider: (3, 3), away.provider: (None, 300)}
     # The fake takes any number of tokens a minute: no model's room is less than its window.
+    # Nor does it limit anything else: no model has a budget.
     assert {model.tokens_a_minute for model in file.models.values()} == {None}
+    assert {tuple(model.stated.values()) for model in file.models.values()} == {(None,) * 4}
 
 
 async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
@@ -200,6 +222,15 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
         stand_ins = {model.name: model.then for model in catalog}
         chain = [model.name for model in catalog.chain("groq-large")]
         rooms = {model.name: model.room for model in catalog}
+        kept_to = {
+            model.name: None
+            if model.budget is None
+            else {
+                str(bucket): (bucket.provider, bucket.model, bucket.size)
+                for bucket in model.budget.buckets
+            }
+            for model in catalog
+        }
 
     assert (file.default, file.titles) == (shipped.default, shipped.titles)
     assert file.models[file.default] == shipped.models[shipped.default]
@@ -246,6 +277,58 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
         "groq-small": 8_000,
         "gemini-flash": 250_000,
         "gemini-lite": 250_000,
+    }
+    # What each free plan takes in a minute and a day, as Groq's answers and its
+    # documentation, and one free account's page of the Gemini API's, said on 2026-11-25:
+    # a model with none left for a request is passed over while another has some.
+    groq = {
+        "requests_a_minute": 30,
+        "requests_a_day": 1000,
+        "tokens_a_minute": 8000,
+        "tokens_a_day": 200_000,
+    }
+    assert {name: model.stated for name, model in file.models.items()} == {
+        "standard": dict.fromkeys(LIMITS),
+        "groq-large": groq,
+        "groq-small": groq,
+        "gemini-flash": {
+            "requests_a_minute": 5,
+            "requests_a_day": 20,
+            "tokens_a_minute": 250_000,
+            "tokens_a_day": None,
+        },
+        "gemini-lite": {
+            "requests_a_minute": 15,
+            "requests_a_day": 500,
+            "tokens_a_minute": 250_000,
+            "tokens_a_day": None,
+        },
+    }
+    # Nine tenths of each, under each model's own name on its server.
+    assert kept_to == {
+        "standard": None,
+        "groq-large": {
+            "requests a minute": ("groq", "openai/gpt-oss-120b", 27),
+            "requests a day": ("groq", "openai/gpt-oss-120b", 900),
+            "tokens a minute": ("groq", "openai/gpt-oss-120b", 7_200),
+            "tokens a day": ("groq", "openai/gpt-oss-120b", 180_000),
+        },
+        "groq-small": {
+            "requests a minute": ("groq", "openai/gpt-oss-20b", 27),
+            "requests a day": ("groq", "openai/gpt-oss-20b", 900),
+            "tokens a minute": ("groq", "openai/gpt-oss-20b", 7_200),
+            "tokens a day": ("groq", "openai/gpt-oss-20b", 180_000),
+        },
+        "gemini-flash": {
+            "requests a minute": ("gemini", "gemini-3.6-flash", 4),
+            "requests a day": ("gemini", "gemini-3.6-flash", 18),
+            "tokens a minute": ("gemini", "gemini-3.6-flash", 225_000),
+        },
+        "gemini-lite": {
+            "requests a minute": ("gemini", "gemini-3.5-flash-lite", 13),
+            "requests a day": ("gemini", "gemini-3.5-flash-lite", 450),
+            "tokens a minute": ("gemini", "gemini-3.5-flash-lite", 225_000),
+        },
     }
 
 
@@ -470,6 +553,41 @@ MISTAKES = {
         "models.big.tokens_a_minute",
     ),
 }
+# The three other limits of a model's budget, each with the same six mistakes, on a model
+# of either kind of server.
+for _key in ("requests_a_minute", "requests_a_day", "tokens_a_day"):
+    MISTAKES |= {
+        f"{_key} written as a word": (
+            "thinking = true",
+            f'thinking = true\n{_key} = "30"',
+            f"models.big.{_key}",
+        ),
+        f"{_key} that aren't whole": (
+            "thinking = true",
+            f"thinking = true\n{_key} = 30.5",
+            f"models.big.{_key}",
+        ),
+        f"{_key} written as a fraction": (
+            "max_output_tokens = 2048",
+            f"max_output_tokens = 2048\n{_key} = 30.0",
+            f"models.standard.{_key}",
+        ),
+        f"{_key} that are a yes": (
+            "thinking = true",
+            f"thinking = true\n{_key} = true",
+            f"models.big.{_key}",
+        ),
+        f"no {_key}": (
+            "max_output_tokens = 2048",
+            f"max_output_tokens = 2048\n{_key} = 0",
+            f"models.standard.{_key}",
+        ),
+        f"fewer {_key} than none": (
+            "thinking = true",
+            f"thinking = true\n{_key} = -30",
+            f"models.big.{_key}",
+        ),
+    }
 
 
 @pytest.mark.parametrize("mistake", MISTAKES)
@@ -613,13 +731,21 @@ READY = ModelStatus("ready", thinking=False)
 REASONS = ModelStatus("ready", thinking=True)
 AWAY = ModelStatus("unreachable", thinking=False)
 GONE = ModelStatus("missing", thinking=False)
+NONE_SPENT: dict[str, Spent] = {}
+"""What a look said when no model's budget is spent for a request: every one has budget."""
 
 
 def offered(
-    name: str, *, context_window: int = 8192, tokens_a_minute: int | None = None
+    name: str,
+    *,
+    context_window: int = 8192,
+    tokens_a_minute: int | None = None,
+    budget: dict[str, int] | None = None,
+    chat: Any = None,
 ) -> OfferedModel:
-    """A model on offer whose server is never asked: for the rules that only read it."""
-    never: Any = None
+    """A model on offer whose server is never asked, unless it is given a `chat`: for the
+    rules that only read it. `budget` is what a models file would state of its provider's
+    limits, on a provider called `cloud`."""
     return OfferedModel(
         name=name,
         title=name.capitalize(),
@@ -627,8 +753,9 @@ def offered(
         model=f"model-{name}",
         context_window=context_window,
         max_output_tokens=256,
-        chat=never,
+        chat=chat,
         tokens_a_minute=tokens_a_minute,
+        budget=None if budget is None else budget_of("cloud", f"model-{name}", budget),
     )
 
 
@@ -677,8 +804,8 @@ def test_a_request_as_large_as_a_models_room_is_asked_of_it_and_one_token_more_i
     small, large = offered("small", tokens_a_minute=8000), offered("large", context_window=131_072)
     chain = Chain(((small, READY), (large, READY)))
 
-    assert chain.asked_with(8000) == Asked(((small, READY), (large, READY)), ())
-    assert chain.asked_with(8001) == Asked(((large, READY),), (small,))
+    assert chain.asked_with(8000, NONE_SPENT) == Asked(((small, READY), (large, READY)), ())
+    assert chain.asked_with(8001, NONE_SPENT) == Asked(((large, READY),), (small,))
 
 
 def test_while_some_ready_models_have_room_only_those_are_asked_in_the_chains_order() -> None:
@@ -690,7 +817,9 @@ def test_while_some_ready_models_have_room_only_those_are_asked_in_the_chains_or
     fourth = offered("fourth", context_window=1_048_576, tokens_a_minute=250_000)
     chain = Chain(((first, READY), (second, REASONS), (third, READY), (fourth, READY)))
 
-    assert chain.asked_with(5000) == Asked(((second, REASONS), (fourth, READY)), (first, third))
+    assert chain.asked_with(5000, NONE_SPENT) == Asked(
+        ((second, REASONS), (fourth, READY)), (first, third)
+    )
 
 
 def test_when_no_ready_model_has_room_each_is_asked_and_none_is_passed_over() -> None:
@@ -698,16 +827,16 @@ def test_when_no_ready_model_has_room_each_is_asked_and_none_is_passed_over() ->
     alone is its own chain, and is asked whatever the request."""
     first, second = offered("first", tokens_a_minute=1000), offered("second", context_window=2000)
 
-    assert Chain(((first, READY), (second, REASONS))).asked_with(5000) == Asked(
+    assert Chain(((first, READY), (second, REASONS))).asked_with(5000, NONE_SPENT) == Asked(
         ((first, READY), (second, REASONS)), ()
     )
-    assert Chain(((first, READY),)).asked_with(5000) == Asked(((first, READY),), ())
+    assert Chain(((first, READY),)).asked_with(5000, NONE_SPENT) == Asked(((first, READY),), ())
 
 
 def test_a_stand_in_without_room_is_passed_over_while_the_asked_model_is_asked() -> None:
     asked, stand_in = offered("standard"), offered("second", tokens_a_minute=1000)
 
-    assert Chain(((asked, READY), (stand_in, READY))).asked_with(5000) == Asked(
+    assert Chain(((asked, READY), (stand_in, READY))).asked_with(5000, NONE_SPENT) == Asked(
         ((asked, READY),), (stand_in,)
     )
 
@@ -723,8 +852,511 @@ def test_a_model_that_isnt_ready_never_counts_as_one_with_room() -> None:
     roomy_but_not_ready = Chain(((small, READY), (away, AWAY), (smaller, READY), (gone, GONE)))
     tiny_and_away = Chain(((tiny, AWAY), (large, READY)))
 
-    assert roomy_but_not_ready.asked_with(5000) == Asked(((small, READY), (smaller, READY)), ())
-    assert tiny_and_away.asked_with(5000) == Asked(((large, READY),), ())
+    assert roomy_but_not_ready.asked_with(5000, NONE_SPENT) == Asked(
+        ((small, READY), (smaller, READY)), ()
+    )
+    assert tiny_and_away.asked_with(5000, NONE_SPENT) == Asked(((large, READY),), ())
+
+
+# --- A model's budget, and who is asked for it ----------------------------------------
+
+
+async def test_each_limit_of_a_budget_is_read_for_a_model_of_either_kind_of_server() -> None:
+    """Each the provider's own figure, of which a bucket keeps nine tenths, under the
+    provider's name and the model's on its server. A model that states none has no
+    budget, and one may state some and leave others out."""
+    file = parsed(
+        GOOD.replace(
+            "max_output_tokens = 2048",
+            "max_output_tokens = 2048\nrequests_a_minute = 30\ntokens_a_day = 200000",
+        ).replace(
+            "thinking = true", "thinking = true\nrequests_a_day = 1000\ntokens_a_minute = 8000"
+        )
+    )
+
+    async with (
+        catalogs.build(file, ollama_url="http://ollama") as catalog,
+        catalogs.build(parsed(GOOD), ollama_url="http://ollama") as without,
+    ):
+        standard, big = catalog.get("standard").budget, catalog.get("big").budget
+        left_out = [model.budget for model in without]
+
+    assert standard is not None
+    assert standard.buckets == (
+        Bucket("requests", "minute", "ollama", "qwen3.5:4b-q4_K_M", 27),
+        Bucket("tokens", "day", "ollama", "qwen3.5:4b-q4_K_M", 180_000),
+    )
+    assert big is not None
+    assert big.buckets == (
+        Bucket("requests", "day", "lab", "fake-chat", 900),
+        Bucket("tokens", "minute", "lab", "fake-chat", 7_200),
+    )
+    assert left_out == [None, None]
+    # The tokens a minute are the room's too, whole.
+    assert catalog.get("big").room == 8_000
+
+
+@pytest.mark.parametrize(
+    ("figure", "kept_to"),
+    [
+        (30, 27),
+        (1000, 900),
+        (8000, 7_200),
+        (200_000, 180_000),
+        (5, 4),
+        (20, 18),
+        (15, 13),
+        (500, 450),
+        (250_000, 225_000),
+        (2, 1),
+        (1, 1),
+    ],
+)
+def test_actio_keeps_to_nine_tenths_of_each_figure_rounded_down_and_one_at_the_least(
+    figure: int, kept_to: int
+) -> None:
+    assert kept(figure) == kept_to
+    budget = budget_of("cloud", "a-model", {"requests_a_day": figure})
+    assert budget is not None
+    assert [bucket.size for bucket in budget.buckets] == [kept_to]
+
+
+def test_a_budget_is_of_the_limits_a_models_file_names_and_none_of_none() -> None:
+    assert budget_of("cloud", "a-model", {}) is None
+    assert budget_of("cloud", "a-model", dict.fromkeys(LIMITS)) is None
+    with pytest.raises(ValueError, match="requests_a_week"):
+        budget_of("cloud", "a-model", {"requests_a_week": 10})
+
+
+AGAIN = """
+[models.again]
+title = "The lab's large model, once more"
+provider = "lab"
+model = "fake-chat"
+context_window = 32768
+max_output_tokens = 4096
+"""
+"""A third model: the same as `big`, on the same provider."""
+
+
+@pytest.mark.parametrize("key", list(LIMITS))
+@pytest.mark.parametrize(
+    ("big_states", "again_states", "said"),
+    [
+        (30, 31, "is 31 here and 30 in models.big"),
+        (30, None, "is left out here and 30 in models.big"),
+    ],
+    ids=["two figures", "one left out"],
+)
+def test_two_models_that_are_one_model_on_one_provider_state_the_same_budget(
+    key: str, big_states: int, again_states: int | None, said: str, tmp_path: Path
+) -> None:
+    """They share one budget, so a difference is a mistake of the file, in one line that
+    names the two models and the key."""
+    text = GOOD.replace("thinking = true", f"thinking = true\n{key} = {big_states}") + AGAIN
+    if again_states is not None:
+        text += f"{key} = {again_states}\n"
+    path = written(tmp_path, text)
+
+    with pytest.raises(CatalogError) as failure:
+        read_file(path)
+
+    assert f"models.again: `{key}` {said}" in str(failure.value)
+    assert "share one budget" in str(failure.value)
+
+
+async def test_two_models_that_state_the_same_budget_share_it_and_two_providers_never_do() -> None:
+    """The same model's name on two providers is two budgets, whatever each states."""
+    text = (
+        GOOD.replace("thinking = true", "thinking = true\nrequests_a_day = 1000")
+        + AGAIN
+        + "requests_a_day = 1000\n"
+        + """
+[providers.lab2]
+kind = "openai-compatible"
+url = "http://lab2.internal:8000/v1"
+
+[models.elsewhere]
+title = "The other lab's large model"
+provider = "lab2"
+model = "fake-chat"
+context_window = 32768
+max_output_tokens = 4096
+requests_a_day = 20
+"""
+    )
+
+    async with catalogs.build(parsed(text), ollama_url="http://ollama") as catalog:
+        big, again, elsewhere = (catalog.get(name).budget for name in ("big", "again", "elsewhere"))
+
+    assert big is not None
+    assert elsewhere is not None
+    assert big == again
+    assert big.buckets == (Bucket("requests", "day", "lab", "fake-chat", 900),)
+    assert elsewhere.buckets == (Bucket("requests", "day", "lab2", "fake-chat", 18),)
+
+
+SPENT = Spent(timedelta(seconds=12), Bucket("tokens", "minute", "cloud", "model-x", 7_200))
+"""What a look says of a model whose budget has nothing left for a request."""
+
+
+def test_a_model_with_no_budget_left_is_passed_over_while_another_has_some() -> None:
+    """Each with what the look said of it, in the chain's order."""
+    first, second, third = offered("first"), offered("second"), offered("third")
+    chain = Chain(((first, READY), (second, REASONS), (third, READY)))
+
+    assert chain.asked_with(1000, {"first": SPENT, "third": SPENT}) == Asked(
+        ((second, REASONS),), (), ((first, SPENT), (third, SPENT))
+    )
+
+
+def test_when_no_model_has_budget_left_all_of_those_with_room_are_asked() -> None:
+    """A count never refuses a request: those that have room are asked, in order, and
+    none is passed over for its budget. The one without room still is, for its room."""
+    first, second = offered("first"), offered("second")
+    small = offered("small", tokens_a_minute=500)
+    chain = Chain(((first, READY), (small, READY), (second, REASONS)))
+
+    assert chain.asked_with(1000, {"first": SPENT, "second": SPENT}) == Asked(
+        ((first, READY), (second, REASONS)), (small,)
+    )
+    assert Chain(((first, READY),)).asked_with(1000, {"first": SPENT}) == Asked(
+        ((first, READY),), ()
+    )
+
+
+def test_the_room_comes_first_and_a_model_without_room_is_said_for_its_room_alone() -> None:
+    small, spent, fits = offered("small", tokens_a_minute=500), offered("spent"), offered("fits")
+    chain = Chain(((small, READY), (spent, READY), (fits, READY)))
+
+    assert chain.asked_with(1000, {"small": SPENT, "spent": SPENT}) == Asked(
+        ((fits, READY),), (small,), ((spent, SPENT),)
+    )
+
+
+def test_when_no_model_has_room_those_of_all_the_ready_ones_with_budget_are_asked() -> None:
+    first, second = offered("first", context_window=500), offered("second", tokens_a_minute=500)
+    chain = Chain(((first, READY), (second, READY)))
+
+    assert chain.asked_with(1000, {"first": SPENT}) == Asked(
+        ((second, READY),), (), ((first, SPENT),)
+    )
+
+
+def test_a_model_that_isnt_ready_never_counts_as_one_with_budget() -> None:
+    """With the only budget left, it doesn't keep the ready one that has none from being
+    asked, and it isn't said to be over its budget either."""
+    spent, away = offered("spent"), offered("away")
+    chain = Chain(((spent, READY), (away, AWAY)))
+
+    assert chain.asked_with(1000, {"spent": SPENT}) == Asked(((spent, READY),), ())
+    assert chain.asked_with(1000, {"spent": SPENT, "away": SPENT}) == Asked(((spent, READY),), ())
+
+
+def model_budget(model: OfferedModel) -> Budget:
+    assert model.budget is not None
+    return model.budget
+
+
+@pytest.fixture
+async def valkey(valkey_url: str) -> AsyncIterator[Valkey]:
+    async with Valkey.from_url(valkey_url) as client:
+        yield client
+
+
+@pytest.fixture
+def budgets(valkey: Valkey) -> Budgets:
+    """Budgets on the session's Valkey, whose keys no other test shares."""
+    return Budgets(valkey, prefix=f"test-{uuid.uuid4().hex}")
+
+
+@pytest.fixture
+async def budgets_away() -> AsyncIterator[Budgets]:
+    """Budgets on an address where nothing listens."""
+    async with Valkey.from_url("valkey://127.0.0.1:1/0") as nowhere:
+        yield Budgets(nowhere)
+
+
+async def test_a_look_says_of_each_ready_model_with_a_budget_whether_a_request_fits(
+    budgets: Budgets,
+) -> None:
+    """One request from each bucket of requests and the guess from each of tokens: of
+    a model it doesn't fit, how long until it does, and the limit in the way, the one
+    that takes longest. A model without a budget, one whose budget the request fits, and
+    one that isn't ready, are not among them."""
+    tokens_first = offered("tokens", budget={"requests_a_minute": 30, "tokens_a_minute": 8000})
+    requests_first = offered("requests", budget={"requests_a_minute": 30, "tokens_a_minute": 8000})
+    fits = offered("fits", budget={"tokens_a_day": 200_000})
+    without, away = offered("without"), offered("away", budget={"requests_a_day": 1})
+    rpm, tpm = model_budget(tokens_first).buckets
+    other_rpm, other_tpm = model_budget(requests_first).buckets
+    # 500 tokens are 4,166 ms of 7,200 a minute, and a request 2,222 of 27.
+    await budgets.add((rpm, 27), (tpm, 7_000), (other_rpm, 27), (other_tpm, 6_900), now=NOON)
+    await budgets.add((model_budget(away).buckets[0], 1), now=NOON)
+    chain = Chain(
+        (
+            (tokens_first, READY),
+            (requests_first, READY),
+            (fits, READY),
+            (without, READY),
+            (away, AWAY),
+        )
+    )
+
+    found = await chain.look(budgets, 500, now=NOON)
+
+    assert found == {
+        "tokens": Spent(timedelta(milliseconds=2_499), tpm),
+        "requests": Spent(timedelta(milliseconds=2_222), other_rpm),
+    }
+    assert found["requests"].seconds == 3
+    assert Spent(timedelta(milliseconds=1), tpm).seconds == 1
+
+
+async def test_a_look_asks_valkey_nothing_when_no_ready_model_has_a_budget(
+    budgets_away: Budgets,
+) -> None:
+    """And says it can't be had when one has."""
+    plain, away = offered("plain"), offered("away", budget={"requests_a_day": 1})
+
+    assert await Chain(((plain, READY), (away, GONE))).look(budgets_away, 10, now=NOON) == {}
+    with pytest.raises(BudgetsUnavailableError):
+        await Chain(((away, READY),)).look(budgets_away, 10, now=NOON)
+
+
+# --- What a request takes -------------------------------------------------------------
+
+
+class Says:
+    """A model that says what it is told to, an error included, and remembers whether
+    its stream was closed."""
+
+    def __init__(self, *script: StreamEvent | Exception) -> None:
+        self.script = script
+        self.closed = False
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        assert request.messages
+        try:
+            for item in self.script:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            self.closed = True
+
+
+REQUEST = ChatRequest(model="model-counted", messages=[User("What moves the chain?")])
+GUESS = 120
+"""The guess at the request's prompt, as its caller made it."""
+
+
+async def taken(budgets: Budgets, budget: Budget) -> dict[str, int]:
+    """What each bucket of the budget holds taken, by its limit in words: read back
+    through a look, from how long until it is full again."""
+    waits = await budgets.look(*((b, b.size) for b in budget.buckets), now=NOON)
+    return {
+        str(b): round(wait / timedelta(milliseconds=1) * b.size / b.period_ms)
+        for b, wait in zip(budget.buckets, waits, strict=True)
+    }
+
+
+def counted_model(chat: Says) -> OfferedModel:
+    """A model whose budget keeps 9 requests and 900 tokens a minute: a token is worth
+    66 ms, so that a bucket a request took from lives for seconds, past the test's look."""
+    return offered("counted", chat=chat, budget={"requests_a_minute": 10, "tokens_a_minute": 1_000})
+
+
+async def read(chat: ChatProvider, *, into: list[StreamEvent]) -> None:
+    """Ask `chat` the request, and read its stream to its end or its error, keeping each
+    event in `into` as it comes."""
+    async with aclosing(chat.stream(REQUEST)) as events:
+        async for event in events:
+            into.append(event)  # noqa: PERF401 - one by one: the stream may raise after them
+
+
+async def test_a_model_without_a_budget_is_asked_through_its_own_client(budgets: Budgets) -> None:
+    plain = offered("plain", chat=Says())
+
+    assert counted(plain, budgets, GUESS, lambda: NOON) is plain.chat
+
+
+async def test_the_counted_client_hands_on_the_models_events_and_its_error_as_they_came(
+    budgets: Budgets,
+) -> None:
+    """The same objects: the walk sorts the error by its kind."""
+    thought, words, error = (
+        ReasoningDelta("Hm."),
+        TextDelta("A chain"),
+        ProviderUnavailableError("busy"),
+    )
+    model = counted_model(Says(thought, words, error))
+    received: list[StreamEvent] = []
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        await read(counted(model, budgets, GUESS, lambda: NOON), into=received)
+
+    assert [a is b for a, b in zip(received, (thought, words), strict=True)] == [True, True]
+    assert raised.value is error
+    assert await taken(budgets, model_budget(model)) == {
+        "requests a minute": 1,
+        "tokens a minute": GUESS + tokens_in("Hm." + "A chain"),
+    }
+
+
+async def test_a_stream_closed_before_its_end_takes_the_guess_and_what_was_handed_on(
+    budgets: Budgets,
+) -> None:
+    """As a title's reader closes it once it has the finish, or a turn's walk when it
+    is done with it: what was handed on, and nothing after it, counted by guess."""
+    chat = Says(TextDelta("A derailleur"), TextDelta(", mostly"), Finish(FinishReason.STOP, None))
+    model = counted_model(chat)
+
+    async with aclosing(counted(model, budgets, GUESS, lambda: NOON).stream(REQUEST)) as events:
+        first = await anext(events)
+
+    assert first == TextDelta("A derailleur")
+    assert chat.closed
+    assert await taken(budgets, model_budget(model)) == {
+        "requests a minute": 1,
+        "tokens a minute": GUESS + tokens_in("A derailleur"),
+    }
+
+
+class AfterAMoment(Budgets):
+    """Budgets that count only after the event loop has turned twice, as when a
+    connection to Valkey has to be made first: long enough for a cancellation that is
+    under way to reach whoever waits for them."""
+
+    def __init__(self, client: Valkey) -> None:
+        super().__init__(client, prefix=f"test-{uuid.uuid4().hex}")
+
+    async def add(self, *amounts: tuple[Bucket, int], now: datetime) -> None:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await super().add(*amounts, now=now)
+
+
+class HeldAfter:
+    """A model that says a few words, and then waits until its stream is closed."""
+
+    def __init__(self, *words: StreamEvent) -> None:
+        self.words = words
+        self.waiting = asyncio.Event()
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        assert request.messages
+        for event in self.words:
+            yield event
+        self.waiting.set()
+        await asyncio.Event().wait()  # nothing sets it
+
+
+async def test_a_stream_that_a_stop_closes_has_its_tokens_put_right_though_the_count_has_to_wait(
+    valkey: Valkey,
+) -> None:
+    """A turn is stopped through a cancel scope, inside which whatever waits is cancelled
+    again at every turn of the event loop (`answering.Halt`). What puts the tokens right
+    is shielded from it: without the shield, a count that has to wait a moment is
+    cancelled before it is sent, and the bucket keeps the guess alone."""
+    budgets = AfterAMoment(valkey)
+    chat = HeldAfter(TextDelta("Half an "))
+    model = offered(
+        "counted", chat=chat, budget={"requests_a_minute": 10, "tokens_a_minute": 1_000}
+    )
+    received: list[StreamEvent] = []
+    stop = anyio.CancelScope()
+
+    async def turn() -> None:
+        with stop:
+            await read(counted(model, budgets, GUESS, lambda: NOON), into=received)
+
+    running = asyncio.create_task(turn())
+    await asyncio.wait_for(chat.waiting.wait(), 5)
+    stop.cancel()
+    await asyncio.wait_for(running, 5)
+
+    assert received == [TextDelta("Half an ")]
+    assert await taken(budgets, model_budget(model)) == {
+        "requests a minute": 1,
+        "tokens a minute": GUESS + tokens_in("Half an "),
+    }
+
+
+async def test_each_part_of_what_a_request_takes_is_dated_when_it_happens(
+    budgets: Budgets,
+) -> None:
+    """The take when the request is sent, and the provider's count when the stream is
+    over: a minute after the take, the take has come back, and the count is all there
+    is."""
+    times = iter([NOON, NOON + timedelta(minutes=1)])
+    model = counted_model(Says(TextDelta("Fine."), Finish(FinishReason.STOP, Usage(300, 20))))
+
+    async with aclosing(
+        counted(model, budgets, GUESS, lambda: next(times)).stream(REQUEST)
+    ) as events:
+        async for _ in events:
+            pass
+
+    budget = model_budget(model)
+    waits = await budgets.look(
+        *((b, b.size) for b in budget.buckets), now=NOON + timedelta(minutes=1)
+    )
+    # Nothing of the request is left a minute after it was taken: only the count's
+    # difference, 200 tokens, taken a minute later.
+    assert waits == [timedelta(0), timedelta(milliseconds=200 * 60_000 // 900)]
+
+
+async def test_a_take_that_cant_be_counted_fails_nothing_and_nothing_is_put_right(
+    budgets_away: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    model = counted_model(Says(TextDelta("A chain."), Finish(FinishReason.STOP, Usage(30, 3))))
+
+    async with aclosing(
+        counted(model, budgets_away, GUESS, lambda: NOON).stream(REQUEST)
+    ) as events:
+        received = [event async for event in events]
+
+    assert received == [TextDelta("A chain."), Finish(FinishReason.STOP, Usage(30, 3))]
+    assert caplog.messages == [
+        "model counted: what a request to it took of its budget couldn't be counted"
+        " (ConnectionError)"
+    ]
+
+
+class AwayAfterTheTake(Budgets):
+    """Budgets that take a request, and then can't be reached."""
+
+    def __init__(self, client: Valkey) -> None:
+        super().__init__(client, prefix=f"test-{uuid.uuid4().hex}")
+        self.adds = 0
+
+    async def add(self, *amounts: tuple[Bucket, int], now: datetime) -> None:
+        self.adds += 1
+        if self.adds > 1:
+            raise BudgetsUnavailableError from ValkeyError("away")
+        await super().add(*amounts, now=now)
+
+
+async def test_a_stream_whose_tokens_cant_be_put_right_fails_nothing(
+    valkey: Valkey, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The take stays as it was: the guess."""
+    away_after = AwayAfterTheTake(valkey)
+    model = counted_model(Says(TextDelta("A chain."), Finish(FinishReason.STOP, Usage(30, 3))))
+
+    async with aclosing(counted(model, away_after, GUESS, lambda: NOON).stream(REQUEST)) as events:
+        received = [event async for event in events]
+
+    assert len(received) == 2
+    assert away_after.adds == 2
+    assert caplog.messages == [
+        "model counted: what a request to it took of its budget couldn't be counted (ValkeyError)"
+    ]
+    assert await taken(away_after, model_budget(model)) == {
+        "requests a minute": 1,
+        "tokens a minute": GUESS,
+    }
 
 
 # --- How many answers a server writes at once -----------------------------------------

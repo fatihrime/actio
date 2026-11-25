@@ -1,5 +1,6 @@
 """What a process holds open while it runs: its database pool and its Valkey client,
-and what counts in Valkey through that client."""
+and what counts in Valkey through that client: the rate limits, the usage limits, and
+the providers' budgets."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from valkey.asyncio import Valkey
 
 from actio.core import schema
+from actio.core.budget import Budgets
 from actio.core.database import create_engine, create_session_factory
 from actio.core.rate_limit import RateLimiter
 from actio.core.settings import Settings
@@ -31,6 +33,10 @@ class Resources:
     """The usage limits' counters (`actio.usage`). Built here once, for the API that
     counts every answer and for the worker that counts again what was missed, so that
     the two can't count under different keys."""
+    budgets: Budgets
+    """What the providers' plans let this installation send to their models (ADR 0030).
+    Built here once too, for the API's turns and the worker's titles, which ask the same
+    models, so that the two count each model's requests in the same buckets."""
     schema_head: str
     """The migration this code expects the database to be at."""
 
@@ -55,6 +61,7 @@ async def open_resources(settings: Settings) -> AsyncIterator[Resources]:
         limiter=RateLimiter(valkey, prefix=f"{settings.valkey_prefix}:rl"),
         # Beside the rate limits' keys, under the same prefix.
         quota=ValkeyQuota(valkey, prefix=f"{settings.valkey_prefix}:q"),
+        budgets=Budgets(valkey, prefix=f"{settings.valkey_prefix}:b"),
         schema_head=schema.head(),
     )
     try:

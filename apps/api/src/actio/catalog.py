@@ -13,7 +13,11 @@ what to call it at its provider, its limits, and the client to stream an answer 
   place when it can't answer before the first word, and `Catalog.chain_status` says
   which of them are ready (ADR 0028). `Chain.asked_with` says which of those are asked
   for a request of so many tokens: a model whose room is smaller is passed over while
-  another has room (`OfferedModel.room`, ADR 0029).
+  another has room (`OfferedModel.room`, ADR 0029), and then a model whose provider's
+  plan has nothing left for the request, by what `Chain.look` read of its budget, while
+  another has (`OfferedModel.budget`, ADR 0030).
+- `counted` gives the client a model is asked through, which counts in its budget what
+  each request takes of it.
 - `Catalog.load_ahead` has a model's server load it into memory before the first
   question to it, where the server can be asked to (ADR 0026): the model itself, never
   one that stands in for it.
@@ -27,14 +31,16 @@ Nothing here knows about HTTP: the routes are in `actio.api.catalog`.
 
 import asyncio
 import logging
+import math
 import os
-from collections.abc import AsyncIterator, Iterator, Mapping
-from contextlib import AsyncExitStack, asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
+import anyio
 import httpx2
 from pydantic import (
     BaseModel,
@@ -46,16 +52,24 @@ from pydantic import (
 )
 
 from actio.core import config_file
+from actio.core.budget import Bucket, Budgets, BudgetsUnavailableError, Counts, Period
 from actio.core.config_file import Name
 from actio.core.settings import Settings
 from actio_llm import (
     ChatProvider,
+    ChatRequest,
+    ConnectionFailedError,
+    Finish,
     LLMError,
     LoadsAhead,
     ModelNotFoundError,
     Ollama,
     OpenAICompatible,
+    ReasoningDelta,
+    StreamEvent,
+    TextDelta,
     Timeouts,
+    tokens_in,
 )
 from actio_llm.openai_compatible import OWN_MEMBERS
 
@@ -74,6 +88,21 @@ long as the first word of an answer to a model that isn't loaded. A provider may
 itself how long it is given to start an answer (`ProviderEntry.begins_within_seconds`)
 and to write a whole one (`ProviderEntry.answers_within_seconds`): those values are
 replaced for its models."""
+
+KEPT_PERCENT = 90
+"""How much of each figure the models file states of a provider's limits Actio keeps to,
+rounded down, and 1 at the least (`kept`): 27 of 30 requests a minute, 7,200 of 8,000
+tokens. The tenth left is for what Actio can't count: its guess at a request's prompt
+may be under what the provider counts, and its clock isn't the provider's (ADR 0030)."""
+
+LIMITS: dict[str, tuple[Counts, Period]] = {
+    "requests_a_minute": ("requests", "minute"),
+    "requests_a_day": ("requests", "day"),
+    "tokens_a_minute": ("tokens", "minute"),
+    "tokens_a_day": ("tokens", "day"),
+}
+"""The keys of a model's table that state its provider's limits for it, each with what it
+counts, and over which period: its budget's buckets, in this order."""
 
 type Kind = Literal["ollama", "openai-compatible"]
 
@@ -180,10 +209,29 @@ class ModelEntry(BaseModel):
     minute, as a cloud provider's plan says: the provider's own figure, for this model.
     A request larger than that fits in no minute there, and Groq's free plan was seen to
     refuse one whole, so it is part of the model's room (`OfferedModel.room`, ADR 0029),
-    whatever the server does with such a request. A whole number of 1 or more: a string,
-    a fraction, `8000.0` and `true` are mistakes. Nothing ties it to `context_window` or
+    whatever the server does with such a request. It is also one of the limits of the
+    model's budget, as `requests_a_minute` is. A whole number of 1 or more: a string, a
+    fraction, `8000.0` and `true` are mistakes. Nothing ties it to `context_window` or
     `max_output_tokens`: either may be the smaller. Left out: the server has no such
     limit."""
+    requests_a_minute: int | None = Field(default=None, ge=1, strict=True)
+    """How many requests the model's server takes from this installation's account in a
+    minute, as a cloud provider's plan says: the provider's own figure, for this model.
+    Actio counts what it sends to the model, keeps to `KEPT_PERCENT` of the figure, and
+    passes over a ready model that has none left for a request while another of its
+    chain has some (`OfferedModel.budget`, ADR 0030). A whole number of 1 or more, as
+    `tokens_a_minute` is. Left out: the server has no such limit."""
+    requests_a_day: int | None = Field(default=None, ge=1, strict=True)
+    """The same, of the requests the server takes in a day."""
+    tokens_a_day: int | None = Field(default=None, ge=1, strict=True)
+    """The same, of the tokens the server takes in a day: a request's prompt and its
+    answer."""
+
+    @property
+    def stated(self) -> dict[str, int | None]:
+        """What the table states of its provider's limits for the model, by key: each of
+        `LIMITS`, `None` where it is left out."""
+        return {key: getattr(self, key) for key in LIMITS}
 
     @model_validator(mode="after")
     def _leaves_room_for_the_prompt(self) -> Self:
@@ -253,7 +301,30 @@ class CatalogFile(BaseModel):
                     )
                 if model.then.count(stand_in) > 1:
                     raise ValueError(f'models.{name}: `then` names "{stand_in}" twice')
+        self._share_budgets_alike()
         return self
+
+    def _share_budgets_alike(self) -> None:
+        """Two models that name the same provider and the same model on it share one
+        budget (ADR 0030), so they state the same figures of its limits: a key left out
+        by one and given by the other differs too."""
+        first_of: dict[tuple[str, str], str] = {}
+        for name, model in self.models.items():
+            first = first_of.setdefault((model.provider, model.model), name)
+            if first == name:
+                continue
+            for key, theirs in self.models[first].stated.items():
+                mine = getattr(model, key)
+                if mine != theirs:
+                    raise ValueError(
+                        f"models.{name}: `{key}` is {_said(mine)} here and {_said(theirs)} in"
+                        f" models.{first}, the same model on the same provider: the two share"
+                        " one budget, and state the same figures of it"
+                    )
+
+
+def _said(figure: int | None) -> str:
+    return "left out" if figure is None else str(figure)
 
 
 def read_file(path: Path) -> CatalogFile:
@@ -313,6 +384,44 @@ class Gate:
 
 
 @dataclass(frozen=True, slots=True)
+class Budget:
+    """What a provider's plan lets this installation send to one of its models, as Actio
+    keeps to it (ADR 0030): a bucket for each of its limits that the models file states,
+    the size of each what is kept of the figure (`kept`). Two models of the file that are
+    one model on one provider have the same buckets: they share one budget."""
+
+    buckets: tuple[Bucket, ...]
+
+    def takes(self, *, requests: int, tokens: int) -> list[tuple[Bucket, int]]:
+        """Each bucket with an amount: `requests` for one of requests, `tokens` for one
+        of tokens."""
+        return [
+            (bucket, requests if bucket.counts == "requests" else tokens) for bucket in self.buckets
+        ]
+
+
+def kept(figure: int) -> int:
+    """What Actio keeps to of a figure a provider states: `KEPT_PERCENT` of it, rounded
+    down, and 1 at the least."""
+    return max(1, figure * KEPT_PERCENT // 100)
+
+
+def budget_of(provider: str, model: str, stated: Mapping[str, int | None]) -> Budget | None:
+    """The budget of the model called `model` on the provider called `provider`, from the
+    figures the models file states of its limits, by their keys (`LIMITS`, as
+    `ModelEntry.stated` gives them): `None` when it states none."""
+    unknown = set(stated) - set(LIMITS)
+    if unknown:
+        raise ValueError(f"not a limit of a model: {', '.join(sorted(unknown))}")
+    buckets = tuple(
+        Bucket(counts, period, provider, model, kept(figure))
+        for key, (counts, period) in LIMITS.items()
+        if (figure := stated.get(key)) is not None
+    )
+    return Budget(buckets) if buckets else None
+
+
+@dataclass(frozen=True, slots=True)
 class OfferedModel:
     """A model on offer: everything needed to ask it something."""
 
@@ -336,6 +445,12 @@ class OfferedModel:
     tokens_a_minute: int | None = None
     """How many tokens its server takes from this installation's account in a minute.
     `None`: no such limit."""
+    budget: Budget | None = None
+    """What its provider's plan lets this installation send to it, as Actio keeps to it:
+    a ready model with nothing left for a request is passed over while another of its
+    chain has budget (`Chain.look`, `Chain.asked_with`), and what each request to it
+    takes is counted there (`counted`). `None`: the models file states none of its
+    limits, and nothing is counted."""
 
     @property
     def room(self) -> int:
@@ -361,6 +476,22 @@ class ModelStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class Spent:
+    """What a look said of a model whose budget has nothing left for a request now
+    (`Chain.look`): how long until it has, and the limit in the way, the one of its
+    buckets that takes the longest to have room for it."""
+
+    wait: timedelta
+    limit: Bucket
+
+    @property
+    def seconds(self) -> int:
+        """The wait in whole seconds, rounded up, and 1 at the least: as the log says
+        it."""
+        return max(1, math.ceil(self.wait.total_seconds()))
+
+
+@dataclass(frozen=True, slots=True)
 class Asked:
     """The models of a chain that a request is asked of, and those passed over for it
     (`Chain.asked_with`)."""
@@ -370,6 +501,10 @@ class Asked:
     too_small: tuple[OfferedModel, ...]
     """Those that are ready and are passed over, their room smaller than the request,
     in the chain's order."""
+    spent: tuple[tuple[OfferedModel, Spent], ...] = ()
+    """Those that are ready, are not passed over for their room, and are passed over for
+    their budget, which has nothing left for the request now, in the chain's order: each
+    with what the look said of it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,21 +530,59 @@ class Chain:
         """Those that aren't `ready`, in order."""
         return [(offered, status) for offered, status in self.models if status.state != "ready"]
 
-    def asked_with(self, tokens: int) -> Asked:
-        """Which of the ready models are asked for a request of about `tokens`, a guess
-        at its prompt, and which are passed over for their room (ADR 0029).
+    async def look(self, budgets: Budgets, tokens: int, *, now: datetime) -> dict[str, Spent]:
+        """Whether one request, with a prompt of about `tokens` by Actio's guess, fits
+        the budget of each ready model of the chain that has one: those it doesn't fit
+        now, by their names, each with how long until it does and the limit in the way.
+        A model that has no budget, or isn't ready, is never among them.
 
-        A model has room when `tokens` is no larger than its `room`. While at least one
-        ready model has room, those that haven't are passed over, and the others are
-        asked, in the chain's order. When none has, every ready model is asked, in order,
-        and none is passed over: a guess chooses who is asked, and never refuses a
-        request. A model that isn't ready is passed over whatever its room, and never
-        counts as one that has room."""
+        One question to Valkey for the whole chain, and none when no ready model has a
+        budget. It writes nothing. Raises `BudgetsUnavailableError` when Valkey doesn't
+        answer."""
+        each = [
+            (offered, offered.budget.takes(requests=1, tokens=tokens))
+            for offered, _ in self.ready
+            if offered.budget is not None
+        ]
+        waits = iter(await budgets.look(*(take for _, takes in each for take in takes), now=now))
+        spent: dict[str, Spent] = {}
+        for offered, takes in each:
+            # The longest wait is the limit in the way: of two as long, the first.
+            wait, limit = max(
+                ((next(waits), bucket) for bucket, _ in takes), key=lambda found: found[0]
+            )
+            if wait > timedelta(0):
+                spent[offered.name] = Spent(wait, limit)
+        return spent
+
+    def asked_with(self, tokens: int, spent: Mapping[str, Spent]) -> Asked:
+        """Which of the ready models are asked for a request of about `tokens`, a guess
+        at its prompt, and which are passed over for their room (ADR 0029), or for their
+        budget, which `spent` says has nothing left for the request (`look`, ADR 0030).
+
+        The room first. A model has room when `tokens` is no larger than its `room`.
+        While at least one ready model has room, those that haven't are passed over;
+        when none has, every ready model is left, and none is passed over for its room.
+
+        Then the budget, of those left. A model has budget when `spent` doesn't name it:
+        it has no budget, or the look said that the request fits it now, or the look
+        couldn't be had and `spent` is empty. While at least one has budget, those are
+        asked, in the chain's order, and the others are passed over for their budget;
+        when none has, all of those left are asked, and none is passed over for its
+        budget. A guess, and a count, choose who is asked, and never refuse a request.
+
+        A model passed over for its room is not also said to be over its budget. A
+        model that isn't ready is passed over whatever its room or its budget, and never
+        counts as one that has either."""
         ready = self.ready
-        roomy = tuple((offered, status) for offered, status in ready if tokens <= offered.room)
-        if not roomy:
-            return Asked(tuple(ready), ())
-        return Asked(roomy, tuple(offered for offered, _ in ready if tokens > offered.room))
+        roomy = [(offered, status) for offered, status in ready if tokens <= offered.room]
+        left = roomy or ready
+        too_small = tuple(offered for offered, _ in ready if tokens > offered.room) if roomy else ()
+        budgeted = tuple((offered, status) for offered, status in left if offered.name not in spent)
+        if not budgeted:
+            return Asked(tuple(left), too_small)
+        over = tuple((offered, spent[offered.name]) for offered, _ in left if offered.name in spent)
+        return Asked(budgeted, too_small, over)
 
 
 class UnknownModelError(Exception):
@@ -545,6 +718,115 @@ class Catalog:
         return ModelStatus("ready", declared)  # a provider that can't be asked: take its word
 
 
+def counted(
+    offered: OfferedModel, budgets: Budgets, tokens: int, clock: Callable[[], datetime]
+) -> ChatProvider:
+    """The client to ask `offered` through, for requests whose prompt is about `tokens`
+    by Actio's guess, which its caller made once (ADR 0030). The model's own client when
+    it has no budget, and Valkey is asked nothing for it. Otherwise one around it, which
+    counts in the model's budget what each request takes:
+
+    - when its `stream` is called, which the walk does once the model's gate is passed,
+      and once for each try: one request from each bucket of requests, and the guess
+      from each bucket of tokens;
+    - when the stream is over, however it ended, the tokens are put right. After a
+      `Finish` with the provider's count, by that count, the prompt's cached part and
+      the answer included. After a `ConnectionFailedError` nothing was sent, and the
+      request and the guess are given back. After anything else, another error, a
+      `Finish` without a count, or a stream closed before its end by a stop, a cut or a
+      cancellation, the guess stays, and a guess at what was handed on of the answer,
+      its text and its reasoning, is added.
+
+    Each is dated by `clock`, when it happens. The model's events are handed on as they
+    come, and its errors as they came, the same objects: the walk sorts them by kind.
+    It never fails an answer: when Valkey doesn't answer, the log says so, by the
+    error's kind, and the stream goes on as if the model had no budget. After a take
+    that couldn't be counted, nothing is put right. A stream that a stop or a
+    cancellation closes puts its tokens right all the same.
+
+    `OfferedModel.chat` stays the bare client: whatever else is asked of a model's
+    server, whether it has the model, or a load ahead, isn't counted."""
+    if offered.budget is None:
+        return offered.chat
+    return _Counted(offered.name, offered.chat, offered.budget, budgets, tokens, clock)
+
+
+class _Counted:
+    """A model's client that counts what each request takes of its budget: see
+    `counted`."""
+
+    def __init__(
+        self,
+        name: str,
+        chat: ChatProvider,
+        budget: Budget,
+        budgets: Budgets,
+        tokens: int,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self._name = name
+        self._chat = chat
+        self._budget = budget
+        self._budgets = budgets
+        self._tokens = tokens
+        self._clock = clock
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        counting = await self._add(requests=1, tokens=self._tokens)
+        written: list[str] = []
+        finish: Finish | None = None
+        sent = True
+        try:
+            async with aclosing(self._chat.stream(request)) as events:
+                async for event in events:
+                    if isinstance(event, TextDelta | ReasoningDelta):
+                        written.append(event.text)
+                    elif isinstance(event, Finish):
+                        finish = event
+                    yield event
+        except ConnectionFailedError:
+            sent = False
+            raise
+        finally:
+            if counting:
+                # Shielded: a halted turn cancels whatever its stream waits for, and an
+                # unshielded wait for Valkey would be cancelled with it.
+                with anyio.CancelScope(shield=True):
+                    if not sent:  # nothing reached the server
+                        await self._add(requests=-1, tokens=-self._tokens)
+                    else:
+                        await self._add(requests=0, tokens=self._more(finish, written))
+
+    def _more(self, finish: Finish | None, written: list[str]) -> int:
+        """How many tokens a request that was sent took beyond the guess that was taken
+        for it, or fewer when negative."""
+        if finish is not None and finish.usage is not None:
+            return finish.usage.input_tokens + finish.usage.output_tokens - self._tokens
+        return tokens_in("".join(written))
+
+    async def _add(self, *, requests: int, tokens: int) -> bool:
+        """Add `requests` to the budget's buckets of requests and `tokens` to those of
+        tokens, now: taken, or given back when negative. Whether it was counted: not
+        when Valkey didn't answer, which the log says."""
+        amounts = [
+            (bucket, amount)
+            for bucket, amount in self._budget.takes(requests=requests, tokens=tokens)
+            if amount
+        ]
+        if not amounts:
+            return True
+        try:
+            await self._budgets.add(*amounts, now=self._clock())
+        except BudgetsUnavailableError as error:
+            logger.warning(
+                "model %s: what a request to it took of its budget couldn't be counted (%s)",
+                self._name,
+                type(error.__cause__).__name__,
+            )
+            return False
+        return True
+
+
 @asynccontextmanager
 async def build(
     file: CatalogFile,
@@ -615,6 +897,7 @@ async def build(
                 gate=gates[entry.provider],
                 then=entry.then,
                 tokens_a_minute=entry.tokens_a_minute,
+                budget=budget_of(entry.provider, entry.model, entry.stated),
             )
             for name, entry in file.models.items()
         }

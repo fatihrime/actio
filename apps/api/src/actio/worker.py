@@ -327,8 +327,17 @@ async def write_title(
     """Ask a model for the conversation's title, and write it, unless someone named the
     conversation meanwhile: see `titles.write`, which also says in the log what kept a
     title from being written. It raises `titles.NotWrittenError` when the model couldn't
-    give one for now, and the queue runs the job again, after the wait `listed` gives."""
-    await titles.write(resources.database, catalog, uuid.UUID(conversation_id), now=clock())
+    give one for now, and the queue runs the job again, after the wait `listed` gives.
+    What its request takes of the model's budget is counted in the buckets that the
+    API's turns count in too (`Resources.budgets`)."""
+    await titles.write(
+        resources.database,
+        catalog,
+        uuid.UUID(conversation_id),
+        now=clock(),
+        budgets=resources.budgets,
+        clock=clock,
+    )
 
 
 async def look_after_the_queue(queue: jobs.Queue, *, kept_for: timedelta) -> None:

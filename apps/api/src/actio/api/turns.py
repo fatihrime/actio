@@ -79,6 +79,7 @@ from actio.chat.events import EventsLostError, EventsUnavailableError, TurnEvent
 from actio.chat.parts import TextPart
 from actio.chat.readers import Reader, TooManyReadersError
 from actio.chat.turns import Begun
+from actio.core.budget import Budgets, BudgetsUnavailableError
 from actio.identity.sessions import Principal
 from actio.usage.limits import (
     Account,
@@ -218,8 +219,9 @@ async def start_turn(
     if not chain.ready:
         raise not_ready(offered.name, chain.status.state)
     # Whether the turn can ask for reasoning is the first ready one's to say: it is asked
-    # first, unless the request is larger than its room while another has room for it
-    # (below). That a guess passes it over changes nothing of what the turn may ask.
+    # first, unless the request is larger than its room, or its budget has nothing left
+    # for it, while another can take it (below). That a guess or a count passes it over
+    # changes nothing of what the turn may ask.
     if body.thinking and not chain.ready[0][1].thinking:
         raise Problem(422, "This model can't reason before it answers.", model=offered.name)
 
@@ -228,9 +230,17 @@ async def start_turn(
         db, body, conversation_id, principal.user_id, offered, new_id(), now, plan.answers_at_once
     )
     messages = context.for_model(begun.history, now=now)
-    # Actio's guess at the prompt: what the credits are held by, and what each model's
-    # room is held against.
+    # Actio's guess at the prompt: what the credits are held by, what each model's room
+    # is held against, and what a request is first counted as in a model's budget.
     tokens = prompt_tokens(messages)
+    # What the providers' plans have left for the request, for each ready model that has
+    # a budget (ADR 0030). A look that can't be had passes nobody over for a budget: the
+    # log says so below, with the turn's id.
+    try:
+        spent = await chain.look(resources.budgets, tokens, now=now)
+        unread = None
+    except BudgetsUnavailableError as error:
+        spent, unread = {}, type(error.__cause__).__name__
     # Before anything is committed: a turn that is refused here leaves nothing behind.
     # The credits are held for the asked model, at its price, whoever answers.
     reserved = await _reserve(usage, db, principal, begun, offered, tokens, now)
@@ -263,9 +273,10 @@ async def start_turn(
             "turn %s: model %s is %s, and is passed over", turn.id, passed.name, status.state
         )
     # A ready model whose room is smaller than the guess is passed over too, while
-    # another has room. When none has, every ready one is asked: a guess never refuses
-    # a turn.
-    asked = chain.asked_with(tokens)
+    # another has room; and then one whose budget has nothing left for the request,
+    # while another has. When none has, every one is asked: neither a guess nor a count
+    # refuses a turn.
+    asked = chain.asked_with(tokens, spent)
     for passed in asked.too_small:
         # Numbers alone: never a word of the question.
         logger.warning(
@@ -275,6 +286,22 @@ async def start_turn(
             passed.name,
             passed.room,
             tokens,
+        )
+    if unread is not None:
+        logger.warning(
+            "turn %s: the models' budgets couldn't be read (%s), and none is passed over for"
+            " its budget",
+            turn.id,
+            unread,
+        )
+    for passed, short in asked.spent:
+        logger.warning(
+            "turn %s: model %s has no budget left for the request for about %d s (%s): it is"
+            " passed over",
+            turn.id,
+            passed.name,
+            short.seconds,
+            short.limit,
         )
     asking = [
         answering.Asking(
@@ -304,6 +331,8 @@ async def start_turn(
             reserved,
             _Outlet(events, turn.id),
             halt,
+            budgets=resources.budgets,
+            tokens=tokens,
             ask_for_title=catalog.titles is not None,
         ),
     )
@@ -606,13 +635,16 @@ async def _write(
     out: _Outlet,
     halt: Halt,
     *,
+    budgets: Budgets,
+    tokens: int,
     ask_for_title: bool,
 ) -> None:
     """The turn itself: ask the models of `asking`, the one it names and those that
     stand in for it, that are ready, and send what the one that answers writes as
     chunks, from `start-step` to `[DONE]`. `start` was sent when the stream was opened.
-    `ask_for_title`: a model is named for titles, and the conversation's first turn that
-    completes asks it for one (`turns.finish`).
+    What each request to a model takes of its budget is counted in `budgets`, from
+    `tokens`, the guess at the prompt. `ask_for_title`: a model is named for titles, and
+    the conversation's first turn that completes asks it for one (`turns.finish`).
 
     This runs in a task of its own (`actio.chat.running`), whoever reads."""
     turn = begun.turn
@@ -629,6 +661,8 @@ async def _write(
             clock=clock,
             usage=usage,
             reserved=reserved,
+            budgets=budgets,
+            tokens=tokens,
             emit=lambda step: out.send(ui_stream.for_step(step)),
             halt=halt,
             on_beat=out.keep,

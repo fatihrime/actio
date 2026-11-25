@@ -16,6 +16,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -25,6 +26,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import QueuePool
+from valkey.asyncio import Valkey
 
 from actio import worker
 from actio.catalog import Catalog, Gate, ModelStatus, OfferedModel
@@ -33,6 +35,7 @@ from actio.chat.models import Conversation
 from actio.chat.parts import TextPart
 from actio.chat.turns import STALE_AFTER, Begun, Ending
 from actio.core import jobs
+from actio.core.budget import Budgets
 from actio.core.ids import new_id
 from actio.core.resources import Resources, open_resources
 from actio.core.settings import Settings
@@ -181,6 +184,19 @@ async def run_the_job(settings: Settings, catalog: Catalog, clock: Any, work_thr
     runs it, until nothing is left."""
     async with open_resources(settings) as resources:
         await work_through(the_title_job(resources, catalog, clock))
+
+
+async def writes(resources: Resources, catalog: Catalog, begun: Begun, clock: Any) -> None:
+    """The handler of the job alone, for the conversation `begun` started, as the worker
+    calls it: for a test that acts while the model writes."""
+    await titles.write(
+        resources.database,
+        catalog,
+        begun.conversation.id,
+        now=clock.now,
+        budgets=resources.budgets,
+        clock=lambda: clock.now,
+    )
 
 
 def the_title_job(resources: Resources, catalog: Catalog, clock: Any) -> jobs.Job:
@@ -773,9 +789,7 @@ async def test_a_rename_that_holds_the_conversation_as_the_title_is_written_is_w
     await ended(db, begun)
 
     async with open_resources(settings) as resources, resources.database() as renaming:
-        writing = asyncio.create_task(
-            titles.write(resources.database, catalog, begun.conversation.id, now=clock.now)
-        )
+        writing = asyncio.create_task(writes(resources, catalog, begun, clock))
         try:
             await held(model)
             conversation = await renaming.get(Conversation, begun.conversation.id)
@@ -921,12 +935,7 @@ async def test_two_runs_at_once_leave_one_title_and_no_error(
     await ended(db, begun)
 
     async with open_resources(settings) as resources:
-        runs = [
-            asyncio.create_task(
-                titles.write(resources.database, catalog, begun.conversation.id, now=clock.now)
-            )
-            for _ in range(2)
-        ]
+        runs = [asyncio.create_task(writes(resources, catalog, begun, clock)) for _ in range(2)]
         try:
             async with asyncio.timeout(PATIENCE_S):
                 await model.asked[0].wait()
@@ -1281,9 +1290,7 @@ async def test_a_job_cancelled_while_the_model_writes_is_cancelled_and_writes_no
     await ended(db, begun)
 
     async with open_resources(settings) as resources:
-        writing = asyncio.create_task(
-            titles.write(resources.database, catalog, begun.conversation.id, now=clock.now)
-        )
+        writing = asyncio.create_task(writes(resources, catalog, begun, clock))
         await held(model)
         writing.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1307,9 +1314,7 @@ async def test_no_connection_to_the_database_is_held_while_the_model_writes(
     async with open_resources(settings) as resources:
         pool = resources.engine.pool
         assert isinstance(pool, QueuePool)
-        writing = asyncio.create_task(
-            titles.write(resources.database, catalog, begun.conversation.id, now=clock.now)
-        )
+        writing = asyncio.create_task(writes(resources, catalog, begun, clock))
         try:
             await held(model)
             held_meanwhile = pool.checkedout()
@@ -1438,7 +1443,7 @@ async def test_a_title_gives_its_place_at_the_gate_back_once_the_models_stream_i
     await ended(db, begun)
 
     async with open_resources(settings) as resources, asyncio.timeout(PATIENCE_S):
-        await titles.write(resources.database, catalog, begun.conversation.id, now=clock.now)
+        await writes(resources, catalog, begun, clock)
 
     assert gate.closed_by_then == [True]
     assert not gate.full
@@ -1841,6 +1846,250 @@ async def test_when_no_model_has_room_for_the_titles_request_they_are_asked_as_e
     title, by, *_ = await named(db, begun.conversation.id)
     assert (title, by) == ("Fixing a flat tyre", "model")
     assert said(caplog) == []
+
+
+async def no_budget_left(settings: Settings, catalog: Catalog, *names: str) -> None:
+    """Leave nothing in the budgets of the models called `names`, at noon, under the
+    keys the worker and the API count under."""
+    async with open_resources(settings) as resources:
+        for name in names:
+            budget = catalog.get(name).budget
+            assert budget is not None
+            await resources.budgets.add(*((b, b.size) for b in budget.buckets), now=NOON)
+
+
+async def test_a_model_with_no_budget_left_for_the_titles_request_is_passed_over(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """It is never asked, the model that stands in writes the title, and the log says
+    why, with the wait and the limit in the way."""
+    named_one = lineup.add(
+        "standard", TextDelta("Never"), DONE, then=["second"], budget={"requests_a_day": 1}
+    )
+    lineup.add("second", TextDelta("Fixing a flat tyre"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    await no_budget_left(settings, catalog, "standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert named_one.requests == []
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model standard has no budget left for the"
+            " request for about 86400 s (requests a day): it is passed over",
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
+    ]
+
+
+async def test_when_no_model_has_budget_left_for_the_titles_request_they_are_asked_as_ever(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    named_one = lineup.add(
+        "standard",
+        TextDelta("Fixing a flat tyre"),
+        DONE,
+        then=["second"],
+        budget={"requests_a_day": 1},
+    )
+    stand_in = lineup.add("second", TextDelta("Never"), DONE, budget={"tokens_a_minute": 10})
+    catalog = lineup.catalog(titles="standard")
+    await no_budget_left(settings, catalog, "standard", "second")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert (len(named_one.requests), stand_in.requests) == (1, [])
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert said(caplog) == []
+
+
+async def test_budgets_that_cant_be_read_or_counted_keep_no_title_from_being_written(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Valkey for the budgets is away: nobody is passed over for a budget, the named
+    model writes the title, and the log says each, once."""
+    lineup.add(
+        "standard",
+        TextDelta("Fixing a flat tyre"),
+        DONE,
+        then=["second"],
+        budget={"requests_a_day": 1000},
+    )
+    stand_in = lineup.add("second", TextDelta("Never"), DONE, budget={"requests_a_day": 1000})
+    catalog = lineup.catalog(titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    async with (
+        open_resources(settings) as resources,
+        Valkey.from_url("valkey://127.0.0.1:1/0") as nowhere,  # nothing listens there
+        asyncio.timeout(PATIENCE_S),
+    ):
+        await writes(replace(resources, budgets=Budgets(nowhere)), catalog, begun, clock)
+
+    assert stand_in.requests == []
+    assert (await named(db, begun.conversation.id))[:2] == ("Fixing a flat tyre", "model")
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: the models' budgets couldn't be read"
+            " (ConnectionError), and none is passed over for its budget",
+        )
+    ]
+    assert (
+        "model standard: what a request to it took of its budget couldn't be counted"
+        " (ConnectionError)"
+    ) in caplog.messages
+
+
+async def test_what_a_titles_request_takes_is_dated_by_the_workers_clock_as_it_goes(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+) -> None:
+    """The take is dated when the request is sent, and the provider's count when the
+    answer is over, half a minute later by the worker's clock. By then the take has come
+    back, at 15 tokens a second, and what the count adds to it is all the bucket holds.
+    Dated by when the job began, the two would have come back together, and the bucket
+    would be full."""
+    named_one = lineup.add(
+        "standard",
+        lambda: clock.advance(seconds=30),
+        TextDelta("Fixing a flat tyre"),
+        Finish(FinishReason.STOP, Usage(input_tokens=400, output_tokens=20)),
+        budget={"tokens_a_minute": 1000},
+    )
+    catalog = lineup.catalog(titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    [request] = named_one.requests
+    guess = prompt_tokens(request.messages)
+    assert guess < 420  # the count adds to the guess
+    assert guess < 30 * 15  # and the guess has come back in half a minute
+    budget = catalog.get("standard").budget
+    assert budget is not None
+    [minute] = budget.buckets
+    async with open_resources(settings) as resources:
+        [full_in] = await resources.budgets.look((minute, minute.size), now=clock.now)
+    assert full_in == timedelta(milliseconds=(420 - guess) * 60_000 // 900)
+
+
+async def test_the_log_says_who_is_passed_over_for_its_room_before_who_for_its_budget(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One chain: the named model without room for the request, the next without budget
+    for it, and the third writes the title."""
+    small = lineup.add(
+        "standard", TextDelta("Never"), DONE, then=["second", "third"], tokens_a_minute=40
+    )
+    spent = lineup.add("second", TextDelta("Never"), DONE, budget={"requests_a_day": 1})
+    third = lineup.add("third", TextDelta("Fixing a flat tyre"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    await no_budget_left(settings, catalog, "second")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert (small.requests, spent.requests) == ([], [])
+    [request] = third.requests
+    assert (await named(db, begun.conversation.id))[:2] == ("Fixing a flat tyre", "model")
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model standard has room for 40 tokens, and"
+            f" the request is about {prompt_tokens(request.messages)}: it is passed over",
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second has no budget left for the"
+            " request for about 86400 s (requests a day): it is passed over",
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model third answered in place of standard",
+        ),
+    ]
+
+
+async def test_a_titles_request_is_counted_where_a_turn_finds_it(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    start_app: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The worker's title takes the one request a minute of the model's budget, and a
+    turn through the API right after finds none left: the model's stand-in answers it."""
+    named_one = lineup.add(
+        "standard",
+        TextDelta("Fixing a flat tyre"),
+        DONE,
+        then=["second"],
+        budget={"requests_a_minute": 1},
+    )
+    lineup.add("second", TextDelta("From the stand-in."), DONE)
+    catalog = lineup.catalog(titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+    await run_the_job(settings, catalog, clock, work_through)
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+
+    message = {"id": str(new_id()), "parts": [{"type": "text", "text": "Hello?"}]}
+    response = await asyncio.wait_for(
+        browser.post(f"/api/conversations/{new_id()}/turns", json={"message": message}),
+        PATIENCE_S,
+    )
+
+    assert (await named(db, begun.conversation.id))[:2] == ("Fixing a flat tyre", "model")
+    assert len(named_one.requests) == 1  # the title's
+    assert '"delta":"From the stand-in."' in response.text
+    assert any(
+        message.endswith(
+            ": model standard has no budget left for the request for about 60 s (requests a"
+            " minute): it is passed over"
+        )
+        and message.startswith("turn ")
+        for message in caplog.messages
+    )
 
 
 async def test_a_stand_in_without_room_isnt_asked_for_a_title_its_model_couldnt_give(

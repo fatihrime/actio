@@ -8,7 +8,8 @@ asks that model for a title of a few words, from the first question alone, and w
 over the first line, unless a person has renamed the conversation meanwhile. When that
 model can't answer, those that stand in for it are asked in its place, as for a turn,
 and as for a turn a model whose failure may be gone in a moment is asked once more
-first.
+first, and one whose room or budget is too small for the request is passed over while
+another isn't. What a title's request takes of a model's budget counts as a turn's does.
 
 Who named a conversation is on its row (`Conversation.title_by`): `question`, `model`,
 or `person`. Only `write` makes a `question` a `model`, and nothing writes over a
@@ -34,7 +35,7 @@ import asyncio
 import logging
 import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from datetime import datetime, timedelta
 from functools import partial
@@ -42,10 +43,11 @@ from functools import partial
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from actio.catalog import Catalog, OfferedModel
+from actio.catalog import Catalog, OfferedModel, counted
 from actio.chat import tree
 from actio.chat.models import Conversation
 from actio.chat.parts import Part, TextPart, from_stored
+from actio.core.budget import Budgets, BudgetsUnavailableError
 from actio_llm import (
     FOR_NOW,
     ChatRequest,
@@ -244,11 +246,16 @@ async def write(
     conversation_id: uuid.UUID,
     *,
     now: datetime,
+    budgets: Budgets,
+    clock: Callable[[], datetime],
 ) -> None:
     """Ask the model the catalog names for titles to name the conversation, and write
     what it says, unless someone has named the conversation meanwhile. The job
     `WRITE_TITLE` runs this. It reads and writes in transactions of its own, from
     `open_session`, and holds no connection to the database while the model writes.
+    `now` is when the job began; what a request to a model takes of its budget is
+    counted in `budgets`, under the keys a turn counts under, each by `clock` when it
+    happens (ADR 0030).
 
     It is safe to repeat, and to run beside itself. A conversation that is gone, or no
     longer named by its first question, is left as it is, and the model isn't asked.
@@ -274,7 +281,15 @@ async def write(
     question = await _first_question(open_session, conversation_id)
     if question is None:
         return
-    written = await _ask(catalog, catalog.get(catalog.titles), question, conversation_id, now=now)
+    written = await _ask(
+        catalog,
+        catalog.get(catalog.titles),
+        question,
+        conversation_id,
+        now=now,
+        budgets=budgets,
+        clock=clock,
+    )
     if written is None:
         return
     title = tidy(written)
@@ -329,6 +344,8 @@ async def _ask(
     conversation_id: uuid.UUID,
     *,
     now: datetime,
+    budgets: Budgets,
+    clock: Callable[[], datetime],
 ) -> str | None:
     """What the model wrote for a title: its text, never its reasoning. `None` when it
     won't give one: it is missing from its server, or the provider refused the request.
@@ -361,7 +378,11 @@ async def _ask(
     again later if one of them is `unreachable`, and not when all are `missing`. A ready
     model whose room is smaller than the request, by Actio's guess at it, is passed over
     while another of them has room, as for a turn (`Chain.asked_with`): the log says it,
-    with the two numbers."""
+    with the two numbers. So is one whose budget has nothing left for the request, while
+    another has, by one look at their budgets in `budgets`: the log says it, with the
+    wait and the limit in the way. A look that can't be had passes nobody over for a
+    budget, and the log says that too. What each request takes of a model's budget is
+    counted there, as a turn's is (`actio.catalog.counted`)."""
     try:
         async with asyncio.timeout(WRITTEN_WITHIN_S):
             chain = await catalog.chain_status(offered.name, now=now)
@@ -385,10 +406,16 @@ async def _ask(
                 )
             messages = [User(_asking(question))]
             # As for a turn: a ready model whose room is smaller than the guess at the
-            # request is passed over while another has room, and when none has, every
-            # ready one is asked.
+            # request is passed over while another has room, and then one whose budget
+            # has nothing left for it while another has; and when none has, every one is
+            # asked.
             tokens = prompt_tokens(messages)
-            asked = chain.asked_with(tokens)
+            try:
+                spent = await chain.look(budgets, tokens, now=now)
+                unread = None
+            except BudgetsUnavailableError as error:
+                spent, unread = {}, type(error.__cause__).__name__
+            asked = chain.asked_with(tokens, spent)
             for passed in asked.too_small:
                 logger.warning(
                     "conversation %s: model %s has room for %d tokens, and the request is"
@@ -398,11 +425,27 @@ async def _ask(
                     passed.room,
                     tokens,
                 )
+            if unread is not None:
+                logger.warning(
+                    "conversation %s: the models' budgets couldn't be read (%s), and none is"
+                    " passed over for its budget",
+                    conversation_id,
+                    unread,
+                )
+            for passed, short in asked.spent:
+                logger.warning(
+                    "conversation %s: model %s has no budget left for the request for about"
+                    " %d s (%s): it is passed over",
+                    conversation_id,
+                    passed.name,
+                    short.seconds,
+                    short.limit,
+                )
             walk = Walk(
                 [
                     Link(
                         model.name,
-                        model.chat,
+                        counted(model, budgets, tokens, clock),
                         ChatRequest(
                             model=model.model,
                             messages=messages,
