@@ -2,10 +2,10 @@ import { memo, useId } from "react";
 
 import type { ContextFill } from "@/lib/chat/context";
 
-/** How full the context window of the model that answers is, in this conversation: one
- * quiet line under the box where a question is written, such as "Context ▮▮▯▯ 39% full
- * · 3,214 of 8,192 tokens". The figure is the server's, and the words are
- * `contextFill`'s (`lib/chat/context.ts`).
+/** How full the context window of the model that answers is, in this conversation, or
+ * of the one that stood in for it last: one quiet line under the box where a question
+ * is written, such as "Context ▮▮▯▯ 39% full · 3,214 of 8,192 tokens". The figure is the
+ * server's, and the words are `contextFill`'s (`lib/chat/context.ts`).
  *
  * Its place is on the page from the box's first render, one line high, and empty until
  * there is a figure. Nothing in it wraps, so when the figure comes, changes or goes,

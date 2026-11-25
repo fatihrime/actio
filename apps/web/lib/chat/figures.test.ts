@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import type { Turn } from "@/lib/api/client";
-import { turn } from "@/tests/fake-api";
+import { chained, model, turn } from "@/tests/fake-api";
 
 import { figuresOf, SHORTEST_WRITING_MS } from "./figures";
 
 const ASKED = Date.parse("2026-11-10T12:00:00Z");
 const SECOND = 1000;
+/** The models on offer, as the page has read them: the one the turns here asked. */
+const OFFERED = [model()];
 
 /** The moment `ms` milliseconds after the question, as the API writes one. */
 function at(ms: number): string {
@@ -39,7 +41,7 @@ describe("figuresOf", () => {
       credits: 1234,
     });
 
-    expect(figuresOf(took)).toEqual([
+    expect(figuresOf(took, OFFERED)).toEqual([
       "8.5 tokens a second",
       "first word after 1.2 s",
       "1,234 credits",
@@ -55,11 +57,11 @@ describe("figuresOf", () => {
       credits: 50,
     });
 
-    expect(figuresOf(writing)).toEqual([]);
+    expect(figuresOf(writing, OFFERED)).toEqual([]);
   });
 
   it("says nothing when the record holds nothing", () => {
-    expect(figuresOf(ended())).toEqual([]);
+    expect(figuresOf(ended(), OFFERED)).toEqual([]);
   });
 
   describe("how fast the model wrote", () => {
@@ -72,7 +74,7 @@ describe("figuresOf", () => {
         finished_at: at(3 * SECOND),
       });
 
-      expect(figuresOf(took)[0]).toBe("8.5 tokens a second");
+      expect(figuresOf(took, OFFERED)[0]).toBe("8.5 tokens a second");
     });
 
     it.each([
@@ -88,7 +90,7 @@ describe("figuresOf", () => {
           finished_at: at(2 * SECOND),
         });
 
-        expect(figuresOf(took)[0]).toBe("37 tokens a second");
+        expect(figuresOf(took, OFFERED)[0]).toBe("37 tokens a second");
       },
     );
 
@@ -102,6 +104,7 @@ describe("figuresOf", () => {
             first_word_at: at(SECOND),
             finished_at: at(SECOND + ms),
           }),
+          OFFERED,
         );
       }
 
@@ -126,6 +129,7 @@ describe("figuresOf", () => {
             first_word_at: at(SECOND),
             finished_at: at(3 * SECOND),
           }),
+          OFFERED,
         );
       }
 
@@ -147,7 +151,7 @@ describe("figuresOf", () => {
         finished_at: at(3 * SECOND),
       });
 
-      expect(figuresOf(took)).toEqual(["first word after 1.0 s"]);
+      expect(figuresOf(took, OFFERED)).toEqual(["first word after 1.0 s"]);
     });
 
     it("is left out under 0.05 tokens a second, where it would say none of a model that wrote", () => {
@@ -155,6 +159,7 @@ describe("figuresOf", () => {
       const slow = (tokens: number) =>
         figuresOf(
           ended({ output_tokens: tokens, generation_ms: 100 * SECOND }),
+          OFFERED,
         );
 
       expect(slow(4)).toEqual([]);
@@ -177,7 +182,7 @@ describe("figuresOf", () => {
           generation_ms: 100 * SECOND,
         });
 
-        expect(figuresOf(took)).toEqual([words]);
+        expect(figuresOf(took, OFFERED)).toEqual([words]);
       },
     );
   });
@@ -187,11 +192,11 @@ describe("figuresOf", () => {
       // The API writes moments to the microsecond.
       const took = ended({ first_word_at: "2026-11-10T12:00:00.240567Z" });
 
-      expect(figuresOf(took)).toEqual(["first word after 240 ms"]);
+      expect(figuresOf(took, OFFERED)).toEqual(["first word after 240 ms"]);
     });
 
     it("is said when the first word came at the moment of the question", () => {
-      expect(figuresOf(ended({ first_word_at: at(0) }))).toEqual([
+      expect(figuresOf(ended({ first_word_at: at(0) }), OFFERED)).toEqual([
         "first word after 10 ms",
       ]);
     });
@@ -208,7 +213,7 @@ describe("figuresOf", () => {
         credits: 3,
       });
 
-      expect(figuresOf(took)).toEqual(["3 credits"]);
+      expect(figuresOf(took, OFFERED)).toEqual(["3 credits"]);
     });
   });
 
@@ -220,11 +225,67 @@ describe("figuresOf", () => {
       [1234, "1,234 credits"],
       [1_234_567, "1,234,567 credits"],
     ])("says %d credits as %s", (credits, words) => {
-      expect(figuresOf(ended({ credits }))).toEqual([words]);
+      expect(figuresOf(ended({ credits }), OFFERED)).toEqual([words]);
     });
 
     it("is left out when it can't be right", () => {
-      expect(figuresOf(ended({ credits: -3 }))).toEqual([]);
+      expect(figuresOf(ended({ credits: -3 }), OFFERED)).toEqual([]);
+    });
+  });
+
+  // Since ADR 0028 a model may name others that are asked in its place, and the turn is
+  // the asked one's whoever answered: its record names the one that wrote the answer
+  // (ADR 0028, revision "a turn says which model answered, and the page says so").
+  describe("which model wrote it", () => {
+    /** The models of an installation whose default one names a second to stand in for
+     * it. */
+    const CHAINED = chained().models;
+    /** A turn of the default model that the second answered, with a credit or two. */
+    const stoodIn = (changes: Partial<Turn> = {}) =>
+      ended({ answered_by: "second", credits: 2, ...changes });
+
+    it("is said last, by the title of the model that wrote it in the place of the one asked", () => {
+      const took = stoodIn({
+        output_tokens: 34,
+        generation_ms: 4 * SECOND,
+        first_word_at: at(1.2 * SECOND),
+        finished_at: at(3.2 * SECOND),
+      });
+
+      expect(figuresOf(took, CHAINED)).toEqual([
+        "8.5 tokens a second",
+        "first word after 1.2 s",
+        "2 credits",
+        "answered by Second model",
+      ]);
+      expect(figuresOf(stoodIn({ credits: null }), CHAINED)).toEqual([
+        "answered by Second model",
+      ]);
+    });
+
+    it("is said by the record's name for it, when the models no longer have it", () => {
+      expect(figuresOf(stoodIn(), OFFERED)).toEqual([
+        "2 credits",
+        "answered by second",
+      ]);
+    });
+
+    it("is not said of an answer the model asked wrote itself, nor of a turn whose record names no model", () => {
+      expect(figuresOf(stoodIn({ answered_by: "standard" }), CHAINED)).toEqual([
+        "2 credits",
+      ]);
+      // Recorded before the record named one: taken for the asked model's.
+      expect(figuresOf(stoodIn({ answered_by: null }), CHAINED)).toEqual([
+        "2 credits",
+      ]);
+    });
+
+    it("is not said before the models are read, and the rest is said as ever", () => {
+      expect(figuresOf(stoodIn(), null)).toEqual(["2 credits"]);
+    });
+
+    it("is not said while the answer is still being written", () => {
+      expect(figuresOf(stoodIn({ status: "running" }), CHAINED)).toEqual([]);
     });
   });
 });

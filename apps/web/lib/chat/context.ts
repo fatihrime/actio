@@ -3,11 +3,13 @@
 // turn (`context_tokens`): what goes back to a model with the next question, and what
 // doesn't, is its rule, and the page doesn't copy it. The page takes the newest figure
 // there is, divides it by the window, and adds up nothing (ADR 0015, revision "the page
-// says how full the model's window is").
+// says how full the model's window is"). The figure is the model's that answered its
+// turn, which may be one asked in the place of the one asked: so is the window (ADR
+// 0028, revision "a turn says which model answered, and the page says so").
 import type { Model, Turn } from "@/lib/api/client";
 import { shareOf } from "@/lib/usage";
 
-import { WHOLE } from "./figures";
+import { answeredBy, WHOLE } from "./figures";
 import { turnOf } from "./messages";
 import type { ChatMessage } from "./messages";
 
@@ -29,20 +31,36 @@ export interface ContextFill {
 
 /** What the meter says of the conversation `messages`, which `open` stands after when
  * it ends with a question (the turn that last tried to answer it), for `model`, the
- * model that answers. Nothing while no turn has a figure, before the model is known, or
- * when the newest figure is another model's: those are another window's tokens. A turn
- * that is running, was stopped or failed has no figure, and the one before it stands. */
+ * model that answers, among `models`, the models on offer.
+ *
+ * The newest figure is of the model that answered its turn (`answeredBy`), in that
+ * model's own window. It is said when that model may answer the next question: the
+ * model that answers, or one that stands in for it (`then`), whose window `models`
+ * says. Nothing while no turn has a figure, before the models are known, or when the
+ * newest figure is any other model's: those are another window's tokens, as when the
+ * model that costs nothing answers at a usage limit. A turn that is running, was
+ * stopped or failed has no figure, and the one before it stands. */
 export function contextFill(
   messages: ChatMessage[],
   open: Turn | null,
   model: Model | null,
+  models: readonly Model[] | null,
 ): ContextFill | null {
   const counted = newestCounted(messages, open);
-  if (counted === null || model === null || counted.model !== model.id) {
+  if (counted === null || model === null) {
+    return null;
+  }
+  const counter =
+    counted.model === model.id
+      ? model
+      : model.then.includes(counted.model)
+        ? models?.find((each) => each.id === counted.model)
+        : undefined;
+  if (counter === undefined) {
     return null;
   }
   const { tokens } = counted;
-  const window = model.context_window;
+  const window = counter.context_window;
   const { percent, label } = shareOf(tokens, window);
   return {
     percent,
@@ -52,7 +70,8 @@ export function contextFill(
   };
 }
 
-/** A turn's figure: the tokens its conversation takes, in the window of its model. */
+/** A turn's figure: the tokens its conversation takes, in the window of the model that
+ * answered it. */
 interface Figure {
   model: string;
   tokens: number;
@@ -81,6 +100,6 @@ function newestCounted(
 /** A turn's figure, if it has one: a turn that runs, was stopped or failed has none. */
 function figureOf(turn: Turn | null): Figure | null {
   return turn !== null && typeof turn.context_tokens === "number"
-    ? { model: turn.model, tokens: turn.context_tokens }
+    ? { model: answeredBy(turn), tokens: turn.context_tokens }
     : null;
 }

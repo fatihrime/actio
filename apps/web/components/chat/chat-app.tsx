@@ -444,6 +444,7 @@ function Current({
     id,
     holder,
     model: answers,
+    models: models?.models ?? null,
     // The models that cost nothing, as far as this installation still offers them.
     offers: (usage.reached?.free ?? []).flatMap(
       (free) => models?.models.find((model) => model.id === free) ?? [],
@@ -467,6 +468,7 @@ function StoredChat({
   id,
   holder,
   model,
+  models,
   offers,
   usage,
   onExists,
@@ -477,6 +479,7 @@ function StoredChat({
   id: string;
   holder: string | null;
   model: Model | null;
+  models: readonly Model[] | null;
   offers: Model[];
   usage: UsageLimits;
   onExists: () => void;
@@ -528,6 +531,7 @@ function StoredChat({
       stored={loaded.conversation}
       holder={holder}
       model={model}
+      models={models}
       offers={offers}
       usage={usage}
       onExists={onExists}

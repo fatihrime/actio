@@ -1,8 +1,9 @@
 // What an answer took, in words: how fast its model wrote, how long its first word
-// took, and what it cost. The server counts the tokens and the credits, and notes the
-// moments; the page only divides, and words the numbers (ADR 0015, revision "an answer
-// says what it took").
-import type { Turn } from "@/lib/api/client";
+// took, what it cost, and which model wrote it when that wasn't the one asked. The
+// server counts the tokens and the credits, notes the moments and names the model; the
+// page only divides, and words the numbers (ADR 0015, revision "an answer says what it
+// took"; ADR 0028, revision "a turn says which model answered, and the page says so").
+import type { Model, Turn } from "@/lib/api/client";
 import { timeTaken } from "@/lib/time";
 
 /** The shortest time of writing over which a rate is said, in milliseconds, whoever
@@ -16,10 +17,31 @@ export const SHORTEST_WRITING_MS = 250;
 /** Whole numbers, grouped as English groups them: "1,234". */
 export const WHOLE = new Intl.NumberFormat("en", { maximumFractionDigits: 0 });
 
+/** The model whose answer a turn holds, and whose its figures are: the one its record
+ * names (`answered_by`), the model asked or one asked in its place (ADR 0028). A turn
+ * recorded before the record named one is taken for the asked model's, `model`. The
+ * tokens a turn counted are that model's, in that model's own context window. */
+export function answeredBy(turn: Turn): string {
+  return turn.answered_by ?? turn.model;
+}
+
+/** Whether a model asked in the place of the one the turn asked wrote its answer. Never
+ * for a turn whose record names no model that answered. */
+export function answeredInPlace(turn: Turn): boolean {
+  return answeredBy(turn) !== turn.model;
+}
+
 /** What a turn took, as the words to show under its answer, in this order: how fast
- * its model wrote, how long its first word took, and what it cost. Only the figures its
- * record holds and that can be right; none while it is still being written. */
-export function figuresOf(turn: Turn): string[] {
+ * its model wrote, how long its first word took, what it cost, and, last, which model
+ * wrote it, when a model asked in the place of the one asked did: by its title among
+ * `models`, the models on offer, or by its name in the record when they no longer have
+ * it. That one waits for the models, `null` until they are read: last, so that nothing
+ * else in the list moves when it comes. Only the figures its record holds and that can
+ * be right; none while it is still being written. */
+export function figuresOf(
+  turn: Turn,
+  models: readonly Model[] | null,
+): string[] {
   if (turn.status === "running") {
     return [];
   }
@@ -40,6 +62,11 @@ export function figuresOf(turn: Turn): string[] {
     figures.push(
       `${WHOLE.format(credits)} ${credits === 1 ? "credit" : "credits"}`,
     );
+  }
+  if (models !== null && answeredInPlace(turn)) {
+    const by = answeredBy(turn);
+    const title = models.find((model) => model.id === by)?.title ?? by;
+    figures.push(`answered by ${title}`);
   }
   return figures;
 }

@@ -1,7 +1,14 @@
-import { Component, memo, useEffect, useSyncExternalStore } from "react";
+import {
+  Component,
+  createContext,
+  memo,
+  use,
+  useEffect,
+  useSyncExternalStore,
+} from "react";
 import type { ReactNode } from "react";
 
-import type { Turn } from "@/lib/api/client";
+import type { Model, Turn } from "@/lib/api/client";
 import { figuresOf } from "@/lib/chat/figures";
 import { isBlank, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
@@ -151,6 +158,14 @@ export function useWaitsForRenderer(words: boolean): boolean {
   return waits;
 }
 
+/** The models on offer, as the page last read them, or `null` until it has: what an
+ * answer took names the model that wrote it by its title there, when that wasn't the
+ * one asked (`figuresOf`). Given to the conversation's messages by `Chat`, and read by
+ * `Took` alone. A context, and no property of `Message`: the models are read again
+ * while the model that answers can't, and that draws `Took` again, never the answers'
+ * words. */
+export const ModelsOnOffer = createContext<readonly Model[] | null>(null);
+
 /** One message of a conversation: a question, or a model's answer.
  *
  * Drawn again only when its message or `writing` changed (`memo`): not at each step of
@@ -264,7 +279,10 @@ function Answer({
 /** What an answer took, once it is to be said: its words are shown, its turn has ended,
  * and, for an answer that arrived on this page, the frame with its last words has been
  * painted (`useSettled`, which says why). That wait is kept here, and not in `Answer`:
- * a frame later this is drawn again, and the answer's words are not. */
+ * a frame later this is drawn again, and the answer's words are not. So are the models
+ * on offer, which name the model that wrote the answer when another than the one asked
+ * did (`ModelsOnOffer`): read here, they draw this again when they come, and nothing
+ * else of the answer. */
 function Took({
   turn,
   writing,
@@ -275,12 +293,15 @@ function Took({
   waits: boolean;
 }) {
   const settled = useSettled(writing);
-  const figures = settled && !waits && turn !== null ? figuresOf(turn) : [];
+  const models = use(ModelsOnOffer);
+  const figures =
+    settled && !waits && turn !== null ? figuresOf(turn, models) : [];
   return figures.length > 0 ? <Figures figures={figures} /> : null;
 }
 
 /** What an answer took, in one quiet line under it: how fast its model wrote, how long
- * its first word took, what it cost (`figuresOf`). There for everyone, not on hover,
+ * its first word took, what it cost, and which model wrote it when another than the one
+ * asked did (`figuresOf`). There for everyone, not on hover,
  * which a phone and a keyboard don't have. A list a screen reader names, with an item a
  * figure; the dots between them are drawn, and have nothing to say. It is the answer's
  * next sibling in the log, which puts `gap-6` between its children: a margin of less

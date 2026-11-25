@@ -8,6 +8,7 @@ import { isId } from "@/lib/ids";
 import {
   answer,
   brokenAfter,
+  chained,
   conversation,
   fakeApi,
   GUEST,
@@ -48,6 +49,12 @@ const THOUGHT_TOO_SLOW =
 /** What it says of an interrupted turn. */
 const BROKE_OFF =
   "This answer broke off: the server that was writing it was restarted, or stopped answering.";
+/** What it says of an answer of a model that stood in for the one asked, and filled its
+ * own context window: with words, and without. */
+const STOOD_IN_FILLED =
+  "Another model answered in place of the one you asked, and the conversation has filled its context window: the answer stops here. Try again, or start a new chat to go on.";
+const STOOD_IN_FILLED_EMPTY =
+  "Another model answered in place of the one you asked, and the conversation has filled its context window: it wrote no answer. Try again, or start a new chat to go on.";
 
 /** What the page posted to start a turn. */
 interface Posted {
@@ -607,6 +614,32 @@ describe("an answer that doesn't arrive whole", () => {
       said: "The conversation has filled the model's context window, and the model wrote no answer. Start a new chat to go on.",
       again: false,
     },
+    // A model that stood in for the one asked filled its own window, which may be
+    // smaller: the model asked may answer another try (ADR 0028, revision "a turn says
+    // which model answered, and the page says so").
+    {
+      ending: "the end of the window of a model that stood in, after words",
+      by: { finish_reason: "context_window", answered_by: "second" },
+      left: "words",
+      said: STOOD_IN_FILLED,
+      again: true,
+    },
+    {
+      ending: "the end of the window of a model that stood in, before a word",
+      by: { finish_reason: "context_window", answered_by: "second" },
+      left: "nothing",
+      said: STOOD_IN_FILLED_EMPTY,
+      again: true,
+    },
+    {
+      // Recorded before the record named one: taken for the asked model's own.
+      ending:
+        "the end of the context window, of a turn whose record names no model that answered",
+      by: { finish_reason: "context_window", answered_by: null },
+      left: "words",
+      said: "The conversation has filled the model's context window, and the answer stops here. Start a new chat to go on.",
+      again: false,
+    },
     {
       ending: "the longest an answer may be, after words",
       by: { finish_reason: "length" },
@@ -709,6 +742,43 @@ describe("an answer that doesn't arrive whole", () => {
       }
     },
   );
+
+  it("asks the model asked again when told to, under the answer of one that stood in for it and filled its own window", async () => {
+    const api = fakeApi();
+    api
+      .on("GET /api/models", () => json(200, chained()))
+      .on(CONVERSATION, () =>
+        json(
+          200,
+          conversation(RECORDED.conversation, [
+            question(RECORDED.question, "Why is the sky blue?"),
+            answer(
+              RECORDED.answer,
+              "Blue light",
+              RECORDED.question,
+              turn({ finish_reason: "context_window", answered_by: "second" }),
+            ),
+          ]),
+        ),
+      )
+      .on(TURNS, () => streamed("answer.sse", SECOND_ANSWER));
+    const user = open(`/c/${RECORDED.conversation}`);
+    expect(await screen.findByText(STOOD_IN_FILLED)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByText("Echo: Why is the sky blue?"),
+    ).toBeInTheDocument();
+    // Another answer to the same question, of the model the page asks: the default one.
+    expect(posted(api.to(TURNS)[0])).toEqual({
+      answer_to: RECORDED.question,
+      thinking: false,
+    });
+    expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
+    await afterAMoment();
+    expect(screen.queryByText(STOOD_IN_FILLED)).not.toBeInTheDocument();
+  });
 
   it("says so as it arrives when the model was still thinking at the longest an answer may be, and asks again as the switch says then", async () => {
     // Asked to think, the model thought until it had written all a single answer may

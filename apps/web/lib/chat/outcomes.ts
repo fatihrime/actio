@@ -2,6 +2,8 @@
 import { ApiProblem } from "@/lib/api/client";
 import type { Model, Turn } from "@/lib/api/client";
 
+import { answeredInPlace } from "./figures";
+
 /** What the API stores for a failed turn is a code (`TurnOut.error`). These are the
  * words for each. The API has its own, which it sends while streaming; the page
  * shows these, so a turn reads the same live and after a reload. */
@@ -29,7 +31,12 @@ const FAILURES: Record<string, string> = {
  * says which limit its answer reached"): the end of the model's context window, which
  * the conversation and the answer filled together (`context_window`), the longest a
  * single answer may be (`length`), or the longest it may take, which its model's server
- * is given (`time_limit`, ADR 0028, revision "the longest an answer may take"). */
+ * is given (`time_limit`, ADR 0028, revision "the longest an answer may take").
+ *
+ * The window that was filled is the one of the model that answered. When that was a
+ * model asked in the place of the one asked, the page says so, and another try is
+ * offered: the model asked may answer it (ADR 0028, revision "a turn says which model
+ * answered, and the page says so"). */
 export function outcomeOf(turn: Turn, answered: boolean): string | null {
   switch (turn.status) {
     case "failed":
@@ -52,6 +59,11 @@ export function outcomeOf(turn: Turn, answered: boolean): string | null {
 
 /** What is said of a turn that completed. */
 function completedWith(turn: Turn, answered: boolean): string | null {
+  if (turn.finish_reason === "context_window" && answeredInPlace(turn)) {
+    return answered
+      ? "Another model answered in place of the one you asked, and the conversation has filled its context window: the answer stops here. Try again, or start a new chat to go on."
+      : "Another model answered in place of the one you asked, and the conversation has filled its context window: it wrote no answer. Try again, or start a new chat to go on.";
+  }
   if (turn.finish_reason === "context_window") {
     return answered
       ? "The conversation has filled the model's context window, and the answer stops here. Start a new chat to go on."
@@ -86,13 +98,14 @@ function completedWith(turn: Turn, answered: boolean): string | null {
 /** Whether a turn left its question open for another try: it ended any other way than
  * completed, or it completed and left no answer with words in it (`answered`, as for
  * `outcomeOf`). Not at the end of the context window: another try of the same
- * question meets it again. */
+ * question meets it again. But for the window of a model asked in the place of the
+ * one asked: the one asked may answer another try. */
 export function canRetry(turn: Turn, answered: boolean): boolean {
   if (turn.status === "running") {
     return false;
   }
   if (turn.status === "completed" && turn.finish_reason === "context_window") {
-    return false;
+    return answeredInPlace(turn);
   }
   return turn.status !== "completed" || !answered;
 }

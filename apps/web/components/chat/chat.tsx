@@ -38,7 +38,7 @@ import type { UsageLimits } from "@/lib/usage";
 import { Composer } from "./composer";
 import { ContextMeter } from "./context-meter";
 import { useFollow } from "./follow";
-import { fetchRenderer, Message, Waiting } from "./message";
+import { fetchRenderer, Message, ModelsOnOffer, Waiting } from "./message";
 import { useSettled } from "./settled";
 
 const SETUP_GUIDE = "https://fatihrime.github.io/actio/getting-started/#models";
@@ -164,13 +164,14 @@ async function readConversation(id: string): Promise<Conversation | null> {
  * is handed to `usage`, which holds the limit until it starts over: nothing is sent
  * meanwhile, unless a model that costs nothing was chosen to carry on with. And so is
  * how much of the model's window the conversation takes, which the line under the box
- * says of the model that answers (`ContextMeter`).
+ * says of the model that answers, or of one that stands in for it (`ContextMeter`).
  */
 export function Chat({
   id,
   stored,
   holder,
   model,
+  models,
   offers,
   usage,
   onExists,
@@ -187,6 +188,9 @@ export function Chat({
   /** The model that answers, once known: the installation's default one, or the one
    * that was chosen to carry on with at a usage limit. */
   model: Model | null;
+  /** The models on offer, once read: which say the title of a model that answered in
+   * another's place, and the window of one that stands in for `model`. */
+  models: readonly Model[] | null;
   /** The models that cost nothing, to offer when a usage limit is reached. */
   offers: Model[];
   /** The usage limits of whoever has the session. */
@@ -724,7 +728,10 @@ export function Chat({
           : null;
 
   return (
-    <>
+    // What an answer took names the model that wrote it by its title, when another than
+    // the one asked did: the models are read by that alone, and no answer's words are
+    // drawn again when they come, or are read again (message.tsx).
+    <ModelsOnOffer value={models}>
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
           <div
@@ -954,9 +961,9 @@ export function Chat({
           />
           {/* Under the box, and not in its row, which a narrow window leaves no room
             in. Its place is there from the first render, with a figure or without. */}
-          <ContextMeter fill={contextFill(messages, open, model)} />
+          <ContextMeter fill={contextFill(messages, open, model, models)} />
         </div>
       </div>
-    </>
+    </ModelsOnOffer>
   );
 }

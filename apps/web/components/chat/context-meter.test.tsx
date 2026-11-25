@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import type { MessageMetadata, Turn } from "@/lib/api/client";
 import {
   answer,
+  chained,
   conversation,
   fakeApi,
   freeModel,
@@ -317,6 +318,30 @@ describe("how full the model's window is", () => {
       `100% full: ${tokens.toLocaleString("en")} of 8,192 tokens. Start a new chat soon.`,
     );
     expect(shown?.firstElementChild).toHaveStyle({ width: "100%" });
+  });
+
+  it("says the figure of a model that stood in for the one asked in that model's own window", async () => {
+    // The default model names a second to stand in for it, with a window of 2,048, a
+    // quarter of its own, and the second answered: 1,500 tokens read and 36 written.
+    expect(recordedTurn("stood_in.sse")).toMatchObject({
+      model: "standard",
+      answered_by: "second",
+      context_tokens: 1_536,
+    });
+    fakeApi()
+      .on(MODELS, () => json(200, chained()))
+      .on(TURNS, () => streamed("stood_in.sse"));
+    const user = open();
+
+    await ask(user, "Who answers?");
+
+    await waitFor(() => {
+      expect(meter()).toHaveAttribute(
+        "aria-valuetext",
+        "75% full: 1,536 of 2,048 tokens",
+      );
+    });
+    expect(words()).toHaveTextContent(/^75% full · 1,536 of 2,048 tokens$/);
   });
 
   it("goes when the model that answers is another than the one the figure is of", async () => {
