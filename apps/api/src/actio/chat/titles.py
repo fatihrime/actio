@@ -344,7 +344,8 @@ async def _ask(
     with a request of its own, behind its own gate, each asked once more first after a
     connection that failed at once, or a server that asked to wait two seconds at most,
     and all of it inside `WRITTEN_WITHIN_S`, the pause before a second try too. When all
-    of them failed, the walk's error decides, by the rule of `FOR_NOW`.
+    of them failed, the walk's error decides, by the rule of `FOR_NOW`. When one asked
+    in its place answered, the log says which, as a turn's does, whatever it wrote.
 
     A request is shaped as a turn's is, where the two meet: the model's own context
     window, since a local server reloads its model when that changes, and reasoning off,
@@ -400,7 +401,17 @@ async def _ask(
                 on_again=partial(_asked_again, conversation_id),
             )
             async with aclosing(walk.stream()) as events:
-                return await _text_of(events)
+                written = await _text_of(events)
+            if walk.answered is not None and walk.answered.name != offered.name:
+                # In the words of a turn's line. Not "wrote the title": what it wrote
+                # may be nothing to make a title of, and the line after this says so.
+                logger.warning(
+                    "conversation %s: model %s answered in place of %s",
+                    conversation_id,
+                    walk.answered.name,
+                    offered.name,
+                )
+            return written
     except LLMError as error:
         said = f"no title, its model failed ({type(error).__name__})"
         logger.warning("conversation %s: %s", conversation_id, said)

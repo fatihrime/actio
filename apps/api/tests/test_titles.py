@@ -1635,7 +1635,7 @@ async def test_a_model_that_stands_in_writes_the_title_when_the_named_one_cant(
 ) -> None:
     """Asked as the named one is, with a request of its own: its name on its server, its
     own window, and reasoning off only for a model that can reason. The log says which
-    failed, by its error's kind, and which was asked next."""
+    failed, by its error's kind, which was asked next, and which answered."""
     named_one = lineup.add(
         "standard",
         ProviderUnavailableError(f"busy with: {QUESTION}"),
@@ -1672,9 +1672,75 @@ async def test_a_model_that_stands_in_writes_the_title_when_the_named_one_cant(
             logging.WARNING,
             f"conversation {begun.conversation.id}: model standard failed"
             " (ProviderUnavailableError), and second is asked next",
-        )
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
     ]
     assert "flat tyre on my bike" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("named_one", "stand_in", "by", "lines"),
+    [
+        ([TextDelta("Fixing a flat tyre"), DONE], [TextDelta("Never"), DONE], "model", []),
+        (
+            [ProviderUnavailableError("busy")],
+            [TextDelta("Fixing a flat tyre"), DONE],
+            "model",
+            [
+                "model standard failed (ProviderUnavailableError), and second is asked next",
+                "model second answered in place of standard",
+            ],
+        ),
+        (
+            [ProviderUnavailableError("busy")],
+            [DONE],
+            "question",
+            [
+                "model standard failed (ProviderUnavailableError), and second is asked next",
+                "model second answered in place of standard",
+                "its model wrote nothing to make a title of, and it keeps its first line",
+            ],
+        ),
+    ],
+    ids=[
+        "the named one wrote it",
+        "the one that stands in wrote it",
+        "the one that stands in answered with nothing",
+    ],
+)
+async def test_the_log_says_which_model_answered_for_a_title_only_when_one_stood_in(
+    named_one: list[Any],
+    stand_in: list[Any],
+    by: str,
+    lines: list[str],
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """In the words of a turn's line, with names and ids only: never the title, nor the
+    question. It says which model answered, not that a title was written: one that
+    answered with nothing to make a title of is named too, and the line after it says
+    that none came. An answer of the model named for titles is no news."""
+    lineup.add("standard", *named_one, then=["second"])
+    lineup.add("second", *stand_in)
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, lineup.catalog(titles="standard"), clock, work_through)
+
+    title, named_by, *_ = await named(db, begun.conversation.id)
+    assert named_by == by
+    assert (title == "Fixing a flat tyre") == (by == "model")
+    assert said(caplog) == [
+        (logging.WARNING, f"conversation {begun.conversation.id}: {line}") for line in lines
+    ]
+    assert "flat tyre" not in caplog.text.lower()
 
 
 async def test_a_model_that_isnt_ready_is_passed_over_for_one_that_stands_in(
@@ -1702,7 +1768,11 @@ async def test_a_model_that_isnt_ready_is_passed_over_for_one_that_stands_in(
             logging.WARNING,
             f"conversation {begun.conversation.id}: model standard is unreachable, and is"
             " passed over",
-        )
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
     ]
 
 
