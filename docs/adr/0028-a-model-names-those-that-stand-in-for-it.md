@@ -301,3 +301,117 @@ The three tries with Groq show how narrow its short wait is: 8,000 tokens a minu
 - **a link asked again as often as it fails so, not once.** The walk's tests never ended, and were stopped after five minutes. Their stand-in for the pause returned without letting the event loop run, so the walk went round without end, and the time limit that every such test has could not fire. The stand-in now lets the loop run once, as the real pause does. Planted again, against each layer's tests alone, the mistake failed one of the walk's when its 5 seconds were over, one of a turn's and one of the title job's.
 
 One more was planted for the first of the review's two tests, an error after a second try had handed something on taken for the link's failure: it failed that test, and none of the older ones. The second has no mistake of its own: where the walk stands inside the title's time limit can't be changed by replacing one text. On the tree as it was committed, all 49 plantings, the 47 mistakes with that one three ways, failed a test.
+
+### 2026-11-25: the longest an answer may take
+
+The decision, and the revision before this one, gave a server only so long to begin an answer (`begins_within_seconds`), and 20 seconds between two lines of it, and nothing for the whole. The revision named it under "Known, and left": "a limit on how long a whole answer may take comes in the next step. A server that sends lines with no word in them is waited for until then". It was left so that the second try and the time to begin could be built and looked at first. Measured with a throwaway server, both clients were still reading a server that sends a line every half second, with words or without, when the probe closed them after 8 seconds (see Measured). By the rules, nothing would have ended them, and a turn on such a server would keep its reader, and its place at the gate, for as long as the server sent.
+
+**Where the clock runs:**
+
+1. **Around the turn,** in `actio.chat.answering`, around the walk.
+    - Con: it would count the wait at a gate, which isn't the server's.
+    - Con: an answer cut there, with nothing handed on, couldn't move on to the model that stands in: the walk would be over.
+2. **In the model client, for one request** (`actio_llm.wire.stream_lines`), by the event loop's clock, from the moment the request is sent: the same instant the first line's time counts from. Chosen.
+    - Pro: a request with nothing handed on when its time is over is a failure of that model before the first word, and the walk moves on, as after any other.
+    - Con: each model of a chain has a time of its own, and so has a second try (below, "Known, and left").
+
+**One figure for every server, or a provider's own:**
+
+1. **One figure.**
+    - Con: wrong both ways. A slow machine's full answer takes longer: 2,048 tokens at 5 a second are 410 s. A fast server's takes a small part of it: Groq's `openai/gpt-oss-120b` wrote a full answer of 2,048 tokens in 4.3 s (see Measured).
+2. **The client's own, 300 seconds, and a key of the provider, `answers_within_seconds`,** as its time to begin is said. Chosen.
+    - **No rule ties the two keys together:** a file that gives less for the whole than to begin is no mistake, and the first line then has to come within the shorter.
+
+**How a turn whose answer was cut is recorded,** when something of it was handed on:
+
+1. **`failed`.**
+    - Con: a failed turn costs nothing, and anyone can ask for a long answer on purpose.
+2. **`stopped`.**
+    - Con: nobody stopped it, and the page would say that the answer was stopped.
+3. **`completed`, with a reason of its own, `time_limit`.** Chosen: an answer that reached a limit, as one at its longest size does, and is paid for as a stopped turn is, by guess, since a stream that is closed sends no count.
+
+**Whether the clock leaves out the caller's time,** as the time between two lines does, so that a slow reader isn't taken for a slow server:
+
+1. **Leave it out.**
+    - Con: a server that sends faster than it is read would never be over. A line that was received already is read without a wait, so a time limit around a read lets every such line through, however late (see Measured).
+2. **Count it.** Chosen: the limit is a bound. The clock is asked before each line is handed on, and nothing is handed on once the time is over, not even what was received already.
+
+**What changed:**
+
+- **The client** (`actio_llm`): `Timeouts.answer_s`, 300 s by default, from sending a chat request to the end of its answer. A new error, `TookTooLongError`, a `StreamInterruptedError`, so that it is in `FOR_NOW` by its parent and whoever doesn't know it takes it for an answer that broke off. Its text names the provider and the seconds, as the others do. `stream_lines` holds to these rules:
+    - **before the first line,** whichever of the two times is over first ends the wait, with the `ProviderUnavailableError` of before, "didn't start answering within N s", N the shorter. Nothing came, so nothing changes for the walk;
+    - **after the first line,** once `answer_s` is over, `TookTooLongError` is raised, whatever the server is doing: silent, still sending, or far ahead of its reader. No line is handed on after that;
+    - **a silence that both times would end** is the one over first: `idle_s` with time left is the `StreamInterruptedError` of before, and the answer's time first is `TookTooLongError`;
+    - **an answer that ends in time is untouched,** and raising closes the connection, as every other ending does.
+- **A load ahead** on Ollama is read by the same function, and waits for its one line as an answer's first line is waited for: within the shorter of the two times. With the 300 seconds that is the time to begin, as before. A file that gives its server less for a whole answer than to begin one bounds its loads by that too.
+- **The models file:** `answers_within_seconds`, in a `[providers.<name>]` table, for either kind of server, checked as `begins_within_seconds` is: 0, a negative number, a string, `inf` and `nan` are each a mistake in one line that names `providers.<name>.answers_within_seconds`. `ProviderEntry.timeouts` replaces each of the two values where its key is there. `config/models.toml` describes it, and names no value; `config/examples/free-cloud/models.toml` names none either: nothing measured supports another number for Groq or the Gemini API.
+- **A turn** (`actio.chat.answering`): `TookTooLongError` out of the walk, after something was handed on, a word or a thought, ends the turn `completed`, with the `finish_reason` `time_limit`, no counts of a model's and no times. It is counted by guess (`_used`, unchanged), asks for its conversation's title as any completed turn does, and says one warning in the log, with the turn's id and the model that was answering, never the error's text: "model … was still writing when its server's time for an answer was over, and the answer stops here". Its stream ends as a completed turn's does, `finish-step` and `finish`, whose `finishReason` is `other`: the library's `length` is a limit on tokens, and the turn's record in the metadata says which limit.
+- **With nothing handed on,** the walk has moved on to the next model already. When the error out of the walk is `TookTooLongError` all the same, of the one model or as what it raises of several, the turn is `failed`, costs nothing, and has a code of its own, `model_too_slow`: "The model took too long, and wrote no answer." Not `answer_interrupted`, whose words say the connection was lost.
+- **The API's description** says `time_limit` under `finish_reason`, `model_too_slow` under `error`, and that `context_tokens` is empty for such a turn too.
+- **The page** (`apps/web/lib/chat/outcomes.ts`) says it in the words of the size limit beside it: "The answer took the longest a single answer may take, and stops here."; with no words, for a turn asked to think, "The model was still thinking after the longest a single answer may take, and wrote no answer. Try again, or turn off “Think before answering” first."; and otherwise "The model took the longest a single answer may take, and wrote no answer." Another try is offered as for the size limit: after an answer without words, and not after one with them. `model_too_slow` has the API's words.
+- **The end-to-end stack** offers the fake once more, `hurried`, behind a provider of its own at the same address that is given 3 seconds for an answer, and priced as `standard`.
+
+**Tests:**
+
+- **the client's** (`packages/llm/tests/test_ollama.py`, `test_openai_compatible.py`), with short times and a time limit of their own: a server that sends a line a hundred times a second and never ends, cut once its time is over and not before, its connection closed, for both kinds, with words and with lines that hold none (comments and empty pieces for the OpenAI one, empty content for Ollama's), the second with nothing handed on, and no more lines sent than the time has room for; a server that begins late, given what is left of its time and not the whole of it again; forty lines received at once, of which none is handed on after the time, which a time limit around the read alone would fail; the first line's wait ended by the shorter time, a load's too; a first line read after the time, the event loop having been held, taken for a server away; a silence that the gap ends, and one the answer's time ends first, each over when its own time is; an answer that ends in time read whole; and the default, 300;
+- **the walk's** (`test_router.py`): `TookTooLongError` before anything was handed on moves on and isn't asked again, and after a word or a thought is raised as it came, with no later model asked;
+- **the catalog's** (`test_catalog.py`): the key read for both kinds, alone and beside the other, its five mistakes, each value reaching the clients, the shipped and the example's files at 300 and the end-to-end file's `hurried` provider at 3, and a server still writing after its 0.2 s cut, for either kind;
+- **the turn's:** after words, and after a thought alone, `completed` with `time_limit`, the answer streamed and stored once, its credits the guess and its row in the ledger marked as one, no counts and no figure of the window, the first word's time, `finish` with `other`, and the log's line without the error's text (`test_turns_api.py`); nothing written, `failed` with `model_too_slow`, free, in its own words; with a stand-in, the stand-in answering after nothing was written and not asked after a word, and a stand-in's own answer cut at its time, which the log says of the stand-in (`test_turns_stand_ins_api.py`); a title asked for (`test_titles.py`); and the code (`test_answering.py`);
+- **a recorded stream,** `took_too_long.sse`, which the web app's contract test reads with the real `ai` package;
+- **the page's:** the three sentences and the failure's words, another try offered or not, a stored answer and one that arrives (`components/chat/chat-app.test.tsx`); and the whole path on the stack: an answer cut after a few words, its sentence, no other try, its cost, and the same after a reload (`apps/web/e2e/time-limit.spec.ts`).
+
+**Known, and left,** each worked out from the rules, not seen:
+
+- **the time is one request's:** each model of a chain has its own, and so has a second try. A chain of three servers that each send lines with no word in them keeps a reader three times as long before it is told;
+- **the wait at a gate isn't counted,** as it isn't for the first line;
+- **the time between two lines stays 20 seconds** for every server;
+- **an answer cut at its time is counted by guess,** since a stream that is closed sends no count: so its tokens, its rate and how full the window is are not said for it;
+- **a model's thoughts count toward the same time;**
+- **the title job's own 30 seconds are unchanged;**
+- **a machine that writes fewer than 6.8 tokens a second doesn't finish a full answer of 2,048 tokens in the 300 seconds,** and one that writes a little more may not either, since loading the model and reading the conversation count toward the same time: its file raises the key.
+
+#### Measured
+
+On 2026-11-25, on the tree before this change, with a throwaway server outside the repository: both clients, given 3 s for the first line and 2 s of idle time, and a server that sends a line every 0.5 s. Each was still open when the probe closed it after 8 s.
+
+| Client, and what the server sent | Events handed on | After 8 s |
+|---|---|---|
+| `OpenAICompatible`, comments only (`: keep-alive`) | 0 | still open |
+| `OpenAICompatible`, chunks whose delta has no text | 0 | still open |
+| `OpenAICompatible`, a word every 0.5 s, never a finish | 16 | still open |
+| `Ollama`, lines whose content is empty | 0 | still open |
+| `Ollama`, a word every 0.5 s, never done | 16 | still open |
+
+With the same probe, a reader that falls behind:
+
+| What was sent | What the reader did | What came |
+|---|---|---|
+| 400 lines in one write | took one, slept until a deadline was 0.3 s in the past, and read on under `asyncio.timeout_at(deadline)` | 399 more lines, then `TimeoutError` |
+
+So a deadline of asyncio's alone does not hold for lines that were already received.
+
+How fast answers are written here, by the local stack's own record of this day: the shipped local model 34.5 to 39.9 tokens a second in 12 answers, and 10.9 to 24.6 in 4 (cause not known), a full answer of 2,048 tokens in 52.9 s; Groq's `openai/gpt-oss-120b` 467 to 475 tokens a second in 3 answers, one of them a full 2,048 tokens in 4.3 s. No other cloud model was timed. Worked out, not seen: 2,048 tokens in 300 s are 6.8 tokens a second.
+
+**On the whole stack,** built from this tree, with the shipped models file and one line added to it, `answers_within_seconds = 8` for its Ollama: one guest on the page, the local `qwen3.5:4b-q4_K_M`, and a made-up question that asks for an essay of about 1,500 words, once in each of three engines (Playwright 1.65's Chromium, Firefox and WebKit); then once more in Chromium with "Think before answering" on, and a question that asks to count primes.
+
+| Engine, and what was asked | The turn was over after | What the page showed |
+|---|---|---|
+| Chromium, the essay, the model not loaded yet | 8.49 s | 704 characters of the answer, ending in the middle of a sentence. "The answer took the longest a single answer may take, and stops here." No "Try again". "first word after 4.4 s", "191 credits" |
+| Firefox, the essay | 8.53 s | 1,497 characters, the same sentence, no "Try again". "first word after 300 ms", "360 credits" |
+| WebKit, the essay | 8.45 s | 1,505 characters, the same sentence, no "Try again". "first word after 540 ms", "372 credits" |
+| Chromium, thinking on | 8.44 s | The thought, folded away, and no answer. "The model was still thinking after the longest a single answer may take, and wrote no answer. Try again, or turn off “Think before answering” first." "Try again" offered. "first word after 490 ms", "302 credits" |
+
+After a reload each page showed the same answer, the same sentence and the same figures. No request of the page's was refused, and no script on it failed. The list under each answer said no rate, and the line under the box nothing of the window: such a turn has no counts. The API's log had one line for each of the four turns: "model standard was still writing when its server's time for an answer was over, and the answer stops here". Ollama's own log has each of the four requests over after 8 s (`8s` three times, `8.01s` once): it stopped writing when the client hung up. The conversation in WebKit's picture had its title from the model.
+
+**Not seen on a real server:** a turn that failed as `model_too_slow`. A server that sends lines with no word in them for its whole time can't be had on purpose from Ollama or from the two clouds: the tests hold it, with a scripted model and with a server of their own.
+
+**The end-to-end tests,** on their own stack: 78 passed, the new one in 3.9 s, its answer cut after the fake's first words.
+
+**Mistakes planted on purpose.** After the build and the review, 38 mistakes were planted one at a time in a scratch copy of the tree, and the tests that should notice each were run. 34 failed a test. The four that failed none were all in the client's clock:
+
+- **a read after the first line that waits the idle time alone.** A silence was still said as the answer's time, but only once the idle time was over: the test of the two silences compared the error, not when it came. It now ends within a second, where the longer time is three;
+- **an answer given twice its time.** The test's bound was a second, for a time of 0.3 s. The server of that test now counts the lines it sent, and the test holds the count: a busy machine sends fewer in a given time, never more, so the bound can't fail by the machine;
+- **the time counted from the first line, not from the request.** No test's server began late. One now does: its first line after half a second, of one second for the answer;
+- **the answer's error in the place of a server away, for a first line read after the time.** The review found the same branch by reading. A test now holds the event loop while that line arrives, so that only the clock can tell.
+
+The tests for these four were written after that run, with the two the review asked for: a load cut at the shorter time, and a stand-in's answer cut at its time, for which one more mistake was planted, the log naming the asked model. On the tree as it was committed, all 39 failed a test.

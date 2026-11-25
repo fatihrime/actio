@@ -86,6 +86,8 @@ Then four answers are written at once, and a fifth waits its turn. Left out, it 
 
 A provider may also say how long its server is given to begin an answer, `begins_within_seconds`. A server that hasn't begun by then counts as away, and the models that stand in for its model are asked (below). Left out, it is 90 seconds, which covers a model that the server has to load first; the example's cloud providers, below, say 30.
 
+And how long it is given for a whole answer, `answers_within_seconds`, counted from the same moment. An answer the model is still writing then stops there: it is kept, and paid for, and the page says that it took the longest a single answer may take. A model that has written nothing by then counts as failing, and the models that stand in for it are asked. Left out, it is 300 seconds, in which a full answer of 2,048 tokens needs more than 6.8 tokens a second, since loading the model and reading the conversation count too: on a machine that writes more slowly, raise it.
+
 !!! note "On Linux"
     Ollama listens only on `127.0.0.1` by default, which containers can't reach, so with `make up` the model shows as `unreachable`. Ollama's `OLLAMA_HOST` setting changes where it listens: Docker's bridge address, usually `172.17.0.1`, is reachable from containers and not from your network. This follows Ollama's and Docker's documentation; this project's own Linux run, in CI, has no Ollama to try it with.
 
