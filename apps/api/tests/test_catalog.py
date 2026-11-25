@@ -156,6 +156,8 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
 
     async with catalogs.build(file, ollama_url="http://127.0.0.1:1") as catalog:
         offered = [(model.name, model.kind) for model in catalog]
+        stand_ins = {model.name: model.then for model in catalog}
+        chain = [model.name for model in catalog.chain("groq-large")]
 
     assert (file.default, file.titles) == (shipped.default, shipped.titles)
     assert file.models[file.default] == shipped.models[shipped.default]
@@ -166,6 +168,12 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
         ("gemini-flash", "openai-compatible"),
         ("gemini-lite", "openai-compatible"),
     ]
+    # Groq's free plan refuses a request over its tokens a minute, and limits requests
+    # a minute: then flash-lite answers, and the local model when that is too busy.
+    assert chain == ["groq-large", "gemini-lite", "standard"]
+    assert {name: then for name, then in stand_ins.items() if then} == {
+        "groq-large": ("gemini-lite", "standard")
+    }
 
 
 def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:
@@ -298,6 +306,21 @@ MISTAKES = {
         "thinking = true\nthinking_on = { extra_body = { at = 1979-05-27 } }",
         "models.big.thinking_on",
     ),
+    "a stand-in that isn't one of the models": (
+        "thinking = true",
+        'thinking = true\nthen = ["tiny"]',
+        'models.big: `then` names "tiny", which is not one of the models',
+    ),
+    "a model that stands in for itself": (
+        "thinking = true",
+        'thinking = true\nthen = ["standard", "big"]',
+        "models.big: `then` can't name the model itself",
+    ),
+    "a stand-in named twice": (
+        "thinking = true",
+        'thinking = true\nthen = ["standard", "standard"]',
+        'models.big: `then` names "standard" twice',
+    ),
 }
 
 
@@ -341,6 +364,99 @@ async def test_a_model_is_found_by_its_name_and_the_default_when_none_is_named()
         assert isinstance(big.chat, OpenAICompatible)
         with pytest.raises(UnknownModelError):
             catalog.get("largest")
+
+
+# --- Models that stand in for another --------------------------------------------------
+
+WITH_STAND_INS = (
+    GOOD.replace(
+        "max_output_tokens = 2048", 'max_output_tokens = 2048\nthen = ["big", "small"]'
+    ).replace("thinking = true", 'thinking = true\nthen = ["standard"]')
+    + """
+[models.small]
+title = "Granite 4 Micro"
+provider = "ollama"
+model = "granite4:micro"
+context_window = 4096
+max_output_tokens = 1024
+then = []
+"""
+)
+"""`standard` and `big` stand in for each other, and `small` for nobody, with an empty
+list where it could have left `then` out."""
+
+
+async def test_a_model_is_followed_by_those_its_file_names_and_never_by_theirs() -> None:
+    """Only the asked model's list counts. So two models may name each other, and a
+    model is never asked twice."""
+    file = parsed(WITH_STAND_INS)
+
+    async with catalogs.build(file, ollama_url="http://ollama") as catalog:
+        chains = {
+            offered.name: [model.name for model in catalog.chain(offered.name)]
+            for offered in catalog
+        }
+        default = [model.name for model in catalog.chain()]
+        then = catalog.get("standard").then
+
+    assert chains == {
+        "standard": ["standard", "big", "small"],
+        "big": ["big", "standard"],  # not `small`, which only `standard` names
+        "small": ["small"],
+    }
+    assert default == chains["standard"]
+    assert then == ("big", "small")
+
+
+async def test_a_model_without_stand_ins_is_its_own_chain() -> None:
+    async with catalogs.build(parsed(GOOD), ollama_url="http://ollama") as catalog:
+        chain = catalog.chain("big")
+
+    assert chain == [catalog.get("big")]
+    assert catalog.get("big").then == ()
+
+
+@pytest.mark.parametrize(
+    ("ollama_has", "lab_answers", "ready", "passed_over", "own"),
+    [
+        ({}, True, ["big"], ["standard", "small"], "missing"),
+        (
+            {"qwen3.5:4b-q4_K_M": ["completion"], "granite4:micro": ["completion", "thinking"]},
+            False,
+            ["standard", "small"],
+            ["big"],
+            "ready",
+        ),
+        (None, False, [], ["standard", "big", "small"], "unreachable"),
+    ],
+    ids=["the model missing", "a stand-in away", "every server away"],
+)
+async def test_a_chain_says_which_of_its_models_are_ready_in_order_with_their_status(
+    ollama_has: dict[str, list[str]] | None,
+    lab_answers: bool,
+    ready: list[str],
+    passed_over: list[str],
+    own: str,
+) -> None:
+    """A model that isn't ready is passed over, missing or unreachable alike. What it can
+    do is each one's own."""
+    ollama = unreachable() if ollama_has is None else FakeOllama(ollama_has).transport
+    lab = httpx2.ASGITransport(app=create_fake_llm()) if lab_answers else unreachable()
+
+    async with catalogs.build(
+        parsed(WITH_STAND_INS),
+        ollama_url="http://ollama",
+        transports={"ollama": ollama, "lab": lab},
+    ) as catalog:
+        chain = await catalog.chain_status("standard", now=NOON)
+
+    can_reason = {"standard": False, "big": True, "small": True}
+    assert [model.name for model, _ in chain.models] == ["standard", "big", "small"]
+    assert [(model.name, status.thinking) for model, status in chain.ready] == [
+        (name, can_reason[name]) for name in ready
+    ]
+    assert [model.name for model, _ in chain.passed_over] == passed_over
+    assert chain.status.state == own
 
 
 # --- How many answers a server writes at once -----------------------------------------

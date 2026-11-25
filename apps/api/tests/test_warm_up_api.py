@@ -500,6 +500,63 @@ async def test_a_model_that_cant_answer_is_refused_as_a_question_to_it_is(
     assert refused["unreachable"][1]["detail"] == "This model's server can't be reached."
 
 
+async def test_a_model_that_can_answer_is_loaded_itself_and_never_a_model_that_stands_in_for_it(
+    start_app: Any, settings: Settings, migrated: str, offer: Any, lineup: Any
+) -> None:
+    """A stand-in is asked only when the model can't answer: loaded ahead, it would push
+    the model out of its server's memory, or load for nothing (ADR 0028)."""
+    assert migrated
+    answers, _ = offer()
+    itself, stand_in = Loads(answers), Loads(answers)
+    lineup.offer("standard", itself, then=["second"])
+    lineup.offer("second", stand_in)
+    browser = await guest_on(start_app, settings, lineup.catalog())
+
+    response = await warm_up(browser)
+    await until(lambda: itself.ended == 1)
+
+    assert response.status_code == 202
+    assert itself.loads == [("scripted-standard", 4096)]
+    assert stand_in.loads == []
+
+
+async def test_a_model_that_cant_answer_while_a_stand_in_can_has_nothing_to_load(
+    start_app: Any, settings: Settings, migrated: str, offer: Any, lineup: Any
+) -> None:
+    """A question to it would be answered by the stand-in, which is never loaded ahead:
+    not refused, and nothing loaded."""
+    assert migrated
+    answers, _ = offer()
+    itself, stand_in = Loads(answers), Loads(answers)
+    lineup.offer("standard", itself, state="unreachable", then=["second"])
+    lineup.offer("second", stand_in)
+    browser = await guest_on(start_app, settings, lineup.catalog())
+
+    response = await warm_up(browser)
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert (itself.loads, stand_in.loads) == ([], [])
+
+
+async def test_a_model_none_of_whose_stand_ins_can_answer_is_refused_as_a_question_to_it_is(
+    start_app: Any, settings: Settings, migrated: str, offer: Any, lineup: Any
+) -> None:
+    """With the model's own state, not a stand-in's."""
+    assert migrated
+    answers, _ = offer()
+    lineup.offer("standard", Loads(answers), state="missing", then=["second"])
+    lineup.offer("second", Loads(answers), state="unreachable")
+    browser = await guest_on(start_app, settings, lineup.catalog())
+
+    warm = await warm_up(browser)
+    asked = await asyncio.wait_for(asking(browser, "Hi"), PATIENCE_S)
+
+    assert warm.status_code == 503
+    assert warm.json() == asked.json()
+    assert (warm.json()["model"], warm.json()["model_status"]) == ("standard", "missing")
+
+
 async def test_loads_are_limited_per_account(
     start_app: Any, settings: Settings, migrated: str, clock: Any
 ) -> None:

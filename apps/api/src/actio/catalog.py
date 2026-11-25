@@ -9,8 +9,12 @@ what to call it at its provider, its limits, and the client to stream an answer 
 - `open_catalog` builds the clients for the providers it names, and closes them again.
   Nothing connects until a model is used.
 - `Catalog.status` asks a provider whether it has a model, and what the model can do.
+- `Catalog.chain` gives a model and those that stand in for it, which are asked in its
+  place when it can't answer before the first word, and `Catalog.chain_status` says
+  which of them are ready (ADR 0028).
 - `Catalog.load_ahead` has a model's server load it into memory before the first
-  question to it, where the server can be asked to (ADR 0026).
+  question to it, where the server can be asked to (ADR 0026): the model itself, never
+  one that stands in for it.
 
 A server writes only so many answers at once: a local one, such as Ollama, one. Each
 provider that has such a limit gets a `Gate`, shared by every model it runs, at which
@@ -132,6 +136,9 @@ class ModelEntry(BaseModel):
     thinking_on: dict[str, JsonValue] | None = None
     """What a request to the model holds when a turn asks for reasoning, in place of
     nothing. Only where `thinking_off` may be, and as it may be."""
+    then: tuple[Name, ...] = ()
+    """Other models of the file, asked in this one's place, in this order, when it can't
+    answer before the first word (ADR 0028). Their own `then` isn't followed."""
 
     @model_validator(mode="after")
     def _leaves_room_for_the_prompt(self) -> Self:
@@ -192,6 +199,15 @@ class CatalogFile(BaseModel):
                             f"models.{name}: `{told}` can't hold `{member}`, "
                             "which Actio writes into a request itself"
                         )
+            for stand_in in model.then:
+                if stand_in == name:
+                    raise ValueError(f"models.{name}: `then` can't name the model itself")
+                if stand_in not in self.models:
+                    raise ValueError(
+                        f'models.{name}: `then` names "{stand_in}", which is not one of the models'
+                    )
+                if model.then.count(stand_in) > 1:
+                    raise ValueError(f'models.{name}: `then` names "{stand_in}" twice')
         return self
 
 
@@ -269,6 +285,9 @@ class OfferedModel:
     gate: Gate | None = None
     """Where an answer waits until its server has room for it: the same for every model
     on that server. `None`: the server is given every answer at once."""
+    then: tuple[str, ...] = ()
+    """The names of the models asked in its place, in this order, when it can't answer
+    before the first word: see `Catalog.chain`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +299,30 @@ class ModelStatus:
     `unreachable`: the server doesn't answer, or answers nonsense."""
     thinking: bool
     """Whether the model can reason before it answers. False when that isn't known."""
+
+
+@dataclass(frozen=True, slots=True)
+class Chain:
+    """A model and the models asked in its place, in order, each with its status."""
+
+    models: tuple[tuple[OfferedModel, ModelStatus], ...]
+    """The model itself first."""
+
+    @property
+    def status(self) -> ModelStatus:
+        """The model's own status, whatever its stand-ins'."""
+        return self.models[0][1]
+
+    @property
+    def ready(self) -> list[tuple[OfferedModel, ModelStatus]]:
+        """Those that can be asked now, in order: a model that isn't `ready` is passed
+        over, `missing` or `unreachable` alike."""
+        return [(offered, status) for offered, status in self.models if status.state == "ready"]
+
+    @property
+    def passed_over(self) -> list[tuple[OfferedModel, ModelStatus]]:
+        """Those that aren't `ready`, in order."""
+        return [(offered, status) for offered, status in self.models if status.state != "ready"]
 
 
 class UnknownModelError(Exception):
@@ -333,6 +376,20 @@ class Catalog:
         names = list(self._models)
         found = await asyncio.gather(*(self.status(name, now=now) for name in names))
         return dict(zip(names, found, strict=True))
+
+    def chain(self, name: str | None = None) -> list[OfferedModel]:
+        """The model called `name`, or the default one, then the models its `then` names,
+        in order: those asked in its place when it can't answer before the first word.
+        A stand-in's own `then` isn't followed. Raises `UnknownModelError`."""
+        offered = self.get(name)
+        return [offered, *(self.get(stand_in) for stand_in in offered.then)]
+
+    async def chain_status(self, name: str | None = None, *, now: datetime) -> Chain:
+        """The model's chain, each with its status, asked for at the same time as
+        `statuses` asks them: each answer is reused for `STATUS_LIFETIME`."""
+        chain = self.chain(name)
+        found = await asyncio.gather(*(self.status(offered.name, now=now) for offered in chain))
+        return Chain(tuple(zip(chain, found, strict=True)))
 
     def load_ahead(self, name: str) -> bool:
         """Start having the model called `name` loaded into its server's memory, ahead of
@@ -469,6 +526,7 @@ async def build(
                 max_output_tokens=entry.max_output_tokens,
                 chat=chat_of(entry),
                 gate=gates[entry.provider],
+                then=entry.then,
             )
             for name, entry in file.models.items()
         }

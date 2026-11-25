@@ -27,6 +27,14 @@ asked only once the turn has passed: so the client's patience for the first word
 when the server is free. The turn gives its place back as soon as the model's stream is
 closed, however it ended.
 
+A turn asks the model it names, and when that one can't answer, the models that stand in
+for it, one after the other, each behind its own gate (`actio.catalog.Catalog.chain`):
+but only before the first word, or thought, was handed on (`actio_llm.Walk`, ADR 0028).
+A model that failed gives its place at its gate back before the next one's is waited
+at. Whoever answers, the turn is the asked model's: its name, and the credits held at
+its price. The log says which model failed and was passed over, and which answered in
+another's place, never what an error said.
+
 Recording a turn also settles what it cost. Credits were held for it before it started
 (`actio.usage.limits`). What it used goes into the usage ledger in the transaction that
 records its outcome, and only then are the counters told: see `_record`.
@@ -38,10 +46,11 @@ turns the steps into that.
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import Literal
 
 import anyio
@@ -59,6 +68,7 @@ from actio_llm import (
     ContextOverflowError,
     Finish,
     FinishReason,
+    Link,
     LLMError,
     ModelNotFoundError,
     ProviderError,
@@ -70,6 +80,7 @@ from actio_llm import (
     TextDelta,
     Timings,
     Usage,
+    Walk,
     tokens_in,
 )
 from actio_quota import UsageWarning
@@ -272,10 +283,19 @@ class Halt:
             self.scope.cancel()
 
 
+@dataclass(frozen=True, slots=True)
+class Asking:
+    """A model a turn asks, and the request it is asked with: with the model's own name
+    on its server, window and limits."""
+
+    offered: OfferedModel
+    request: ChatRequest
+
+
 async def answer(
-    offered: OfferedModel,
-    request: ChatRequest,
+    chain: Sequence[Asking],
     *,
+    model: str,
     conversation_id: uuid.UUID,
     turn_id: uuid.UUID,
     answer_id: uuid.UUID,
@@ -288,8 +308,13 @@ async def answer(
     on_beat: Callable[[], Awaitable[None]] | None = None,
     ask_for_title: bool = False,
 ) -> Ended:
-    """Ask the model, hand its answer to `emit` step by step, and record the turn at
-    the end.
+    """Ask the models of `chain`, in order, until one answers, hand its answer to `emit`
+    step by step, and record the turn at the end.
+
+    `chain` holds the models that can be asked now: the one the turn names, `model`,
+    when it is ready, and those that stand in for it. A later one is asked only when the
+    one before it failed before anything of its answer was handed on. When every one of
+    them failed, the turn records the error `actio_llm.Walk` raises.
 
     The turn was started before (`turns.ask`), and `reserved` holds the credits it may
     cost. This writes its outcome, and what it used, in a transaction of its own, from
@@ -297,8 +322,8 @@ async def answer(
     ended can rely on the answer being stored, and counted. `ask_for_title`, that a
     model is named for titles, goes to `turns.finish` with it.
 
-    When the model's server is busy with other answers, the turn first waits at its
-    gate, saying all the while that it is alive.
+    When a model's server is busy with other answers, the turn first waits at its gate,
+    saying all the while that it is alive.
 
     `halt` ends it early. `on_beat` is called with every beat, after the turn has said
     that it is alive: for whatever else has to be kept while the turn runs. Neither it
@@ -308,20 +333,28 @@ async def answer(
     ending: Ending | None = None
     # When the first piece of the answer was taken: noted once, before it is handed on.
     first_word: datetime | None = None
+    # Each model is asked only once the turn has passed its gate, and gives its place
+    # back as soon as its stream is closed: before the next one's gate is waited at.
+    walk = Walk(
+        [
+            Link(
+                asking.offered.name,
+                asking.offered.chat,
+                asking.request,
+                _through(asking.offered.gate, turn_id, clock),
+            )
+            for asking in chain
+        ],
+        on_failed=partial(_passed_over, turn_id, several=len(chain) > 1),
+    )
     beats = asyncio.create_task(
         _beat(open_session, turn_id, answer_id, collected, clock, usage, reserved, on_beat)
     )
     try:
-        # Only waiting, for the gate or for the model, can be halted. A step that has
-        # come is handed on whole, so what readers were shown is what gets stored.
+        # Only waiting, for a gate or for a model, can be halted. A step that has come
+        # is handed on whole, so what readers were shown is what gets stored.
         with halt.scope:
-            # The model is asked only once the turn has passed the gate: the second
-            # expression is evaluated after the first was entered. The place at the gate
-            # is given back as soon as the model's stream is closed.
-            async with (
-                _through(offered.gate, turn_id, clock),
-                aclosing(offered.chat.stream(request)) as events,
-            ):
+            async with aclosing(walk.stream()) as events:
                 async for event in events:
                     steps = collected.take(event)
                     if first_word is None and any(isinstance(step, Wrote) for step in steps):
@@ -331,11 +364,15 @@ async def answer(
                             await emit(step)
         if collected.finish is not None:
             kept = _believed(collected.finish.usage, collected.parts, reserved, turn_id)
+            # The window of the request that was answered: a stand-in's is its own.
+            answered = walk.answered
             ending = Ending(
                 "completed",
                 collected.parts,
                 finish_reason=reason_for(
-                    collected.finish, kept, context_window=request.context_window
+                    collected.finish,
+                    kept,
+                    context_window=None if answered is None else answered.request.context_window,
                 ),
                 usage=kept,
                 timings=_kept(collected.finish.timings, turn_id),
@@ -370,6 +407,10 @@ async def answer(
         raise
     finally:
         beats.cancel()
+        if walk.answered is not None and walk.answered.name != model:
+            logger.warning(
+                "turn %s: model %s answered in place of %s", turn_id, walk.answered.name, model
+            )
         if ending is not None:
             # Shielded: if this task is being cancelled, an unshielded write would be
             # cancelled with it, leaving the turn `running`.
@@ -413,6 +454,28 @@ async def _through(
     finally:
         if came is not None and not passed:
             _waited(turn_id, came, clock, ", and didn't get its turn")
+
+
+def _passed_over(
+    turn_id: uuid.UUID, failed: Link, error: LLMError, later: Link | None, *, several: bool
+) -> None:
+    """Say in the log that a model failed before the first word, and which is asked
+    next. Its error's kind, never its text: that can quote the question, or name the
+    account at its provider (ADR 0027). A turn of one model says nothing here: the line
+    that records its failure says it."""
+    kind = type(error).__name__
+    if later is not None:
+        logger.warning(
+            "turn %s: model %s failed (%s), and %s is asked next",
+            turn_id,
+            failed.name,
+            kind,
+            later.name,
+        )
+    elif several:
+        logger.warning(
+            "turn %s: model %s failed (%s), and no other is left to ask", turn_id, failed.name, kind
+        )
 
 
 def _waited(

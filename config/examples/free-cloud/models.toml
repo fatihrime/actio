@@ -74,6 +74,11 @@ max_output_tokens = 2048
 thinking = true
 thinking_off = { reasoning_effort = "low" }
 thinking_on = { reasoning_effort = "medium" }
+# Groq's free plan refuses a request larger than 8,000 tokens, and limits the requests
+# of a minute: then Gemini 3.5 Flash-Lite answers in its place, with its larger window,
+# and the local model when flash-lite is too busy. So a question to this model may go to
+# any of the three servers.
+then = ["gemini-lite", "standard"]
 
 [models.groq-small]
 title = "GPT-OSS 20B (Groq)"

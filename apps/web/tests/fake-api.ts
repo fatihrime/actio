@@ -335,6 +335,7 @@ export function model(changes: Partial<Model> = {}): Model {
     model: "qwen3.5:4b-q4_K_M",
     context_window: 8192,
     max_output_tokens: 2048,
+    then: [],
     status: "ready",
     thinking: true,
     ...changes,

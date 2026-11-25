@@ -278,6 +278,10 @@ export interface paths {
          * Start Turn
          * @description Ask a model something, and stream its answer.
          *
+         *     When the model can't answer before its first word, a model asked in its place does,
+         *     as `GET /api/models` lists them (`then`). The turn is the asked model's all the
+         *     same, and costs what a question to it costs.
+         *
          *     The answer is written whether or not this response is read to its end. To stop it,
          *     cancel the turn: closing the connection doesn't.
          */
@@ -346,7 +350,8 @@ export interface paths {
         };
         /**
          * List Models
-         * @description The models you can choose from, and whether each can answer right now.
+         * @description The models you can choose from, and whether each can answer right now, by itself
+         *     or through a model asked in its place.
          *
          *     Each provider is asked at most every 15 seconds, so this can be fetched often.
          */
@@ -609,15 +614,26 @@ export interface components {
             /** Max Output Tokens */
             max_output_tokens: number;
             /**
+             * Then
+             * @description The `id`s of the models asked in its place, in this order, when it can't answer
+             *     before the first word of an answer: its server is away, too busy, or refuses. Empty
+             *     for a model that has none.
+             */
+            then: string[];
+            /**
              * Status
-             * @description `ready`: its server has it. `missing`: the server answers, but hasn't got this
-             *     model. `unreachable`: the server doesn't answer.
+             * @description `ready`: its server has it, or one of the models asked in its place can answer.
+             *     Otherwise its own: `missing`, the server answers, but hasn't got this model;
+             *     `unreachable`, the server doesn't answer.
              * @enum {string}
              */
             status: "ready" | "missing" | "unreachable";
             /**
              * Thinking
-             * @description Whether it can reason before it answers. False while its server can't be asked.
+             * @description Whether a question to it can ask for reasoning: whether the model that would be
+             *     asked first, of itself and those asked in its place that can answer, can reason
+             *     before it answers. While none of them can answer, whether it can itself: false
+             *     while its server can't be asked.
              */
             thinking: boolean;
         };
@@ -1621,7 +1637,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The model can't answer right now: `model_status` says why. Or messages, or usage, can't be counted right now, or an answer couldn't be read along with. */
+            /** @description The model can't answer right now, nor can any model asked in its place: `model_status` says why the model itself can't. Or messages, or usage, can't be counted right now, or an answer couldn't be read along with. */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1795,7 +1811,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Nothing was started: the model's kind of server can't be asked to load a model ahead, or its server is writing as many answers as it takes. */
+            /** @description Nothing was started: the model's kind of server can't be asked to load a model ahead, or its server is writing as many answers as it takes, or the model can't answer and a model asked in its place would, which is never loaded ahead. */
             204: {
                 headers: {
                     [name: string]: unknown;
@@ -1838,7 +1854,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The model can't answer right now: `model_status` says why. Or requests can't be counted right now. */
+            /** @description The model can't answer right now, nor can any model asked in its place: `model_status` says why the model itself can't. Or requests can't be counted right now. */
             503: {
                 headers: {
                     [name: string]: unknown;

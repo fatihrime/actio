@@ -39,9 +39,8 @@ repeated request harmless: the same message is never asked twice.
 import logging
 import math
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing, suppress
-from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, Self
 
@@ -88,7 +87,7 @@ from actio.usage.limits import (
     UsageLimits,
     UsageUnavailableError,
 )
-from actio_llm import ChatRequest, prompt_tokens
+from actio_llm import ChatRequest, Message, prompt_tokens
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["conversations"], responses=NO_SESSION)
@@ -177,9 +176,10 @@ class TurnRequest(Body):
             "knows when one ends, so there is no `Retry-After`."
         },
         503: {
-            "description": "The model can't answer right now: `model_status` says why. "
-            "Or messages, or usage, can't be counted right now, or an answer couldn't "
-            "be read along with."
+            "description": "The model can't answer right now, nor can any model asked "
+            "in its place: `model_status` says why the model itself can't. Or messages, "
+            "or usage, can't be counted right now, or an answer couldn't be read along "
+            "with."
         },
     },
 )
@@ -201,6 +201,10 @@ async def start_turn(
 ) -> StreamingResponse:
     """Ask a model something, and stream its answer.
 
+    When the model can't answer before its first word, a model asked in its place does,
+    as `GET /api/models` lists them (`then`). The turn is the asked model's all the
+    same, and costs what a question to it costs.
+
     The answer is written whether or not this response is read to its end. To stop it,
     cancel the turn: closing the connection doesn't."""
     try:
@@ -208,27 +212,22 @@ async def start_turn(
     except UnknownModelError:
         raise Problem(422, f"No model is called {body.model!r}. See GET /api/models.") from None
     await limits.turn(principal.user_id)
-    status = await catalog.status(offered.name, now=now)
-    if status.state != "ready":
-        raise not_ready(offered.name, status.state)
-    if body.thinking and not status.thinking:
+    # The model, and those that stand in for it: one that isn't ready is passed over.
+    chain = await catalog.chain_status(offered.name, now=now)
+    if not chain.ready:
+        raise not_ready(offered.name, chain.status.state)
+    # Whether the turn can ask for reasoning is the first one's to say: it is asked first.
+    if body.thinking and not chain.ready[0][1].thinking:
         raise Problem(422, "This model can't reason before it answers.", model=offered.name)
 
     plan = usage.plans.plan_for(is_guest=principal.is_guest)
     begun = await _begin(
         db, body, conversation_id, principal.user_id, offered, new_id(), now, plan.answers_at_once
     )
-    request = ChatRequest(
-        model=offered.model,
-        messages=context.for_model(begun.history, now=now),
-        max_output_tokens=offered.max_output_tokens,
-        context_window=offered.context_window,
-        # A model that reasons by default must be told not to. One that can't reason
-        # must not be told anything: its server refuses the setting.
-        thinking=body.thinking if status.thinking else None,
-    )
+    messages = context.for_model(begun.history, now=now)
     # Before anything is committed: a turn that is refused here leaves nothing behind.
-    reserved = await _reserve(usage, db, principal, begun, offered, request, now)
+    # The credits are held for the asked model, at its price, whoever answers.
+    reserved = await _reserve(usage, db, principal, begun, offered, messages, now)
     turn = begun.turn
     turn.capped_by_usage = reserved.capped
     answer_id = new_id()
@@ -253,13 +252,31 @@ async def start_turn(
         await events.discard(turn.id)
         raise
 
-    request = replace(request, max_output_tokens=reserved.max_output_tokens)
+    for passed, status in chain.passed_over:
+        logger.warning(
+            "turn %s: model %s is %s, and is passed over", turn.id, passed.name, status.state
+        )
+    asking = [
+        answering.Asking(
+            model,
+            ChatRequest(
+                model=model.model,
+                messages=messages,
+                # No more than was held for the asked model, whoever answers.
+                max_output_tokens=min(model.max_output_tokens, reserved.max_output_tokens),
+                context_window=model.context_window,
+                # A model that reasons by default must be told not to. One that can't
+                # reason must not be told anything: its server refuses the setting.
+                thinking=body.thinking if status.thinking else None,
+            ),
+        )
+        for model, status in chain.ready
+    ]
     runner.start(
         turn.id,
         lambda halt: _write(
             begun,
-            offered,
-            request,
+            asking,
             answer_id,
             resources.database,
             clock,
@@ -446,10 +463,12 @@ async def _reserve(
     principal: Principal,
     begun: Begun,
     offered: OfferedModel,
-    request: ChatRequest,
+    messages: Sequence[Message],
     now: datetime,
 ) -> Reserved:
-    """Hold the credits the turn may cost, or say as a problem why it can't run.
+    """Hold the credits the turn may cost, or say as a problem why it can't run: for
+    `offered`, the model the turn asks, at its price and up to its longest answer, for
+    `messages`.
 
     The hold lasts as long as a turn may stay `running`: one that outlives it is given
     up on, and gets nothing counted.
@@ -460,7 +479,7 @@ async def _reserve(
             Account(principal.user_id, is_guest=principal.is_guest),
             begun.turn.id,
             model=offered.name,
-            prompt_tokens=prompt_tokens(request.messages),
+            prompt_tokens=prompt_tokens(messages),
             max_output_tokens=offered.max_output_tokens,
             hold_for=turns.STALE_AFTER,
             now=now,
@@ -558,8 +577,7 @@ class _Outlet:
 
 async def _write(
     begun: Begun,
-    offered: OfferedModel,
-    request: ChatRequest,
+    asking: Sequence[answering.Asking],
     answer_id: uuid.UUID,
     open_session: async_sessionmaker[AsyncSession],
     clock: Callable[[], datetime],
@@ -570,8 +588,9 @@ async def _write(
     *,
     ask_for_title: bool,
 ) -> None:
-    """The turn itself: ask the model, and send what it writes as chunks, from
-    `start-step` to `[DONE]`. `start` was sent when the stream was opened.
+    """The turn itself: ask the models of `asking`, the one it names and those that
+    stand in for it, that are ready, and send what the one that answers writes as
+    chunks, from `start-step` to `[DONE]`. `start` was sent when the stream was opened.
     `ask_for_title`: a model is named for titles, and the conversation's first turn that
     completes asks it for one (`turns.finish`).
 
@@ -581,8 +600,8 @@ async def _write(
     await out.send({"type": "start-step"})
     try:
         ended = await answering.answer(
-            offered,
-            request,
+            asking,
+            model=turn.model,
             conversation_id=turn.conversation_id,
             turn_id=turn.id,
             answer_id=answer_id,

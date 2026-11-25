@@ -711,8 +711,12 @@ async def test_a_turn_whose_outcome_cannot_be_written_is_not_counted(
 
     with pytest.raises(SQLAlchemyError):
         await answering.answer(
-            offered,
-            ChatRequest(model="m", messages=[User("What moves the chain?")]),
+            [
+                answering.Asking(
+                    offered, ChatRequest(model="m", messages=[User("What moves the chain?")])
+                )
+            ],
+            model="standard",
             conversation_id=new_id(),
             turn_id=reserved.id,
             answer_id=new_id(),

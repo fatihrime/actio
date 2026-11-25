@@ -6,7 +6,14 @@ The Postgres and Valkey servers come from the conftest.py at the repository's ro
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Iterable, Iterator
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from contextlib import (
     AbstractAsyncContextManager,
     AsyncExitStack,
@@ -14,7 +21,7 @@ from contextlib import (
     contextmanager,
 )
 from datetime import UTC, datetime, timedelta
-from typing import Any, LiteralString, Protocol
+from typing import Any, Literal, LiteralString, Protocol
 
 import argon2.profiles
 import httpx
@@ -30,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from actio import catalog as catalogs
 from actio.api.dependencies import get_clock, get_new_id
 from actio.app import create_app
-from actio.catalog import Catalog, CatalogFile, Gate, OfferedModel
+from actio.catalog import Catalog, CatalogFile, Gate, ModelStatus, OfferedModel
 from actio.chat import running as turn_runner
 from actio.core import jobs, schema
 from actio.core.database import create_engine, create_session_factory
@@ -499,13 +506,22 @@ def catalog_of(
     )
 
 
+type State = Literal["ready", "missing", "unreachable"]
+
+
 class Lineup:
     """Models a test offers, each with a script of its own, on servers of the test's
     choosing: a server that writes only so many answers at once is a `Gate`, which the
-    models on it share. The first model added is the default."""
+    models on it share. The first model added is the default.
+
+    A model may name others that stand in for it (`then`), and say what its server says
+    of it (`state`), and whether it can reason (`thinking`). Each has a window of 4,096
+    tokens and answers of 512 at most, unless a test says otherwise."""
 
     def __init__(self) -> None:
         self._offered: dict[str, OfferedModel] = {}
+        self._thinking: dict[str, bool] = {}
+        self._states: dict[str, State] = {}
 
     def add(
         self,
@@ -513,26 +529,56 @@ class Lineup:
         *script: Any,
         gate: Gate | None = None,
         closes_when: asyncio.Event | None = None,
+        then: Iterable[str] = (),
+        state: State = "ready",
+        thinking: bool = False,
+        context_window: int = 4096,
+        max_output_tokens: int = 512,
     ) -> ScriptedModel:
         """Offer a model called `name` that follows `script`, behind `gate` if any. See
-        `ScriptedModel` for `closes_when`."""
+        `ScriptedModel` for `closes_when`, and `offer` for the rest."""
         model = ScriptedModel(*script, closes_when=closes_when)
-        self.offer(name, model, gate=gate)
+        self.offer(
+            name,
+            model,
+            gate=gate,
+            then=then,
+            state=state,
+            thinking=thinking,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
+        )
         return model
 
-    def offer(self, name: str, chat: ChatProvider, *, gate: Gate | None = None) -> None:
+    def offer(
+        self,
+        name: str,
+        chat: ChatProvider,
+        *,
+        gate: Gate | None = None,
+        then: Iterable[str] = (),
+        state: State = "ready",
+        thinking: bool = False,
+        context_window: int = 4096,
+        max_output_tokens: int = 512,
+    ) -> None:
         """Offer `chat` as the model called `name`, behind `gate` if any: for a model
-        that is more than its script, such as one whose server can load it ahead."""
+        that is more than its script, such as one whose server can load it ahead. `then`
+        names the models asked in its place, `state` is what its server says of it, and
+        `thinking` whether it can reason, which a model that isn't ready never can."""
         self._offered[name] = OfferedModel(
             name=name,
             title=name.capitalize(),
             kind="openai-compatible",
             model=f"scripted-{name}",
-            context_window=4096,
-            max_output_tokens=512,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
             chat=chat,
             gate=gate,
+            then=tuple(then),
         )
+        self._thinking[name] = thinking
+        self._states[name] = state
 
     @property
     def names(self) -> list[str]:
@@ -542,12 +588,39 @@ class Lineup:
         """The catalog of the models added so far. `titles` names the one that writes
         conversations' titles: by default none does."""
         default = next(iter(self._offered))
-        return Catalog(
+        return _LinedUp(
             self._offered,
             default=default,
-            thinking=dict.fromkeys(self._offered, False),
+            thinking=self._thinking,
             titles=titles,
+            states=self._states,
         )
+
+
+class _LinedUp(Catalog):
+    """The catalog of a `Lineup`: each model's server says what the lineup says of it."""
+
+    def __init__(
+        self,
+        models: Mapping[str, OfferedModel],
+        *,
+        default: str,
+        thinking: Mapping[str, bool],
+        titles: str | None,
+        states: Mapping[str, State],
+    ) -> None:
+        super().__init__(models, default=default, thinking=thinking, titles=titles)
+        self._states = dict(states)
+
+    async def _ask(self, offered: OfferedModel) -> ModelStatus:
+        state = self._states[offered.name]
+        if state == "missing":
+            # As a server that speaks OpenAI's API and hasn't got the model: the file's
+            # word on reasoning stands.
+            return ModelStatus(state, thinking=self._declared_thinking.get(offered.name, False))
+        if state != "ready":
+            return ModelStatus(state, thinking=False)
+        return await super()._ask(offered)
 
 
 @pytest.fixture

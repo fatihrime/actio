@@ -1,11 +1,13 @@
 """The routes of the models on offer.
 
 `GET /api/models` says what can be chosen, which one is the default, and whether each
-is ready to answer right now. Which models there are comes from the models file
-(`actio.catalog`); whether one is ready is asked from its provider.
+is ready to answer right now, by itself or through a model that stands in for it (ADR
+0028). Which models there are comes from the models file (`actio.catalog`); whether one
+is ready is asked from its provider.
 
 `POST /api/models/{model_id}/warm-up` has a model's server load it into memory before
 the first question to it, so that the question doesn't wait for the load (ADR 0026).
+Only the model itself: never one that stands in for it.
 
 This module isn't called `models`: in this application that name is kept for modules
 that define database tables.
@@ -19,7 +21,7 @@ from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Models, Now
 from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.api.rate_limits import Limits
-from actio.catalog import UnknownModelError
+from actio.catalog import Chain, UnknownModelError
 
 router = APIRouter(tags=["models"], responses=NO_SESSION)
 
@@ -46,11 +48,19 @@ class ModelOut(Described):
     """Its name on that server: for Ollama, what `ollama pull` takes."""
     context_window: int
     max_output_tokens: int
+    then: list[str]
+    """The `id`s of the models asked in its place, in this order, when it can't answer
+    before the first word of an answer: its server is away, too busy, or refuses. Empty
+    for a model that has none."""
     status: Literal["ready", "missing", "unreachable"]
-    """`ready`: its server has it. `missing`: the server answers, but hasn't got this
-    model. `unreachable`: the server doesn't answer."""
+    """`ready`: its server has it, or one of the models asked in its place can answer.
+    Otherwise its own: `missing`, the server answers, but hasn't got this model;
+    `unreachable`, the server doesn't answer."""
     thinking: bool
-    """Whether it can reason before it answers. False while its server can't be asked."""
+    """Whether a question to it can ask for reasoning: whether the model that would be
+    asked first, of itself and those asked in its place that can answer, can reason
+    before it answers. While none of them can answer, whether it can itself: false
+    while its server can't be asked."""
 
 
 class ModelList(Described):
@@ -61,14 +71,17 @@ class ModelList(Described):
 
 @router.get("/api/models")
 async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelList:
-    """The models you can choose from, and whether each can answer right now.
+    """The models you can choose from, and whether each can answer right now, by itself
+    or through a model asked in its place.
 
     Each provider is asked at most every 15 seconds, so this can be fetched often.
     """
     statuses = await catalog.statuses(now=now)
-    return ModelList(
-        default=catalog.default,
-        models=[
+    listed = []
+    for offered in catalog:
+        chain = Chain(tuple((model, statuses[model.name]) for model in catalog.chain(offered.name)))
+        first = chain.ready[0][1] if chain.ready else None
+        listed.append(
             ModelOut(
                 id=offered.name,
                 title=offered.title,
@@ -76,12 +89,13 @@ async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelLi
                 model=offered.model,
                 context_window=offered.context_window,
                 max_output_tokens=offered.max_output_tokens,
-                status=statuses[offered.name].state,
-                thinking=statuses[offered.name].thinking,
+                then=list(offered.then),
+                status="ready" if first is not None else chain.status.state,
+                # None ready: its own word, as for a model that has no stand-in.
+                thinking=(first or chain.status).thinking,
             )
-            for offered in catalog
-        ],
-    )
+        )
+    return ModelList(default=catalog.default, models=listed)
 
 
 @router.post(
@@ -96,7 +110,8 @@ async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelLi
         204: {
             "description": "Nothing was started: the model's kind of server can't be "
             "asked to load a model ahead, or its server is writing as many answers as "
-            "it takes."
+            "it takes, or the model can't answer and a model asked in its place would, "
+            "which is never loaded ahead."
         },
         404: {"description": "No model is called that."},
         429: {
@@ -104,8 +119,9 @@ async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelLi
             "`Retry-After` says how long to wait."
         },
         503: {
-            "description": "The model can't answer right now: `model_status` says why. "
-            "Or requests can't be counted right now."
+            "description": "The model can't answer right now, nor can any model asked "
+            "in its place: `model_status` says why the model itself can't. Or requests "
+            "can't be counted right now."
         },
     },
 )
@@ -124,7 +140,10 @@ async def warm_up(
     except UnknownModelError:
         raise Problem(404, "No model is called that. GET /api/models lists them.") from None
     await limits.warm_up(principal.user_id)
-    status = await catalog.status(offered.name, now=now)
-    if status.state != "ready":
-        raise not_ready(offered.name, status.state)
+    # Refused as a question to it is: when neither it nor a stand-in can answer.
+    chain = await catalog.chain_status(offered.name, now=now)
+    if not chain.ready:
+        raise not_ready(offered.name, chain.status.state)
+    if chain.status.state != "ready":
+        return Response(status_code=204)  # a stand-in would answer: none is loaded ahead
     return Response(status_code=202 if catalog.load_ahead(offered.name) else 204)

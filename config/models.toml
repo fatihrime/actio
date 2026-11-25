@@ -68,6 +68,19 @@ kind = "ollama"
 #   thinking_off = { reasoning_effort = "low" }
 #   thinking_on = { reasoning_effort = "medium" }
 #
+# then               other models of this file, asked in this one's place, in this
+#                    order, when it can't answer: its server is away, too busy, or
+#                    refuses the request. Only before the first word, or thought, of
+#                    an answer: after it, the answer is this model's, and so is its
+#                    failure. A model that isn't ready is passed over. Each is asked as
+#                    the model it is, on its server, with its window and its limits,
+#                    and their own `then` isn't followed. The question costs what it
+#                    costs with this model, and no answer is longer than this model's
+#                    may be. Left out, none. See
+#                    docs/adr/0028-a-model-names-those-that-stand-in-for-it.md:
+#
+#   then = ["standard"]
+#
 # Several models on one Ollama: it keeps in memory what it decides it has room for, and
 # was seen to unload one model to load another on a machine with room for both. The page
 # asks for the model that answers to be loaded ahead, so with two models in use their

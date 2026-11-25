@@ -5,7 +5,8 @@ When the models file names a model for titles (`Catalog.titles`), the first of i
 that completes asks for a better one: it defers the job `WRITE_TITLE`, in the
 transaction that records it (`actio.chat.turns.finish`). The worker runs `write`, which
 asks that model for a title of a few words, from the first question alone, and writes it
-over the first line, unless a person has renamed the conversation meanwhile.
+over the first line, unless a person has renamed the conversation meanwhile. When that
+model can't answer, those that stand in for it are asked in its place, as for a turn.
 
 Who named a conversation is on its row (`Conversation.title_by`): `question`, `model`,
 or `person`. Only `write` makes a `question` a `model`, and nothing writes over a
@@ -32,8 +33,9 @@ import logging
 import re
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import aclosing, nullcontext
+from contextlib import aclosing
 from datetime import datetime, timedelta
+from functools import partial
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,15 +45,16 @@ from actio.chat import tree
 from actio.chat.models import Conversation
 from actio.chat.parts import Part, TextPart, from_stored
 from actio_llm import (
+    FOR_NOW,
     ChatRequest,
     Finish,
+    Link,
     LLMError,
-    ProviderError,
-    ProviderUnavailableError,
     StreamEvent,
     StreamInterruptedError,
     TextDelta,
     User,
+    Walk,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,12 +140,6 @@ _AROUND = re.compile(r"^([*_`]+)((?:(?!\1).)+)\1$")
 
 _NAMED = re.compile(r"^([*_`]*)title\s*(?::\s*\1|\1\s*:)\s*", re.IGNORECASE)
 """A title that says it is one: `Title: …`, `**Title:** …`, or `**Title**: …`."""
-
-_FOR_NOW = (ProviderUnavailableError, StreamInterruptedError, ProviderError)
-"""The model's errors that may be gone at a later try: its server away, overloaded or
-refusing for now (`RateLimitedError` is one of the first), an answer that broke off, a
-provider that failed. A request the provider refused, or a server older than its client
-knows, would be the same the next time: those, and any other `LLMError`, are not."""
 
 
 class NotWrittenError(Exception):
@@ -333,51 +330,75 @@ async def _ask(
     """What the model wrote for a title: its text, never its reasoning. `None` when it
     won't give one: it is missing from its server, or the provider refused the request.
     Raises `NotWrittenError` when it couldn't for now: its server doesn't answer, it
-    failed in a way that may be gone at a later try (`_FOR_NOW`), or it took longer than
-    `WRITTEN_WITHIN_S`. Either way the log says which first.
+    failed in a way that may be gone at a later try (`actio_llm.FOR_NOW`), or it took
+    longer than `WRITTEN_WITHIN_S`. Either way the log says which first.
 
     A model's status is `unreachable` whenever its server didn't say whether it has the
     model: when it doesn't answer, and also when it answers that question with an error,
     whatever the error. The status doesn't say which, so each is asked again.
 
-    The request is shaped as a turn's is, where the two meet: the same context window,
-    since a local server reloads its model when that changes, and reasoning off, for a
-    model that can reason. A model whose server writes only so many answers at once
-    waits at its gate, as an answer does, and gives its place back once its stream is
-    closed.
+    The model is asked as a turn asks it, with those that stand in for it after it, in
+    order, when it can't answer before its first word (`actio_llm.Walk`, ADR 0028): each
+    with a request of its own, behind its own gate, and all inside `WRITTEN_WITHIN_S`.
+    When all of them failed, the walk's error decides, by the rule of `FOR_NOW`.
+
+    A request is shaped as a turn's is, where the two meet: the model's own context
+    window, since a local server reloads its model when that changes, and reasoning off,
+    for a model that can reason. A model whose server writes only so many answers at
+    once waits at its gate, as an answer does, and gives its place back once its stream
+    is closed: before the next model's gate is waited at.
 
     A model that isn't ready is not asked, as a turn doesn't ask one. What it can do
     isn't known then, and one that reasons unless it is told not to would spend a
-    title's few tokens on reasoning."""
+    title's few tokens on reasoning. When none of them is ready, the title is asked for
+    again later if one of them is `unreachable`, and not when all are `missing`."""
     try:
         async with asyncio.timeout(WRITTEN_WITHIN_S):
-            status = await catalog.status(offered.name, now=now)
-            if status.state != "ready":
-                logger.warning(
-                    "conversation %s: no title, its model is %s", conversation_id, status.state
+            chain = await catalog.chain_status(offered.name, now=now)
+            if not chain.ready:
+                said = (
+                    f"its model is {chain.status.state}"
+                    if len(chain.models) == 1
+                    else "none of its models is ready"
                 )
-                if status.state == "unreachable":  # its server may answer at a later try
-                    raise NotWrittenError(
-                        f"conversation {conversation_id}: no title, its model is unreachable"
-                    )
+                logger.warning("conversation %s: no title, %s", conversation_id, said)
+                if any(status.state == "unreachable" for _, status in chain.models):
+                    # Its server may answer at a later try.
+                    raise NotWrittenError(f"conversation {conversation_id}: no title, {said}")
                 return None
-            request = ChatRequest(
-                model=offered.model,
-                messages=[User(_asking(question))],
-                max_output_tokens=TITLE_TOKENS,
-                context_window=offered.context_window,
-                # As for a turn with thinking off: one that can't reason must not be told.
-                thinking=False if status.thinking else None,
+            for passed, status in chain.passed_over:
+                logger.warning(
+                    "conversation %s: model %s is %s, and is passed over",
+                    conversation_id,
+                    passed.name,
+                    status.state,
+                )
+            walk = Walk(
+                [
+                    Link(
+                        model.name,
+                        model.chat,
+                        ChatRequest(
+                            model=model.model,
+                            messages=[User(_asking(question))],
+                            max_output_tokens=TITLE_TOKENS,
+                            context_window=model.context_window,
+                            # As for a turn with thinking off: one that can't reason must
+                            # not be told.
+                            thinking=False if status.thinking else None,
+                        ),
+                        model.gate,
+                    )
+                    for model, status in chain.ready
+                ],
+                on_failed=partial(_passed_over, conversation_id, several=len(chain.ready) > 1),
             )
-            async with (
-                offered.gate or nullcontext(),
-                aclosing(offered.chat.stream(request)) as events,
-            ):
+            async with aclosing(walk.stream()) as events:
                 return await _text_of(events)
     except LLMError as error:
         said = f"no title, its model failed ({type(error).__name__})"
         logger.warning("conversation %s: %s", conversation_id, said)
-        if isinstance(error, _FOR_NOW):
+        if isinstance(error, FOR_NOW):
             # Without its cause: the model's error may quote the question.
             raise NotWrittenError(f"conversation {conversation_id}: {said}") from None
     except TimeoutError:
@@ -385,6 +406,35 @@ async def _ask(
         logger.warning("conversation %s: %s", conversation_id, said)
         raise NotWrittenError(f"conversation {conversation_id}: {said}") from None
     return None
+
+
+def _passed_over(
+    conversation_id: uuid.UUID,
+    failed: Link,
+    error: LLMError,
+    later: Link | None,
+    *,
+    several: bool,
+) -> None:
+    """Say in the log that a model failed before its first word, and which is asked
+    next: its error's kind, never its text, which may quote the question. A title asked
+    of one model says nothing here: the line that says why it has no title says it."""
+    kind = type(error).__name__
+    if later is not None:
+        logger.warning(
+            "conversation %s: model %s failed (%s), and %s is asked next",
+            conversation_id,
+            failed.name,
+            kind,
+            later.name,
+        )
+    elif several:
+        logger.warning(
+            "conversation %s: model %s failed (%s), and no other is left to ask",
+            conversation_id,
+            failed.name,
+            kind,
+        )
 
 
 async def _text_of(events: AsyncIterator[StreamEvent]) -> str:

@@ -1474,6 +1474,178 @@ async def test_inside_the_api_a_title_waits_behind_an_answer_at_its_server_and_c
     assert (title, by) == ("Fixing a flat tyre", "model")
 
 
+# --- Models that stand in for the one named for titles --------------------------------
+
+
+async def test_a_model_that_stands_in_writes_the_title_when_the_named_one_cant(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    queue_books: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Asked as the named one is, with a request of its own: its name on its server, its
+    own window, and reasoning off only for a model that can reason. The log says which
+    failed, by its error's kind, and which was asked next."""
+    named_one = lineup.add(
+        "standard",
+        ProviderUnavailableError(f"busy with: {QUESTION}"),
+        then=["second"],
+        thinking=True,
+    )
+    stand_in = lineup.add(
+        "second", TextDelta("Fixing a flat tyre"), DONE, context_window=2048, gate=Gate(1)
+    )
+    catalog = lineup.catalog(titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    [asked_first], [asked_then] = named_one.requests, stand_in.requests
+    assert (asked_first.model, asked_first.context_window, asked_first.thinking) == (
+        "scripted-standard",
+        4096,
+        False,
+    )
+    assert asked_then == ChatRequest(
+        model="scripted-second",
+        messages=asked_first.messages,
+        max_output_tokens=titles.TITLE_TOKENS,
+        context_window=2048,
+        thinking=None,
+    )
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert await queue_books.due() == []  # it succeeded, and was deleted
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model standard failed"
+            " (ProviderUnavailableError), and second is asked next",
+        )
+    ]
+    assert "flat tyre on my bike" not in caplog.text
+
+
+async def test_a_model_that_isnt_ready_is_passed_over_for_one_that_stands_in(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    named_one = lineup.add(
+        "standard", TextDelta("Never"), DONE, state="unreachable", then=["second"]
+    )
+    lineup.add("second", TextDelta("Fixing a flat tyre"), DONE)
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, lineup.catalog(titles="standard"), clock, work_through)
+
+    assert named_one.requests == []
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model standard is unreachable, and is"
+            " passed over",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failures", "says", "then"),
+    [
+        (
+            (RequestRejectedError("refused"), ProviderUnavailableError("busy")),
+            "ProviderUnavailableError",
+            put_back(1, 30),
+        ),
+        (
+            (ProviderError("failed"), ContextOverflowError("too long")),
+            "ProviderError",
+            put_back(1, 30),
+        ),
+        (
+            (RequestRejectedError("refused"), ContextOverflowError("too long")),
+            "ContextOverflowError",
+            [],
+        ),
+    ],
+    ids=["refused, then busy", "failed, then too long", "refused, then too long"],
+)
+async def test_when_every_model_failed_the_title_is_asked_for_again_by_the_rule_of_errors(
+    failures: tuple[LLMError, LLMError],
+    says: str,
+    then: list[tuple[str, str, int, float]],
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    queue_books: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The error that another try may not meet again, when one of them failed so: then
+    the job is put back. When none did, the last one's, and the job ends well."""
+    first = lineup.add("standard", failures[0], then=["second"])
+    second = lineup.add("second", failures[1])
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, lineup.catalog(titles="standard"), clock, work_through)
+
+    assert (len(first.requests), len(second.requests)) == (1, 1)
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert await queue_books.due() == then
+    assert said(caplog)[-1] == (
+        logging.WARNING,
+        f"conversation {begun.conversation.id}: no title, its model failed ({says})",
+    )
+
+
+@pytest.mark.parametrize(
+    ("states", "then"),
+    [(("missing", "unreachable"), put_back(1, 30)), (("missing", "missing"), [])],
+    ids=["one of them unreachable, for now", "all missing, for good"],
+)
+async def test_when_none_of_the_models_is_ready_the_title_waits_only_for_one_that_is_unreachable(
+    states: tuple[Any, Any],
+    then: list[tuple[str, str, int, float]],
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    queue_books: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A server that doesn't answer may answer at a later try. A model missing from its
+    server is missing at the next try too."""
+    first = lineup.add("standard", TextDelta("Never"), DONE, state=states[0], then=["second"])
+    second = lineup.add("second", TextDelta("Never"), DONE, state=states[1])
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, lineup.catalog(titles="standard"), clock, work_through)
+
+    assert (first.requests, second.requests) == ([], [])
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert await queue_books.due() == then
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: no title, none of its models is ready",
+        )
+    ]
+
+
 # --- Whether the list says a title is on its way ---------------------------------------
 
 
