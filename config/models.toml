@@ -32,6 +32,9 @@ titles = "standard"
 #   url = "http://127.0.0.1:1234/v1"
 #   api_key_env = "LMSTUDIO_API_KEY"
 #
+#   Groq's and the Gemini API's free tiers are such servers: config/examples/free-cloud
+#   is a pair of files to copy that offers their models beside the one below.
+#
 # answers_at_once: how many answers the server writes at the same time, across all the
 #   models it runs. An answer that would be one more waits its turn inside Actio, which
 #   asks the server only once it has room, so that the wait doesn't count against the
@@ -54,6 +57,16 @@ kind = "ollama"
 # max_output_tokens  the most tokens one answer may have, reasoning included
 # thinking           for an "openai-compatible" server only: whether the model can reason
 #                    before it answers (true or false). Ollama says so itself.
+# thinking_off       for such a model whose `thinking` is true: what a request holds when
+#                    a turn asks for no reasoning, as a table. Left out, it is
+#                    { reasoning_effort = "none" }, which some models refuse; {} is
+#                    nothing at all
+# thinking_on        the same, when a turn asks for reasoning. Left out, nothing: the
+#                    model's own default. Neither may hold what Actio writes into a
+#                    request itself, such as `model` or `max_tokens`:
+#
+#   thinking_off = { reasoning_effort = "low" }
+#   thinking_on = { reasoning_effort = "medium" }
 #
 # Several models on one Ollama: it keeps in memory what it decides it has room for, and
 # was seen to unload one model to load another on a machine with room for both. The page

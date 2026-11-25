@@ -63,10 +63,15 @@ def ms(moment: datetime) -> int:
 # --- The file -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("folder", ["config", "deploy/e2e/config"], ids=["make up", "make e2e"])
+FOLDERS = ["config", "deploy/e2e/config", "config/examples/free-cloud"]
+OF = ["make up", "make e2e", "the example of free cloud models"]
+
+
+@pytest.mark.parametrize("folder", FOLDERS, ids=OF)
 def test_the_files_in_the_repository_price_the_models_beside_them(folder: str) -> None:
-    """What `make up` and `make dev` start with, and what `make e2e` starts with: in
-    each folder, a models file and the plans file that goes with it."""
+    """What `make up` and `make dev` start with, what `make e2e` starts with, and the
+    example to copy over the first: in each folder, a models file and the plans file
+    that goes with it."""
     offered = catalog.read_file(ROOT / folder / "models.toml").models
 
     loaded = plans.load(ROOT / folder / "plans.toml", models=offered)
@@ -106,7 +111,7 @@ def test_the_end_to_end_stack_names_conversations_with_a_model_that_isnt_free() 
     assert loaded.price_of("namer").output > 0
 
 
-@pytest.mark.parametrize("folder", ["config", "deploy/e2e/config"], ids=["make up", "make e2e"])
+@pytest.mark.parametrize("folder", FOLDERS, ids=OF)
 def test_a_guest_has_two_answers_written_at_once_and_an_account_three(folder: str) -> None:
     offered = catalog.read_file(ROOT / folder / "models.toml").models
 

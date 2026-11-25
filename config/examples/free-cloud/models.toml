@@ -1,0 +1,126 @@
+# An example to copy: the models of two cloud providers' free tiers, Groq's and the
+# Gemini API's, offered beside the model Actio ships with, which stays the default.
+#
+# Each provider's key goes in .env, GROQ_API_KEY and GEMINI_API_KEY: a key that isn't
+# set stops the API from starting. `make preflight` says what each key's account may use.
+# Then, with this file and plans.toml beside it:
+#
+# - under `make dev`, copy the two to a folder of your own, config/local/, which git
+#   leaves alone, and point ACTIO_MODELS_FILE=config/local/models.toml and
+#   ACTIO_PLANS_FILE=config/local/plans.toml at the copies in .env. Nothing tracked
+#   changes;
+# - under `make up`, the containers read config/models.toml and config/plans.toml, so
+#   copy the two over those. That changes two tracked files, and the repository's own
+#   tests read config/ as it is shipped: run them with the shipped pair back.
+#
+# Run `make dev` or `make up` again after either. The page asks the default model, until
+# it can offer a choice: to chat with a cloud model there, set `default` below to its
+# name in your copy. `GET /api/models` lists them all, and a turn's request may name one.
+#
+# On the Gemini API's free tier, what is sent may be used to improve Google's products
+# and be read by human reviewers: nothing private goes through a free key.
+#
+# What each setting means is in config/models.toml. What the two providers were seen to
+# do, on 2026-11-25 with free keys:
+# docs/adr/0027-cloud-models-through-their-openai-compatible-layers.md.
+
+default = "standard"
+titles = "standard"
+
+[providers.ollama]
+kind = "ollama"
+
+# Groq's OpenAI-compatible API. A key is made at https://console.groq.com/keys.
+[providers.groq]
+kind = "openai-compatible"
+url = "https://api.groq.com/openai/v1"
+api_key_env = "GROQ_API_KEY"
+
+# The Gemini API's OpenAI-compatible layer. A key is made at
+# https://aistudio.google.com/apikey.
+[providers.gemini]
+kind = "openai-compatible"
+url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key_env = "GEMINI_API_KEY"
+
+# The model Actio ships with, as config/models.toml offers it.
+[models.standard]
+title = "Qwen 3.5 4B"
+provider = "ollama"
+model = "qwen3.5:4b-q4_K_M"
+context_window = 8192
+max_output_tokens = 2048
+
+# Groq's free plan takes 8,000 tokens a minute for each of these two models, as its
+# answers' headers said on 2026-11-25, and refuses a request larger than that whole. So
+# a conversation has 8,000 tokens of room there, whatever the model's own window,
+# 131,072 in Groq's list of models. `make preflight` prints the figure for your account:
+# raise it on a paid plan.
+#
+# These models always reason, and "low" is the least they can be told: a turn that asks
+# for no reasoning gets that, and one that asks for reasoning gets "medium". Told "high",
+# the larger one spent all 2,048 tokens of an answer on its thoughts, counting the words
+# of the answer it meant to give, and the answer was cut short; told "medium", the same
+# question took about 250 tokens, twice.
+#
+# Leave `titles` with a model that can go without reasoning. A title gets room for 24
+# tokens, and these models' thoughts took all of it: none of five titles came.
+[models.groq-large]
+title = "GPT-OSS 120B (Groq)"
+provider = "groq"
+model = "openai/gpt-oss-120b"
+context_window = 8000
+max_output_tokens = 2048
+thinking = true
+thinking_off = { reasoning_effort = "low" }
+thinking_on = { reasoning_effort = "medium" }
+
+[models.groq-small]
+title = "GPT-OSS 20B (Groq)"
+provider = "groq"
+model = "openai/gpt-oss-20b"
+context_window = 8000
+max_output_tokens = 2048
+thinking = true
+thinking_off = { reasoning_effort = "low" }
+thinking_on = { reasoning_effort = "medium" }
+
+# The Gemini API's two models. As one free account had them on 2026-11-25:
+# gemini-3.6-flash 5 requests a minute, 250,000 tokens a minute and 20 requests a day;
+# gemini-3.5-flash-lite 15 requests a minute, 250,000 tokens a minute and 500 requests
+# a day. So flash-lite is the one for more than a few questions a day. Yours are at
+# https://aistudio.google.com/rate-limit: no answer's headers state them.
+#
+# context_window is the 250,000 tokens a minute that the free tier allowed each model
+# that day, less than the model's own window of 1,048,576: a request larger than a
+# minute's allowance can't fit in it. Groq was seen to refuse such a request whole; with
+# the Gemini API it wasn't tried. Raise it on a paid plan. For max_output_tokens,
+# `make preflight` prints the longest answer the API states for each model: this
+# file's must be no larger.
+
+# The API sends this model's thoughts only when it is asked to, which `thinking_on`
+# does. A turn that asks for no reasoning is told Actio's own "none", which it takes.
+[models.gemini-flash]
+title = "Gemini 3.6 Flash"
+provider = "gemini"
+model = "gemini-3.6-flash"
+context_window = 250000
+max_output_tokens = 8192
+thinking = true
+thinking_on = { extra_body = { google = { thinking_config = { include_thoughts = true } } } }
+
+# This model refuses "none", so a turn that asks for no reasoning is told nothing,
+# `thinking_off = {}`, and then it doesn't reason. It reasons only when it is told to:
+# asked to show its thoughts and nothing more, it showed none. On 2026-11-25, 11 of its
+# 17 answers with reasoning were refused or broke off because the model was too busy,
+# at each level of thinking that was tried, and none of 12 without: the page then says
+# so, and offers another try.
+[models.gemini-lite]
+title = "Gemini 3.5 Flash-Lite"
+provider = "gemini"
+model = "gemini-3.5-flash-lite"
+context_window = 250000
+max_output_tokens = 8192
+thinking = true
+thinking_off = {}
+thinking_on = { extra_body = { google = { thinking_config = { include_thoughts = true, thinking_level = "high" } } } }

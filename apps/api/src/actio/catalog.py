@@ -30,7 +30,14 @@ from pathlib import Path
 from typing import Annotated, Literal, Self
 
 import httpx2
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StringConstraints,
+    model_validator,
+)
 
 from actio.core import config_file
 from actio.core.config_file import Name
@@ -44,6 +51,7 @@ from actio_llm import (
     OpenAICompatible,
     Timeouts,
 )
+from actio_llm.openai_compatible import OWN_MEMBERS
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +124,14 @@ class ModelEntry(BaseModel):
     thinking: bool | None = None
     """Whether the model can reason before it answers. Only for providers that can't be
     asked; an Ollama server says so itself."""
+    thinking_off: dict[str, JsonValue] | None = None
+    """What a request to the model holds when a turn asks for no reasoning, in place of
+    the client's own `reasoning_effort = "none"`: an empty table holds nothing. Only for
+    a model of an "openai-compatible" server whose `thinking` is true. Only what JSON
+    can hold: a TOML date in it would fail every request while its body is written."""
+    thinking_on: dict[str, JsonValue] | None = None
+    """What a request to the model holds when a turn asks for reasoning, in place of
+    nothing. Only where `thinking_off` may be, and as it may be."""
 
     @model_validator(mode="after")
     def _leaves_room_for_the_prompt(self) -> Self:
@@ -156,6 +172,26 @@ class CatalogFile(BaseModel):
                     f"models.{name}: leave `thinking` out for a model on Ollama, "
                     "which says itself what its models can do"
                 )
+            for told in ("thinking_off", "thinking_on"):
+                members = getattr(model, told)
+                if members is None:
+                    continue
+                if provider.kind == "ollama":
+                    raise ValueError(
+                        f"models.{name}: leave `{told}` out for a model on Ollama, "
+                        "which is told whether to reason in its own way"
+                    )
+                if model.thinking is not True:
+                    raise ValueError(
+                        f"models.{name}: `{told}` is for a model that can reason: "
+                        "it needs `thinking = true`"
+                    )
+                for member in members:
+                    if member in OWN_MEMBERS:
+                        raise ValueError(
+                            f"models.{name}: `{told}` can't hold `{member}`, "
+                            "which Actio writes into a request itself"
+                        )
         return self
 
 
@@ -381,7 +417,8 @@ async def build(
     """
     transports = transports or {}
     async with AsyncExitStack() as stack:
-        chats: dict[str, ChatProvider] = {}
+        ollamas: dict[str, Ollama] = {}
+        clients: dict[str, httpx2.AsyncClient] = {}
         gates = {
             name: Gate(provider.at_once) if provider.at_once is not None else None
             for name, provider in file.providers.items()
@@ -404,9 +441,24 @@ async def build(
                 )
             )
             if provider.kind == "ollama":
-                chats[name] = Ollama(client, timeouts=TIMEOUTS)
+                ollamas[name] = Ollama(client, timeouts=TIMEOUTS)
             else:
-                chats[name] = OpenAICompatible(client, provider=name, timeouts=TIMEOUTS)
+                clients[name] = client
+
+        def chat_of(entry: ModelEntry) -> ChatProvider:
+            """The one client of an Ollama, for every model on it. For a server that
+            speaks OpenAI's API, a model's own, over its provider's HTTP client: what
+            the model is told about reasoning is its own."""
+            if entry.provider in ollamas:
+                return ollamas[entry.provider]
+            return OpenAICompatible(
+                clients[entry.provider],
+                provider=entry.provider,
+                timeouts=TIMEOUTS,
+                thinking_off=entry.thinking_off,
+                thinking_on=entry.thinking_on,
+            )
+
         models = {
             name: OfferedModel(
                 name=name,
@@ -415,7 +467,7 @@ async def build(
                 model=entry.model,
                 context_window=entry.context_window,
                 max_output_tokens=entry.max_output_tokens,
-                chat=chats[entry.provider],
+                chat=chat_of(entry),
                 gate=gates[entry.provider],
             )
             for name, entry in file.models.items()

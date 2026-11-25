@@ -12,6 +12,9 @@
 *.pem
 # One person's own Claude Code settings and permission choices.
 .claude/settings.local.json
+# Your own models and plans files, such as copies of config/examples/free-cloud's, which
+# `make dev` reads when ACTIO_MODELS_FILE and ACTIO_PLANS_FILE in .env point at them.
+config/local/
 
 # --- Python ---
 __pycache__/

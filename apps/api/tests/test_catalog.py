@@ -9,6 +9,7 @@ import asyncio
 import json
 import tomllib
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,7 @@ from actio.catalog import (
 from actio_fakellm.app import DEFAULT_MODELS as FAKE_MODELS
 from actio_fakellm.app import QUIET
 from actio_fakellm.app import create_app as create_fake_llm
-from actio_llm import Ollama, OpenAICompatible
+from actio_llm import ChatRequest, Ollama, OpenAICompatible, Timeouts, User
 
 pytestmark = pytest.mark.anyio
 
@@ -142,6 +143,31 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
     assert file.models[file.titles].model == QUIET
 
 
+async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """config/examples/free-cloud, a pair of files to copy over config/'s: the shipped
+    model, and Groq's and the Gemini API's beside it. Checked as the repository's own
+    pair is, so that it can't rot. Its plans file is checked in test_plans.py."""
+    monkeypatch.setenv("GROQ_API_KEY", "a-placeholder")
+    monkeypatch.setenv("GEMINI_API_KEY", "a-placeholder")
+    file = read_file(ROOT / "config" / "examples" / "free-cloud" / "models.toml")
+    shipped = read_file(ROOT / "config" / "models.toml")
+
+    async with catalogs.build(file, ollama_url="http://127.0.0.1:1") as catalog:
+        offered = [(model.name, model.kind) for model in catalog]
+
+    assert (file.default, file.titles) == (shipped.default, shipped.titles)
+    assert file.models[file.default] == shipped.models[shipped.default]
+    assert offered == [
+        ("standard", "ollama"),
+        ("groq-large", "openai-compatible"),
+        ("groq-small", "openai-compatible"),
+        ("gemini-flash", "openai-compatible"),
+        ("gemini-lite", "openai-compatible"),
+    ]
+
+
 def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:
     file = read_file(written(tmp_path, GOOD))
 
@@ -241,6 +267,36 @@ MISTAKES = {
         'kind = "ollama"',
         'kind = "ollama"\nanswers_at_once = -1',
         "providers.ollama.answers_at_once",
+    ),
+    "how to tell a model not to reason, for one that can't reason": (
+        "thinking = true",
+        'thinking = false\nthinking_off = { reasoning_effort = "low" }',
+        "models.big: `thinking_off` is for a model that can reason",
+    ),
+    "how to tell a model to reason, for one that isn't said to": (
+        "thinking = true",
+        "thinking_on = { extra_body = { think = true } }",
+        "models.big: `thinking_on` is for a model that can reason",
+    ),
+    "how to tell a model on Ollama to reason": (
+        "max_output_tokens = 2048",
+        'max_output_tokens = 2048\nthinking_on = { reasoning_effort = "high" }',
+        "models.standard: leave `thinking_on` out for a model on Ollama",
+    ),
+    "something Actio writes into a request itself": (
+        "thinking = true",
+        "thinking = true\nthinking_off = { max_tokens = 16 }",
+        "models.big: `thinking_off` can't hold `max_tokens`",
+    ),
+    "how to tell a model to reason, written as a word": (
+        "thinking = true",
+        'thinking = true\nthinking_on = "high"',
+        "models.big.thinking_on",
+    ),
+    "how to tell a model to reason, with what JSON can't hold": (
+        "thinking = true",
+        "thinking = true\nthinking_on = { extra_body = { at = 1979-05-27 } }",
+        "models.big.thinking_on",
     ),
 }
 
@@ -497,6 +553,73 @@ async def test_a_key_that_is_not_in_the_environment_stops_the_catalog_from_openi
     assert "providers.lab: the environment variable LAB_API_KEY" in str(failure.value)
 
 
+async def test_each_model_of_a_server_is_told_about_reasoning_as_the_file_says() -> None:
+    """Three models of one server that speaks OpenAI's API: the one the file says nothing
+    more of is told the client's own "none" when a turn asks for no reasoning, and
+    nothing when it asks for some; the others what the file says, an empty table being
+    nothing at all. They share the server's gate, and the way to it that a test gives by
+    the provider's name."""
+    file = parsed(
+        GOOD.replace('url = "http://lab', 'answers_at_once = 2\nurl = "http://lab')
+        + """
+[models.small]
+title = "The lab's small model"
+provider = "lab"
+model = "fake-quiet"
+context_window = 8192
+max_output_tokens = 1024
+thinking = true
+thinking_off = { reasoning_effort = "low" }
+thinking_on = { extra_body = { google = { thinking_config = { include_thoughts = true } } } }
+
+[models.lite]
+title = "A model that refuses to be told none"
+provider = "lab"
+model = "fake-lite"
+context_window = 8192
+max_output_tokens = 1024
+thinking = true
+thinking_off = {}
+"""
+    )
+    sent: list[dict[str, Any]] = []
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content))
+        return httpx2.Response(
+            200, content=b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        )
+
+    async with catalogs.build(
+        file, ollama_url="http://ollama", transports={"lab": httpx2.MockTransport(answer)}
+    ) as catalog:
+        big, small, lite = catalog.get("big"), catalog.get("small"), catalog.get("lite")
+        for offered in (big, small, lite):
+            for thinking in (False, True):
+                request = ChatRequest(offered.model, [User("hi")], thinking=thinking)
+                async with aclosing(offered.chat.stream(request)) as events:
+                    async for _ in events:
+                        pass
+
+    told = [{name: body.get(name) for name in ("reasoning_effort", "extra_body")} for body in sent]
+    assert [body["model"] for body in sent] == (
+        ["fake-chat"] * 2 + ["fake-quiet"] * 2 + ["fake-lite"] * 2
+    )
+    assert told == [
+        {"reasoning_effort": "none", "extra_body": None},
+        {"reasoning_effort": None, "extra_body": None},
+        {"reasoning_effort": "low", "extra_body": None},
+        {
+            "reasoning_effort": None,
+            "extra_body": {"google": {"thinking_config": {"include_thoughts": True}}},
+        },
+        {"reasoning_effort": None, "extra_body": None},  # `thinking_off = {}`: nothing
+        {"reasoning_effort": None, "extra_body": None},
+    ]
+    assert big.gate is not None
+    assert big.gate is small.gate is lite.gate
+
+
 # --- Asking about a model -------------------------------------------------------------
 
 
@@ -580,6 +703,55 @@ async def test_an_openai_compatible_server_is_asked_for_its_list_of_models(
         parsed(GOOD), ollama_url="http://ollama", transports={"lab": fake}
     ) as catalog:
         assert await catalog.status("big", now=NOON) == expected
+
+
+async def test_a_model_named_by_a_path_is_found_by_that_path() -> None:
+    """A server may name a model `models/qwen`, and take exactly that, as vLLM started
+    with a path does. (The Gemini API lists `models/<name>` and takes `<name>`: that
+    spelling is found too, as packages/llm's tests show.)"""
+    file = parsed(GOOD.replace('model = "fake-chat"', 'model = "models/qwen"'))
+
+    def lists(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"object": "list", "data": [{"id": "models/qwen"}]})
+
+    async with catalogs.build(
+        file, ollama_url="http://ollama", transports={"lab": httpx2.MockTransport(lists)}
+    ) as catalog:
+        assert await catalog.status("big", now=NOON) == ModelStatus("ready", True)
+
+
+class AnswersLate(httpx2.AsyncBaseTransport):
+    """A server that lists its models after `late_s` seconds. Like a real connection, it
+    is given up on when the request's own time to read runs out first."""
+
+    def __init__(self, late_s: float) -> None:
+        self.late_s = late_s
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        patience = request.extensions["timeout"]["read"]
+        if patience is not None and patience < self.late_s:
+            await asyncio.sleep(patience)
+            raise httpx2.ReadTimeout("timed out", request=request)
+        await asyncio.sleep(self.late_s)
+        return httpx2.Response(200, json={"object": "list", "data": [{"id": "fake-chat"}]})
+
+
+async def test_a_cloud_models_status_is_asked_with_the_catalogs_short_patience(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that takes longer than the catalog gives a small call is away, whatever
+    the client's own patience for one. The time limit fails a test that waits on."""
+    monkeypatch.setattr(catalogs, "TIMEOUTS", Timeouts(connect_s=0.05, request_s=0.05))
+
+    async with (
+        asyncio.timeout(5),
+        catalogs.build(
+            parsed(GOOD), ollama_url="http://ollama", transports={"lab": AnswersLate(1.0)}
+        ) as catalog,
+    ):
+        status = await catalog.status("big", now=NOON)
+
+    assert status == ModelStatus("unreachable", False)
 
 
 async def test_an_answer_about_a_model_is_reused_for_a_quarter_of_a_minute() -> None:
