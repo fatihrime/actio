@@ -11,7 +11,9 @@ what to call it at its provider, its limits, and the client to stream an answer 
 - `Catalog.status` asks a provider whether it has a model, and what the model can do.
 - `Catalog.chain` gives a model and those that stand in for it, which are asked in its
   place when it can't answer before the first word, and `Catalog.chain_status` says
-  which of them are ready (ADR 0028).
+  which of them are ready (ADR 0028). `Chain.asked_with` says which of those are asked
+  for a request of so many tokens: a model whose room is smaller is passed over while
+  another has room (`OfferedModel.room`, ADR 0029).
 - `Catalog.load_ahead` has a model's server load it into memory before the first
   question to it, where the server can be asked to (ADR 0026): the model itself, never
   one that stands in for it.
@@ -173,6 +175,15 @@ class ModelEntry(BaseModel):
     then: tuple[Name, ...] = ()
     """Other models of the file, asked in this one's place, in this order, when it can't
     answer before the first word (ADR 0028). Their own `then` isn't followed."""
+    tokens_a_minute: int | None = Field(default=None, ge=1, strict=True)
+    """How many tokens the model's server takes from this installation's account in a
+    minute, as a cloud provider's plan says: the provider's own figure, for this model.
+    A request larger than that fits in no minute there, and Groq's free plan was seen to
+    refuse one whole, so it is part of the model's room (`OfferedModel.room`, ADR 0029),
+    whatever the server does with such a request. A whole number of 1 or more: a string,
+    a fraction, `8000.0` and `true` are mistakes. Nothing ties it to `context_window` or
+    `max_output_tokens`: either may be the smaller. Left out: the server has no such
+    limit."""
 
     @model_validator(mode="after")
     def _leaves_room_for_the_prompt(self) -> Self:
@@ -322,6 +333,20 @@ class OfferedModel:
     then: tuple[str, ...] = ()
     """The names of the models asked in its place, in this order, when it can't answer
     before the first word: see `Catalog.chain`."""
+    tokens_a_minute: int | None = None
+    """How many tokens its server takes from this installation's account in a minute.
+    `None`: no such limit."""
+
+    @property
+    def room(self) -> int:
+        """How many tokens of a request the model takes here: its context window, or
+        what its server takes in a minute when that is less. A model whose room is
+        smaller than a request is passed over while another of its chain has room
+        (`Chain.asked_with`). A request to it still carries its `context_window`: Ollama
+        loads the model by it, and which limit an answer reached is told by it."""
+        if self.tokens_a_minute is None:
+            return self.context_window
+        return min(self.context_window, self.tokens_a_minute)
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,6 +358,18 @@ class ModelStatus:
     `unreachable`: the server doesn't answer, or answers nonsense."""
     thinking: bool
     """Whether the model can reason before it answers. False when that isn't known."""
+
+
+@dataclass(frozen=True, slots=True)
+class Asked:
+    """The models of a chain that a request is asked of, and those passed over for it
+    (`Chain.asked_with`)."""
+
+    models: tuple[tuple[OfferedModel, ModelStatus], ...]
+    """Those to ask, in the chain's order, each with its status: ready, all of them."""
+    too_small: tuple[OfferedModel, ...]
+    """Those that are ready and are passed over, their room smaller than the request,
+    in the chain's order."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +394,22 @@ class Chain:
     def passed_over(self) -> list[tuple[OfferedModel, ModelStatus]]:
         """Those that aren't `ready`, in order."""
         return [(offered, status) for offered, status in self.models if status.state != "ready"]
+
+    def asked_with(self, tokens: int) -> Asked:
+        """Which of the ready models are asked for a request of about `tokens`, a guess
+        at its prompt, and which are passed over for their room (ADR 0029).
+
+        A model has room when `tokens` is no larger than its `room`. While at least one
+        ready model has room, those that haven't are passed over, and the others are
+        asked, in the chain's order. When none has, every ready model is asked, in order,
+        and none is passed over: a guess chooses who is asked, and never refuses a
+        request. A model that isn't ready is passed over whatever its room, and never
+        counts as one that has room."""
+        ready = self.ready
+        roomy = tuple((offered, status) for offered, status in ready if tokens <= offered.room)
+        if not roomy:
+            return Asked(tuple(ready), ())
+        return Asked(roomy, tuple(offered for offered, _ in ready if tokens > offered.room))
 
 
 class UnknownModelError(Exception):
@@ -561,6 +614,7 @@ async def build(
                 chat=chat_of(entry),
                 gate=gates[entry.provider],
                 then=entry.then,
+                tokens_a_minute=entry.tokens_a_minute,
             )
             for name, entry in file.models.items()
         }

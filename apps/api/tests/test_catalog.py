@@ -19,8 +19,10 @@ import pytest
 
 from actio import catalog as catalogs
 from actio.catalog import (
+    Asked,
     CatalogError,
     CatalogFile,
+    Chain,
     Gate,
     ModelStatus,
     OfferedModel,
@@ -135,6 +137,8 @@ def test_the_file_in_the_repository_is_valid() -> None:
     assert [provider.begins_within_seconds for provider in file.providers.values()] == [None]
     assert [provider.answers_within_seconds for provider in file.providers.values()] == [None]
     assert [provider.timeouts.answer_s for provider in file.providers.values()] == [300]
+    # A local server takes as many tokens as the model holds: its room is its window.
+    assert [model.tokens_a_minute for model in file.models.values()] == [None]
 
 
 def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() -> None:
@@ -176,6 +180,8 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
         name: (entry.answers_within_seconds, entry.timeouts.answer_s)
         for name, entry in file.providers.items()
     } == {standard.provider: (None, 300), hurried.provider: (3, 3), away.provider: (None, 300)}
+    # The fake takes any number of tokens a minute: no model's room is less than its window.
+    assert {model.tokens_a_minute for model in file.models.values()} == {None}
 
 
 async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
@@ -193,6 +199,7 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
         offered = [(model.name, model.kind) for model in catalog]
         stand_ins = {model.name: model.then for model in catalog}
         chain = [model.name for model in catalog.chain("groq-large")]
+        rooms = {model.name: model.room for model in catalog}
 
     assert (file.default, file.titles) == (shipped.default, shipped.titles)
     assert file.models[file.default] == shipped.models[shipped.default]
@@ -222,6 +229,24 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
         name: (provider.answers_within_seconds, provider.timeouts.answer_s)
         for name, provider in file.providers.items()
     } == {"ollama": (None, 300), "groq": (None, 300), "gemini": (None, 300)}
+    # Each cloud model's own window, and the tokens a minute its free plan takes: a
+    # request larger than those isn't sent there while another model has room for it.
+    assert {
+        name: (model.context_window, model.tokens_a_minute) for name, model in file.models.items()
+    } == {
+        "standard": (8192, None),
+        "groq-large": (131_072, 8_000),
+        "groq-small": (131_072, 8_000),
+        "gemini-flash": (1_048_576, 250_000),
+        "gemini-lite": (1_048_576, 250_000),
+    }
+    assert rooms == {
+        "standard": 8192,
+        "groq-large": 8_000,
+        "groq-small": 8_000,
+        "gemini-flash": 250_000,
+        "gemini-lite": 250_000,
+    }
 
 
 def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:
@@ -414,6 +439,36 @@ MISTAKES = {
         'thinking = true\nthen = ["standard", "standard"]',
         'models.big: `then` names "standard" twice',
     ),
+    "tokens a minute written as a word": (
+        "thinking = true",
+        'thinking = true\ntokens_a_minute = "8000"',
+        "models.big.tokens_a_minute",
+    ),
+    "tokens a minute that aren't whole": (
+        "thinking = true",
+        "thinking = true\ntokens_a_minute = 8000.5",
+        "models.big.tokens_a_minute",
+    ),
+    "tokens a minute written as a fraction": (
+        "max_output_tokens = 2048",
+        "max_output_tokens = 2048\ntokens_a_minute = 8000.0",
+        "models.standard.tokens_a_minute",
+    ),
+    "tokens a minute that are a yes": (
+        "thinking = true",
+        "thinking = true\ntokens_a_minute = true",
+        "models.big.tokens_a_minute",
+    ),
+    "no tokens a minute": (
+        "max_output_tokens = 2048",
+        "max_output_tokens = 2048\ntokens_a_minute = 0",
+        "models.standard.tokens_a_minute",
+    ),
+    "fewer tokens a minute than none": (
+        "thinking = true",
+        "thinking = true\ntokens_a_minute = -8000",
+        "models.big.tokens_a_minute",
+    ),
 }
 
 
@@ -550,6 +605,126 @@ async def test_a_chain_says_which_of_its_models_are_ready_in_order_with_their_st
     ]
     assert [model.name for model, _ in chain.passed_over] == passed_over
     assert chain.status.state == own
+
+
+# --- A model's room, and who is asked for a request -----------------------------------
+
+READY = ModelStatus("ready", thinking=False)
+REASONS = ModelStatus("ready", thinking=True)
+AWAY = ModelStatus("unreachable", thinking=False)
+GONE = ModelStatus("missing", thinking=False)
+
+
+def offered(
+    name: str, *, context_window: int = 8192, tokens_a_minute: int | None = None
+) -> OfferedModel:
+    """A model on offer whose server is never asked: for the rules that only read it."""
+    never: Any = None
+    return OfferedModel(
+        name=name,
+        title=name.capitalize(),
+        kind="openai-compatible",
+        model=f"model-{name}",
+        context_window=context_window,
+        max_output_tokens=256,
+        chat=never,
+        tokens_a_minute=tokens_a_minute,
+    )
+
+
+async def test_a_model_of_either_kind_of_server_may_say_how_many_tokens_it_takes_a_minute() -> None:
+    """The figure reaches the model on offer. Nothing ties it to the window or the
+    longest answer: either may be the smaller. Left out, the server has no such limit,
+    and the model's room is its window."""
+    file = parsed(
+        GOOD.replace(
+            "max_output_tokens = 2048", "max_output_tokens = 2048\ntokens_a_minute = 100000"
+        ).replace("thinking = true", "thinking = true\ntokens_a_minute = 1000")
+    )
+
+    async with (
+        catalogs.build(file, ollama_url="http://ollama") as catalog,
+        catalogs.build(parsed(GOOD), ollama_url="http://ollama") as without,
+    ):
+        standard, big = catalog.get("standard"), catalog.get("big")
+        left_out = [(model.tokens_a_minute, model.room) for model in without]
+
+    assert {name: model.tokens_a_minute for name, model in file.models.items()} == {
+        "standard": 100_000,
+        "big": 1000,
+    }
+    assert (standard.kind, standard.tokens_a_minute, standard.room) == ("ollama", 100_000, 8192)
+    assert (big.kind, big.tokens_a_minute, big.room) == ("openai-compatible", 1000, 1000)
+    assert (big.context_window, big.max_output_tokens) == (32768, 4096)
+    assert left_out == [(None, 8192), (None, 32768)]
+
+
+@pytest.mark.parametrize(
+    ("context_window", "tokens_a_minute", "room"),
+    [(8192, 6000, 6000), (8192, 100_000, 8192), (8000, 8000, 8000), (8192, None, 8192)],
+    ids=["smaller by its minute", "smaller by its window", "the two equal", "its window alone"],
+)
+def test_a_models_room_is_the_smaller_of_its_window_and_its_tokens_a_minute(
+    context_window: int, tokens_a_minute: int | None, room: int
+) -> None:
+    model = offered("standard", context_window=context_window, tokens_a_minute=tokens_a_minute)
+
+    assert model.room == room
+    assert model.context_window == context_window  # a request still carries its window
+
+
+def test_a_request_as_large_as_a_models_room_is_asked_of_it_and_one_token_more_is_not() -> None:
+    small, large = offered("small", tokens_a_minute=8000), offered("large", context_window=131_072)
+    chain = Chain(((small, READY), (large, READY)))
+
+    assert chain.asked_with(8000) == Asked(((small, READY), (large, READY)), ())
+    assert chain.asked_with(8001) == Asked(((large, READY),), (small,))
+
+
+def test_while_some_ready_models_have_room_only_those_are_asked_in_the_chains_order() -> None:
+    """Each with its own status. The others are passed over for their room, and listed
+    in the chain's order too."""
+    first = offered("first", tokens_a_minute=1000)
+    second = offered("second", context_window=9000)
+    third = offered("third", context_window=500)
+    fourth = offered("fourth", context_window=1_048_576, tokens_a_minute=250_000)
+    chain = Chain(((first, READY), (second, REASONS), (third, READY), (fourth, READY)))
+
+    assert chain.asked_with(5000) == Asked(((second, REASONS), (fourth, READY)), (first, third))
+
+
+def test_when_no_ready_model_has_room_each_is_asked_and_none_is_passed_over() -> None:
+    """A guess never refuses a request: it is asked as if no model had a room. A model
+    alone is its own chain, and is asked whatever the request."""
+    first, second = offered("first", tokens_a_minute=1000), offered("second", context_window=2000)
+
+    assert Chain(((first, READY), (second, REASONS))).asked_with(5000) == Asked(
+        ((first, READY), (second, REASONS)), ()
+    )
+    assert Chain(((first, READY),)).asked_with(5000) == Asked(((first, READY),), ())
+
+
+def test_a_stand_in_without_room_is_passed_over_while_the_asked_model_is_asked() -> None:
+    asked, stand_in = offered("standard"), offered("second", tokens_a_minute=1000)
+
+    assert Chain(((asked, READY), (stand_in, READY))).asked_with(5000) == Asked(
+        ((asked, READY),), (stand_in,)
+    )
+
+
+def test_a_model_that_isnt_ready_never_counts_as_one_with_room() -> None:
+    """Away or missing with the only room large enough, it doesn't keep the ready ones
+    from all being asked. And with too little room, it is passed over for being away,
+    not for its room: it isn't listed as too small."""
+    small, smaller = offered("small", tokens_a_minute=1000), offered("smaller", context_window=2000)
+    away, gone = offered("away", context_window=1_048_576), offered("gone", context_window=131_072)
+    tiny, large = offered("tiny", context_window=1000), offered("large", context_window=131_072)
+
+    roomy_but_not_ready = Chain(((small, READY), (away, AWAY), (smaller, READY), (gone, GONE)))
+    tiny_and_away = Chain(((tiny, AWAY), (large, READY)))
+
+    assert roomy_but_not_ready.asked_with(5000) == Asked(((small, READY), (smaller, READY)), ())
+    assert tiny_and_away.asked_with(5000) == Asked(((large, READY),), ())
 
 
 # --- How many answers a server writes at once -----------------------------------------

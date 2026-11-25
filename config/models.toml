@@ -101,6 +101,20 @@ kind = "ollama"
 #
 #   then = ["standard"]
 #
+# tokens_a_minute    how many tokens the model's server takes from this installation's
+#                    account in a minute, as a cloud provider's plan says for each of
+#                    its models: a request larger than that fits in no minute there,
+#                    and Groq's free plan was seen to refuse one whole. The model's
+#                    room is the smaller of this and its context_window. A
+#                    request larger than its room, by Actio's guess at its tokens, isn't
+#                    sent to it while another model of the same chain (`then`) is ready
+#                    and has room for it. When none has, each is asked all the same. A
+#                    whole number of 1 or more. Left out, the server has no such limit,
+#                    as a local server has none, and the room is the window.
+#                    See docs/adr/0029-a-model-is-passed-over-for-a-request-too-large.md:
+#
+#   tokens_a_minute = 8000
+#
 # Several models on one Ollama: it keeps in memory what it decides it has room for, and
 # was seen to unload one model to load another on a machine with room for both. The page
 # asks for the model that answers to be loaded ahead, so with two models in use their
