@@ -51,6 +51,7 @@ nav = [
     { "0025. Titles written by a model" = "adr/0025-titles-written-by-a-model.md" },
     { "0026. Models loaded ahead of the first question" = "adr/0026-models-loaded-ahead-of-the-first-question.md" },
     { "0027. Groq and the Gemini API by the one client" = "adr/0027-cloud-models-through-their-openai-compatible-layers.md" },
+    { "0028. A model names those that stand in for it" = "adr/0028-a-model-names-those-that-stand-in-for-it.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

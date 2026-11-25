@@ -97,6 +97,16 @@ Groq and the Gemini API have free tiers, and speak OpenAI's API too. `config/exa
 
 The page asks the default model, and has no way yet to choose another: to chat with a cloud model there, set `default` to its name in your copy of `models.toml`. `GET /api/models` lists them all, and a turn's request may name one. Their comments say what each number is, and how each model is told whether to reason (`thinking_off`, `thinking_on`): Groq's models refuse to be told "none". On the Gemini API's free tier, what is sent may be used to improve Google's products and be read by human reviewers, so nothing private goes through a free key. What each provider was seen to do: [ADR 0027](adr/0027-cloud-models-through-their-openai-compatible-layers.md).
 
+A model can name others of the file that are asked in its place, in order, when it can't answer before its first word: its server away, too busy or at a limit, or the request too large for it. In the example, Groq's larger model names Gemini 3.5 Flash-Lite, then the local model:
+
+```toml
+[models.groq-large]
+# … its provider, model and limits, as before
+then = ["gemini-lite", "standard"]
+```
+
+A question to it may then go to any of the three servers. It costs what it costs with the model it was asked of, and the API's log says which model answered. See [ADR 0028](adr/0028-a-model-names-those-that-stand-in-for-it.md).
+
 ## Usage limits
 
 An answer costs credits, and everyone has only so many: per session, which opens with the first question and lasts five hours, and per week. At the default prices a credit is one token of an answer, and what the model reads costs a quarter of that.

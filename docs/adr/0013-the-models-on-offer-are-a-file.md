@@ -119,3 +119,12 @@ The file has one more top-level key beside `default`: `titles`, the model that n
 - **Left out, no model writes titles,** and a conversation keeps its first question's first line. The repository's file names `standard`; the end-to-end stack's leaves it out.
 - **The worker reads the file now too,** for that one job, and its container mounts the folder the API's does. A mistake in the file stops it as it stops the API; the migration job still never reads it.
 - `Catalog.titles` carries the name. The rest of Actio still sees only `Catalog` and `OfferedModel`.
+
+### 2026-11-25: a model names those that stand in for it
+
+"One model per name, with no second choice when its server is away" was left under "Not done yet". A model's table may now have `then`, a list of other models of the file, asked in its place, in order, when it can't answer before the first word of an answer ([ADR 0028](0028-a-model-names-those-that-stand-in-for-it.md)).
+
+- **A stand-in is a model on offer of its own,** with its own server, window, limits and price. Only the asked model's list is followed.
+- **Checked like the other settings:** a name that isn't one of the models, the model's own name, or a name twice stops the start, with one line.
+- **`GET /api/models` lists each model's `then`,** and says a model is `ready` when it or one of its stand-ins is.
+- `OfferedModel.then` carries the names, and `Catalog.chain` gives a model with its stand-ins. The rest of Actio still sees only `Catalog` and `OfferedModel`.
