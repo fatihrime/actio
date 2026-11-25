@@ -1529,7 +1529,8 @@
           },
           "context_window": {
             "type": "integer",
-            "title": "Context Window"
+            "title": "Context Window",
+            "description": "How many tokens of a conversation the model takes here: its context window, which\nholds the conversation and its answer, or what its server takes from this\ninstallation's account in a minute, when that is less. A request larger than that, by\nan estimate of its tokens, isn't sent to it while another model that may answer the\nsame question can take it."
           },
           "max_output_tokens": {
             "type": "integer",

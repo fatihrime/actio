@@ -610,7 +610,14 @@ export interface components {
              * @description Its name on that server: for Ollama, what `ollama pull` takes.
              */
             model: string;
-            /** Context Window */
+            /**
+             * Context Window
+             * @description How many tokens of a conversation the model takes here: its context window, which
+             *     holds the conversation and its answer, or what its server takes from this
+             *     installation's account in a minute, when that is less. A request larger than that, by
+             *     an estimate of its tokens, isn't sent to it while another model that may answer the
+             *     same question can take it.
+             */
             context_window: number;
             /** Max Output Tokens */
             max_output_tokens: number;

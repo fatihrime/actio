@@ -1,6 +1,7 @@
 """Turns asked of a model that others stand in for (ADR 0028): who answers, with what
 request, what the turn records and costs, the gates on the way, a stop, a model asked
-once more, models that aren't ready, and what the log says.
+once more, models that aren't ready, models whose room is smaller than the request (ADR
+0029), and what the log says.
 
 The models are scripted (`lineup`), each behind a gate of the test's choosing. The app
 runs in process, so a request's response comes back whole once its stream has ended: a
@@ -36,9 +37,12 @@ from actio_llm import (
     RateLimitedError,
     ReasoningDelta,
     StreamInterruptedError,
+    System,
     TextDelta,
     TookTooLongError,
     Usage,
+    User,
+    prompt_tokens,
 )
 
 pytestmark = pytest.mark.anyio
@@ -901,6 +905,281 @@ async def test_a_turn_may_not_ask_for_reasoning_because_a_later_model_could_reas
     assert response.json()["detail"] == "This model can't reason before it answers."
     assert await db.scalar(select(func.count()).select_from(Conversation)) == 0
     assert (asked.requests, stand_in.requests) == ([], [])
+
+
+# --- Models whose room is smaller than the request ------------------------------------
+
+LONG = f"Remember: {SECRET}. " + "spoke " * 1500
+"""A question of about 1,900 tokens by Actio's guess, with the instructions: more than a
+room of 1,000, and less than one of 3,000."""
+
+
+def room_line(turn_id: str, model: str, room: int, request: ChatRequest) -> str:
+    """The log's line for a model passed over for its room, by the guess at the request
+    as it was sent to the model that was asked."""
+    return (
+        f"turn {turn_id}: model {model} has room for {room} tokens, and the request is about"
+        f" {prompt_tokens(request.messages)}: it is passed over"
+    )
+
+
+@pytest.mark.parametrize(
+    "too_small",
+    [{"tokens_a_minute": 1000}, {"context_window": 1000}],
+    ids=["by what its server takes in a minute", "by its window alone"],
+)
+async def test_a_model_whose_room_is_smaller_than_the_request_is_passed_over_for_one_with_room(
+    too_small: dict[str, int],
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    plans_with: Any,
+    db: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Never asked: its stand-in answers. The turn is the asked model's all the same, at
+    its price, where the stand-in costs nothing. The stand-in is asked with its own
+    window, not its room. The log says it with numbers alone: the guess is made of the
+    very messages the stand-in was sent, the instructions with the question."""
+    assert migrated
+    asked = lineup.add("standard", TextDelta("Never."), DONE, then=["second"], **too_small)
+    stand_in = lineup.add("second", TextDelta("From the stand-in."), DONE, tokens_a_minute=3000)
+    plans = plans_with(models=["standard"], free_models=["second"])
+    chat = Chat(await guest_on(start_app, settings, lineup, plans))
+
+    response = await chat.ask(LONG)
+
+    assert said(response) == "From the stand-in."
+    turn = turn_of(response)
+    assert (turn["status"], turn["model"], turn["credits"]) == ("completed", "standard", 5 + 4)
+    assert await answered_by(chat, response) == "second"
+    assert asked.requests == []
+    [entry] = (await db.scalars(select(UsageEntry))).all()
+    assert (entry.model, entry.credits) == ("standard", 9)
+    [request] = stand_in.requests
+    assert request == ChatRequest(
+        model="scripted-second",
+        messages=request.messages,
+        max_output_tokens=512,
+        context_window=4096,
+        thinking=None,
+    )
+    assert [type(message) for message in request.messages] == [System, User]
+    assert told(caplog, turn["id"]) == [
+        room_line(turn["id"], "standard", 1000, request),
+        f"turn {turn['id']}: model second answered in place of standard",
+    ]
+    assert SECRET not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("asked_script", "stand_in_script", "outcome", "asks"),
+    [
+        (
+            [TextDelta("Mine."), DONE],
+            [TextDelta("Never."), DONE],
+            ("completed", None, "standard"),
+            (1, 0),
+        ),
+        (
+            [ContextOverflowError("too long")],
+            [ContextOverflowError("too long too")],
+            ("failed", "context_overflow", None),
+            (1, 1),
+        ),
+        ([ContextOverflowError("too long")], None, ("failed", "context_overflow", None), (1, 0)),
+    ],
+    ids=["the asked model answers", "each refuses it", "a model alone"],
+)
+async def test_when_no_model_has_room_for_the_request_each_is_asked_as_ever(
+    asked_script: list[Any],
+    stand_in_script: list[Any] | None,
+    outcome: tuple[str, str | None, str | None],
+    asks: tuple[int, int],
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A guess never refuses a turn: the ready models are asked in order, as if none had
+    a room, and what they do is the turn's outcome. The log says nothing of rooms."""
+    assert migrated
+    asked = lineup.add(
+        "standard",
+        *asked_script,
+        then=[] if stand_in_script is None else ["second"],
+        tokens_a_minute=1000,
+    )
+    stand_in = lineup.add("second", *(stand_in_script or []), context_window=1000)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask(LONG)
+
+    turn = turn_of(response)
+    assert (turn["status"], turn["error"], turn["answered_by"]) == outcome
+    assert (len(asked.requests), len(stand_in.requests)) == asks
+    assert [line for line in told(caplog, turn["id"]) if "has room for" in line] == []
+
+
+async def test_a_stand_in_without_room_is_passed_over_and_the_asked_models_failure_is_the_turns(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The asked model has room, and fails before its first word: no other is left to
+    ask, and the stand-in never hears of the question."""
+    assert migrated
+    asked = lineup.add("standard", ProviderUnavailableError(f"busy, {SECRET}"), then=["second"])
+    stand_in = lineup.add("second", TextDelta("Never."), DONE, tokens_a_minute=1000)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask(LONG)
+
+    turn = turn_of(response)
+    assert (turn["status"], turn["error"], turn["answered_by"]) == (
+        "failed",
+        "model_unavailable",
+        None,
+    )
+    [request] = asked.requests
+    assert stand_in.requests == []
+    assert told(caplog, turn["id"]) == [
+        room_line(turn["id"], "second", 1000, request),
+        f"turn {turn['id']}: the model failed (ProviderUnavailableError), recorded as"
+        " model_unavailable",
+    ]
+    assert SECRET not in caplog.text
+
+
+async def test_of_three_models_the_one_without_room_is_never_asked_and_the_next_answers(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The first fails before its first word, and the walk goes on to the third, as if
+    the middle one weren't in the chain."""
+    assert migrated
+    first = lineup.add("standard", ProviderUnavailableError("busy"), then=["second", "third"])
+    middle = lineup.add("second", TextDelta("Never."), DONE, tokens_a_minute=1000)
+    third = lineup.add("third", TextDelta("From the third."), DONE)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask(LONG)
+
+    assert said(response) == "From the third."
+    assert await answered_by(chat, response) == "third"
+    assert (len(first.requests), middle.requests, len(third.requests)) == (1, [], 1)
+    turn_id = turn_of(response)["id"]
+    assert told(caplog, turn_id) == [
+        room_line(turn_id, "second", 1000, third.requests[0]),
+        f"turn {turn_id}: model standard failed (ProviderUnavailableError), and third is asked"
+        " next",
+        f"turn {turn_id}: model third answered in place of standard",
+    ]
+
+
+async def test_a_model_with_room_for_the_request_alone_is_asked_whatever_its_answer_may_need(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guess is of the prompt alone. The asked model has room for the request, and
+    not for the request with the longest answer it may write, 512 tokens here: it is
+    asked all the same, though its stand-in has room for both."""
+    assert migrated
+    asked = lineup.add("standard", TextDelta("Mine."), DONE, then=["second"], tokens_a_minute=2200)
+    stand_in = lineup.add("second", TextDelta("Never."), DONE)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask(LONG)
+
+    assert said(response) == "Mine."
+    [request] = asked.requests
+    assert stand_in.requests == []
+    # What the test rests on: the request fits the room, and not with the answer's room.
+    guess = prompt_tokens(request.messages)
+    assert guess <= 2200 < guess + request.max_output_tokens
+    assert request.max_output_tokens == 512
+    assert told(caplog, turn_of(response)["id"]) == []
+
+
+@pytest.mark.parametrize(
+    ("first_reasons", "answered"), [(True, 200), (False, 422)], ids=["it can", "it can't"]
+)
+async def test_whether_a_turn_may_ask_for_reasoning_is_the_first_ready_models_without_room_too(
+    first_reasons: bool,
+    answered: int,
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    db: AsyncSession,
+) -> None:
+    """The first ready model has no room here, and its stand-in can reason only when the
+    first can't. When the first can, the turn starts, and the stand-in answers, told
+    nothing of reasoning. When it can't, the 422, as for a model that is asked: that a
+    guess passes it over changes nothing of what a turn may ask."""
+    assert migrated
+    asked = lineup.add(
+        "standard",
+        TextDelta("Never."),
+        DONE,
+        then=["second"],
+        thinking=first_reasons,
+        tokens_a_minute=1000,
+    )
+    stand_in = lineup.add("second", TextDelta("Fine."), DONE, thinking=not first_reasons)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask(LONG, thinking=True)
+
+    assert response.status_code == answered
+    assert asked.requests == []
+    if answered == 422:
+        assert response.json()["detail"] == "This model can't reason before it answers."
+        assert response.json()["model"] == "standard"
+        assert await db.scalar(select(func.count()).select_from(Conversation)) == 0
+        assert stand_in.requests == []
+    else:
+        assert said(response) == "Fine."
+        assert [request.thinking for request in stand_in.requests] == [None]
+        assert turn_of(response)["thinking"] is True
+
+
+async def test_a_model_that_isnt_ready_and_one_without_room_are_each_said_and_the_third_answers(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert migrated
+    asked = lineup.add(
+        "standard", TextDelta("Never."), DONE, state="unreachable", then=["second", "third"]
+    )
+    middle = lineup.add("second", TextDelta("Never."), DONE, tokens_a_minute=1000)
+    third = lineup.add("third", TextDelta("From the third."), DONE)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask(LONG)
+
+    assert said(response) == "From the third."
+    assert (asked.requests, middle.requests, len(third.requests)) == ([], [], 1)
+    turn_id = turn_of(response)["id"]
+    assert told(caplog, turn_id) == [
+        f"turn {turn_id}: model standard is unreachable, and is passed over",
+        room_line(turn_id, "second", 1000, third.requests[0]),
+        f"turn {turn_id}: model third answered in place of standard",
+    ]
+    assert SECRET not in caplog.text
 
 
 # --- The log --------------------------------------------------------------------------

@@ -57,6 +57,7 @@ from actio_llm import (
     TextDelta,
     User,
     Walk,
+    prompt_tokens,
 )
 
 logger = logging.getLogger(__name__)
@@ -357,7 +358,10 @@ async def _ask(
     A model that isn't ready is not asked, as a turn doesn't ask one. What it can do
     isn't known then, and one that reasons unless it is told not to would spend a
     title's few tokens on reasoning. When none of them is ready, the title is asked for
-    again later if one of them is `unreachable`, and not when all are `missing`."""
+    again later if one of them is `unreachable`, and not when all are `missing`. A ready
+    model whose room is smaller than the request, by Actio's guess at it, is passed over
+    while another of them has room, as for a turn (`Chain.asked_with`): the log says it,
+    with the two numbers."""
     try:
         async with asyncio.timeout(WRITTEN_WITHIN_S):
             chain = await catalog.chain_status(offered.name, now=now)
@@ -379,6 +383,21 @@ async def _ask(
                     passed.name,
                     status.state,
                 )
+            messages = [User(_asking(question))]
+            # As for a turn: a ready model whose room is smaller than the guess at the
+            # request is passed over while another has room, and when none has, every
+            # ready one is asked.
+            tokens = prompt_tokens(messages)
+            asked = chain.asked_with(tokens)
+            for passed in asked.too_small:
+                logger.warning(
+                    "conversation %s: model %s has room for %d tokens, and the request is"
+                    " about %d: it is passed over",
+                    conversation_id,
+                    passed.name,
+                    passed.room,
+                    tokens,
+                )
             walk = Walk(
                 [
                     Link(
@@ -386,7 +405,7 @@ async def _ask(
                         model.chat,
                         ChatRequest(
                             model=model.model,
-                            messages=[User(_asking(question))],
+                            messages=messages,
                             max_output_tokens=TITLE_TOKENS,
                             context_window=model.context_window,
                             # As for a turn with thinking off: one that can't reason must
@@ -395,9 +414,9 @@ async def _ask(
                         ),
                         model.gate,
                     )
-                    for model, status in chain.ready
+                    for model, status in asked.models
                 ],
-                on_failed=partial(_passed_over, conversation_id, several=len(chain.ready) > 1),
+                on_failed=partial(_passed_over, conversation_id, several=len(asked.models) > 1),
                 on_again=partial(_asked_again, conversation_id),
             )
             async with aclosing(walk.stream()) as events:

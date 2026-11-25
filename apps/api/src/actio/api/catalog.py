@@ -47,6 +47,11 @@ class ModelOut(Described):
     model: str
     """Its name on that server: for Ollama, what `ollama pull` takes."""
     context_window: int
+    """How many tokens of a conversation the model takes here: its context window, which
+    holds the conversation and its answer, or what its server takes from this
+    installation's account in a minute, when that is less. A request larger than that, by
+    an estimate of its tokens, isn't sent to it while another model that may answer the
+    same question can take it."""
     max_output_tokens: int
     then: list[str]
     """The `id`s of the models asked in its place, in this order, when it can't answer
@@ -87,7 +92,8 @@ async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelLi
                 title=offered.title,
                 provider=offered.kind,
                 model=offered.model,
-                context_window=offered.context_window,
+                # Its room: what the page divides a conversation's tokens by.
+                context_window=offered.room,
                 max_output_tokens=offered.max_output_tokens,
                 then=list(offered.then),
                 status="ready" if first is not None else chain.status.state,

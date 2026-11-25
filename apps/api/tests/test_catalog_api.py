@@ -176,6 +176,28 @@ async def test_a_model_with_stand_ins_lists_them_and_can_answer_when_one_of_them
     ) == ("openai-compatible", "scripted-standard", 4096, 512)
 
 
+async def test_a_models_window_is_listed_as_its_room(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any
+) -> None:
+    """What its server takes from the installation's account in a minute, when that is
+    less than its window, as for a cloud provider's free plan: the page divides a
+    conversation's tokens by it. Its longest answer stays its own."""
+    assert migrated
+    lineup.add("standard", context_window=131_072, tokens_a_minute=8_000)
+    lineup.add("wide", context_window=4096, max_output_tokens=1024, tokens_a_minute=250_000)
+    lineup.add("local", context_window=8192)
+    browser = await start_app(settings, catalog=lineup.catalog())
+    await browser.post("/api/session/guest")
+
+    listed = (await browser.get("/api/models")).json()["models"]
+
+    assert {m["id"]: (m["context_window"], m["max_output_tokens"]) for m in listed} == {
+        "standard": (8_000, 512),
+        "wide": (4096, 1024),
+        "local": (8192, 512),
+    }
+
+
 async def test_asking_often_does_not_question_the_providers_each_time(
     start_app: Any, settings: Settings, migrated: str, clock: Any
 ) -> None:

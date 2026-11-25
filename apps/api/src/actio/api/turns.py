@@ -87,7 +87,7 @@ from actio.usage.limits import (
     UsageLimits,
     UsageUnavailableError,
 )
-from actio_llm import ChatRequest, Message, prompt_tokens
+from actio_llm import ChatRequest, prompt_tokens
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["conversations"], responses=NO_SESSION)
@@ -217,7 +217,9 @@ async def start_turn(
     chain = await catalog.chain_status(offered.name, now=now)
     if not chain.ready:
         raise not_ready(offered.name, chain.status.state)
-    # Whether the turn can ask for reasoning is the first one's to say: it is asked first.
+    # Whether the turn can ask for reasoning is the first ready one's to say: it is asked
+    # first, unless the request is larger than its room while another has room for it
+    # (below). That a guess passes it over changes nothing of what the turn may ask.
     if body.thinking and not chain.ready[0][1].thinking:
         raise Problem(422, "This model can't reason before it answers.", model=offered.name)
 
@@ -226,9 +228,12 @@ async def start_turn(
         db, body, conversation_id, principal.user_id, offered, new_id(), now, plan.answers_at_once
     )
     messages = context.for_model(begun.history, now=now)
+    # Actio's guess at the prompt: what the credits are held by, and what each model's
+    # room is held against.
+    tokens = prompt_tokens(messages)
     # Before anything is committed: a turn that is refused here leaves nothing behind.
     # The credits are held for the asked model, at its price, whoever answers.
-    reserved = await _reserve(usage, db, principal, begun, offered, messages, now)
+    reserved = await _reserve(usage, db, principal, begun, offered, tokens, now)
     turn = begun.turn
     turn.capped_by_usage = reserved.capped
     answer_id = new_id()
@@ -257,6 +262,20 @@ async def start_turn(
         logger.warning(
             "turn %s: model %s is %s, and is passed over", turn.id, passed.name, status.state
         )
+    # A ready model whose room is smaller than the guess is passed over too, while
+    # another has room. When none has, every ready one is asked: a guess never refuses
+    # a turn.
+    asked = chain.asked_with(tokens)
+    for passed in asked.too_small:
+        # Numbers alone: never a word of the question.
+        logger.warning(
+            "turn %s: model %s has room for %d tokens, and the request is about %d: it is"
+            " passed over",
+            turn.id,
+            passed.name,
+            passed.room,
+            tokens,
+        )
     asking = [
         answering.Asking(
             model,
@@ -271,7 +290,7 @@ async def start_turn(
                 thinking=body.thinking if status.thinking else None,
             ),
         )
-        for model, status in chain.ready
+        for model, status in asked.models
     ]
     runner.start(
         turn.id,
@@ -464,12 +483,12 @@ async def _reserve(
     principal: Principal,
     begun: Begun,
     offered: OfferedModel,
-    messages: Sequence[Message],
+    prompt: int,
     now: datetime,
 ) -> Reserved:
     """Hold the credits the turn may cost, or say as a problem why it can't run: for
     `offered`, the model the turn asks, at its price and up to its longest answer, for
-    `messages`.
+    a prompt of about `prompt` tokens.
 
     The hold lasts as long as a turn may stay `running`: one that outlives it is given
     up on, and gets nothing counted.
@@ -480,7 +499,7 @@ async def _reserve(
             Account(principal.user_id, is_guest=principal.is_guest),
             begun.turn.id,
             model=offered.name,
-            prompt_tokens=prompt_tokens(messages),
+            prompt_tokens=prompt,
             max_output_tokens=offered.max_output_tokens,
             hold_for=turns.STALE_AFTER,
             now=now,

@@ -55,6 +55,7 @@ from actio_llm import (
     UnsupportedServerError,
     Usage,
     User,
+    prompt_tokens,
 )
 
 pytestmark = pytest.mark.anyio
@@ -1772,6 +1773,109 @@ async def test_a_model_that_isnt_ready_is_passed_over_for_one_that_stands_in(
         (
             logging.WARNING,
             f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
+    ]
+
+
+async def test_a_model_without_room_for_the_titles_request_is_passed_over_for_one_with_room(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The request is the instructions and the question, about 80 tokens by Actio's
+    guess: more than the named model's room here. It is never asked, the model that
+    stands in writes the title, and the log says why with numbers alone."""
+    named_one = lineup.add(
+        "standard", TextDelta("Never"), DONE, then=["second"], tokens_a_minute=40
+    )
+    stand_in = lineup.add("second", TextDelta("Fixing a flat tyre"), DONE)
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, lineup.catalog(titles="standard"), clock, work_through)
+
+    assert named_one.requests == []
+    [request] = stand_in.requests
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model standard has room for 40 tokens, and"
+            f" the request is about {prompt_tokens(request.messages)}: it is passed over",
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
+    ]
+    assert "flat tyre" not in caplog.text.lower()
+
+
+async def test_when_no_model_has_room_for_the_titles_request_they_are_asked_as_ever(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A guess never keeps a title from being asked for: the named model is asked first,
+    and the log says nothing of rooms."""
+    named_one = lineup.add(
+        "standard", TextDelta("Fixing a flat tyre"), DONE, then=["second"], tokens_a_minute=40
+    )
+    stand_in = lineup.add("second", TextDelta("Never"), DONE, tokens_a_minute=40)
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, lineup.catalog(titles="standard"), clock, work_through)
+
+    [request] = named_one.requests
+    assert stand_in.requests == []
+    # Its own window, never its room: a local server loads its model by it.
+    assert request.context_window == 4096
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert said(caplog) == []
+
+
+async def test_a_stand_in_without_room_isnt_asked_for_a_title_its_model_couldnt_give(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    queue_books: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The named model has room, and fails for now: the model that stands in has none,
+    and never hears of the question. One model was asked, so the log says its failure
+    as a title's of one model, and the title is asked for again later."""
+    named_one = lineup.add("standard", ProviderUnavailableError("busy"), then=["second"])
+    stand_in = lineup.add("second", TextDelta("Never"), DONE, tokens_a_minute=40)
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, lineup.catalog(titles="standard"), clock, work_through)
+
+    [request] = named_one.requests
+    assert stand_in.requests == []
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert await queue_books.due() == put_back(1, 30)
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second has room for 40 tokens, and"
+            f" the request is about {prompt_tokens(request.messages)}: it is passed over",
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: no title, its model failed"
+            " (ProviderUnavailableError)",
         ),
     ]
 

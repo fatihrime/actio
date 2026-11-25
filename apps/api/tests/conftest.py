@@ -541,7 +541,8 @@ class Lineup:
 
     A model may name others that stand in for it (`then`), and say what its server says
     of it (`state`), and whether it can reason (`thinking`). Each has a window of 4,096
-    tokens and answers of 512 at most, unless a test says otherwise."""
+    tokens and answers of 512 at most, and no limit of tokens a minute, unless a test
+    says otherwise."""
 
     def __init__(self) -> None:
         self._offered: dict[str, OfferedModel] = {}
@@ -559,6 +560,7 @@ class Lineup:
         thinking: bool = False,
         context_window: int = 4096,
         max_output_tokens: int = 512,
+        tokens_a_minute: int | None = None,
     ) -> ScriptedModel:
         """Offer a model called `name` that follows `script`, behind `gate` if any. See
         `ScriptedModel` for `closes_when`, and `offer` for the rest."""
@@ -572,6 +574,7 @@ class Lineup:
             thinking=thinking,
             context_window=context_window,
             max_output_tokens=max_output_tokens,
+            tokens_a_minute=tokens_a_minute,
         )
         return model
 
@@ -586,11 +589,14 @@ class Lineup:
         thinking: bool = False,
         context_window: int = 4096,
         max_output_tokens: int = 512,
+        tokens_a_minute: int | None = None,
     ) -> None:
         """Offer `chat` as the model called `name`, behind `gate` if any: for a model
         that is more than its script, such as one whose server can load it ahead. `then`
-        names the models asked in its place, `state` is what its server says of it, and
-        `thinking` whether it can reason, which a model that isn't ready never can."""
+        names the models asked in its place, `state` is what its server says of it,
+        `thinking` whether it can reason, which a model that isn't ready never can, and
+        `tokens_a_minute` how many tokens its server takes in a minute, which with its
+        window makes its room (`OfferedModel.room`)."""
         self._offered[name] = OfferedModel(
             name=name,
             title=name.capitalize(),
@@ -601,6 +607,7 @@ class Lineup:
             chat=chat,
             gate=gate,
             then=tuple(then),
+            tokens_a_minute=tokens_a_minute,
         )
         self._thinking[name] = thinking
         self._states[name] = state
