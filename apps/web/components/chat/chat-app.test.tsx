@@ -42,6 +42,9 @@ const NO_ANSWER = "The model gave no answer.";
 /** What it says of a model asked to think, that thought all a single answer may hold. */
 const THOUGHT_TOO_LONG =
   "The model was still thinking when it reached the longest a single answer may be, and wrote no answer. Try again, or turn off “Think before answering” first.";
+/** What it says of a model asked to think, that thought all the time an answer may take. */
+const THOUGHT_TOO_SLOW =
+  "The model was still thinking after the longest a single answer may take, and wrote no answer. Try again, or turn off “Think before answering” first.";
 /** What it says of an interrupted turn. */
 const BROKE_OFF =
   "This answer broke off: the server that was writing it was restarted, or stopped answering.";
@@ -639,6 +642,31 @@ describe("an answer that doesn't arrive whole", () => {
       said: "This answer stops here: your usage limit left no room for more of it.",
       again: true,
     },
+    // The longest an answer may take, which its model's server is given. A turn whose
+    // model wrote nothing in that time failed (`model_too_slow`): one that completed
+    // there has words, or a thought.
+    {
+      ending: "the longest an answer may take, after words",
+      by: { finish_reason: "time_limit" },
+      left: "words",
+      said: "The answer took the longest a single answer may take, and stops here.",
+      again: false,
+    },
+    {
+      ending: "the longest an answer may take, while it was asked to think",
+      by: { finish_reason: "time_limit", thinking: true },
+      left: "a thought",
+      said: THOUGHT_TOO_SLOW,
+      again: true,
+    },
+    {
+      ending:
+        "the longest an answer may take, after a thought it wasn't asked for",
+      by: { finish_reason: "time_limit" },
+      left: "a thought",
+      said: "The model took the longest a single answer may take, and wrote no answer.",
+      again: true,
+    },
   ] as const)(
     "says when a stored answer ended at $ending, and offers another try only where one helps",
     async ({ by, left, said, again }) => {
@@ -819,6 +847,48 @@ describe("an answer that doesn't arrive whole", () => {
     expect(
       screen.queryByRole("button", { name: "Try again" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("says when an answer took the longest a single answer may take", async () => {
+    // Its model was still writing when its server's time for a whole answer was over.
+    // The stream ends as a finished answer's does: the turn's record says which limit.
+    fakeApi().on(TURNS, () => streamed("took_too_long.sse"));
+    const user = open();
+
+    await ask(user, "Count to five.");
+
+    expect(
+      await screen.findByText(
+        "The answer took the longest a single answer may take, and stops here.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText("One, two, three")).toBeInTheDocument();
+    expect(screen.queryByText(NO_ANSWER)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Try again" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says when the model took too long and wrote nothing, and offers another try", async () => {
+    // Its server's time for a whole answer was over before the model had written
+    // anything, and no other model answered in its place.
+    fakeApi().on(CONVERSATION, () =>
+      json(
+        200,
+        conversation(
+          RECORDED.conversation,
+          [question(RECORDED.question, "Count to a hundred.")],
+          turn({ status: "failed", error: "model_too_slow" }),
+        ),
+      ),
+    );
+
+    open(`/c/${RECORDED.conversation}`);
+
+    expect(
+      await screen.findByText("The model took too long, and wrote no answer."),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
   it("says when it was a usage limit that left an answer no more room", async () => {

@@ -182,6 +182,30 @@ describe("a recorded turn, read by the ai package", () => {
     });
   });
 
+  it("reads an answer cut at the time its server is given as an answer that ended, and says which limit in the metadata", async () => {
+    const { states, errors } = await replay("took_too_long.sse");
+
+    // Not an error: the library has no word for this limit, and says "other".
+    expect(errors).toEqual([]);
+    expect((await chunksOf("took_too_long.sse")).at(-1)).toMatchObject({
+      type: "finish",
+      finishReason: "other",
+    });
+    expect(last(states).parts).toEqual([
+      { type: "step-start" },
+      { type: "text", text: "One, two, three", state: "done" },
+    ]);
+    expect(last(states).metadata?.turn).toMatchObject({
+      status: "completed",
+      finish_reason: "time_limit",
+      error: null,
+      // A stream that was closed sends no count: what it wrote is counted by guess.
+      output_tokens: null,
+      context_tokens: null,
+    });
+    expect(last(states).metadata?.turn.credits).toBeGreaterThan(0);
+  });
+
   it("says in the metadata what the turn cost", async () => {
     const { states } = await replay("answer.sse");
 

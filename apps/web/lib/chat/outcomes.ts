@@ -14,6 +14,7 @@ const FAILURES: Record<string, string> = {
   model_refused: "The model's server refused the request.",
   answer_interrupted:
     "The answer broke off: the connection to the model was lost.",
+  model_too_slow: "The model took too long, and wrote no answer.",
   model_error: "The model's server failed.",
   internal_error: "Something went wrong while the answer was being written.",
 };
@@ -24,10 +25,11 @@ const FAILURES: Record<string, string> = {
  * thought and then wrote nothing. The server stores no empty answer, and the turn's
  * record alone doesn't say.
  *
- * Two limits can end an answer, and the server says which (ADR 0014, revision "a turn
+ * Three limits can end an answer, and the server says which (ADR 0014, revision "a turn
  * says which limit its answer reached"): the end of the model's context window, which
- * the conversation and the answer filled together (`context_window`), or the longest a
- * single answer may be (`length`). */
+ * the conversation and the answer filled together (`context_window`), the longest a
+ * single answer may be (`length`), or the longest it may take, which its model's server
+ * is given (`time_limit`, ADR 0028, revision "the longest an answer may take"). */
 export function outcomeOf(turn: Turn, answered: boolean): string | null {
   switch (turn.status) {
     case "failed":
@@ -54,6 +56,15 @@ function completedWith(turn: Turn, answered: boolean): string | null {
     return answered
       ? "The conversation has filled the model's context window, and the answer stops here. Start a new chat to go on."
       : "The conversation has filled the model's context window, and the model wrote no answer. Start a new chat to go on.";
+  }
+  if (turn.finish_reason === "time_limit") {
+    if (answered) {
+      return "The answer took the longest a single answer may take, and stops here.";
+    }
+    // Its reasoning counts toward the same time, and can use it all up.
+    return turn.thinking
+      ? "The model was still thinking after the longest a single answer may take, and wrote no answer. Try again, or turn off “Think before answering” first."
+      : "The model took the longest a single answer may take, and wrote no answer.";
   }
   if (turn.finish_reason !== "length") {
     return answered ? null : "The model gave no answer.";
