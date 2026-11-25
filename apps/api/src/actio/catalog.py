@@ -66,10 +66,11 @@ every look; short enough that a model pulled a moment ago shows up."""
 
 TIMEOUTS = Timeouts(connect_s=2.0, request_s=3.0)
 """Asking for a status is a small call: a provider that takes longer than this counts as
-away. Waiting for an answer to start, and between its pieces, keeps the adapters' own,
-much longer, patience, and so does a model's load, which takes as long as the first
-word of an answer to a model that isn't loaded. A provider may say how long it is given
-to start an answer itself (`ProviderEntry.begins_within_seconds`): that one value is
+away. Waiting for an answer to start, between its pieces and for the whole of it keeps
+the adapters' own, much longer, patience, and so does a model's load, which takes as
+long as the first word of an answer to a model that isn't loaded. A provider may say
+itself how long it is given to start an answer (`ProviderEntry.begins_within_seconds`)
+and to write a whole one (`ProviderEntry.answers_within_seconds`): those values are
 replaced for its models."""
 
 type Kind = Literal["ollama", "openai-compatible"]
@@ -101,17 +102,32 @@ class ProviderEntry(BaseModel):
     )
     """How many seconds the server is given, from the moment a request is sent, to send
     the first line of its answer: after that it counts as away, and the next model of a
-    chain is asked. It bounds a load ahead too, which waits as long. A number greater
-    than 0, whole or not: a string that holds one is a mistake. Left out: the client's own
-    (`Timeouts.first_event_s`), 90 seconds, which covers a model that is loaded cold."""
+    chain is asked. It bounds a load ahead too, which waits as an answer's first line is
+    waited for. A number greater than 0, whole or not: a string that holds one is a
+    mistake. Left out: the client's own (`Timeouts.first_event_s`), 90 seconds, which
+    covers a model that is loaded cold."""
+    answers_within_seconds: float | None = Field(
+        default=None, gt=0, strict=True, allow_inf_nan=False
+    )
+    """How many seconds the server is given, from the moment a request is sent, to write
+    a whole answer: after that the answer is cut where it stands. A turn records it as
+    one that reached a limit when something of it was handed on; with nothing handed on,
+    the next model of a chain is asked, as after any failure. A number greater than 0,
+    whole or not, as above, and nothing ties it to `begins_within_seconds`: the first
+    line, and a load ahead, have to come within the shorter of the two. Left out: the
+    client's own (`Timeouts.answer_s`), 300 seconds."""
 
     @property
     def timeouts(self) -> Timeouts:
         """How long the clients of the server's models wait: the catalog's, with the
-        server's own time to begin an answer where the file gives one."""
-        if self.begins_within_seconds is None:
-            return TIMEOUTS
-        return replace(TIMEOUTS, first_event_s=self.begins_within_seconds)
+        server's own time to begin an answer, and to write a whole one, each where the
+        file gives one."""
+        given = TIMEOUTS
+        if self.begins_within_seconds is not None:
+            given = replace(given, first_event_s=self.begins_within_seconds)
+        if self.answers_within_seconds is not None:
+            given = replace(given, answer_s=self.answers_within_seconds)
+        return given
 
     @model_validator(mode="after")
     def _fits_its_kind(self) -> Self:

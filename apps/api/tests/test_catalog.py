@@ -37,6 +37,7 @@ from actio_llm import (
     ProviderUnavailableError,
     StreamEvent,
     Timeouts,
+    TookTooLongError,
     User,
 )
 
@@ -129,8 +130,11 @@ def test_the_file_in_the_repository_is_valid() -> None:
     assert file.providers[standard.provider].at_once == 1  # one answer at a time
     assert standard.model == "qwen3.5:4b-q4_K_M"
     assert file.titles == "standard"
-    # Its server keeps the client's own time to begin an answer, which covers a cold load.
+    # Its server keeps the client's own time to begin an answer, which covers a cold load,
+    # and its own time for a whole answer, five minutes.
     assert [provider.begins_within_seconds for provider in file.providers.values()] == [None]
+    assert [provider.answers_within_seconds for provider in file.providers.values()] == [None]
+    assert [provider.timeouts.answer_s for provider in file.providers.values()] == [300]
 
 
 def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() -> None:
@@ -152,6 +156,16 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
     # unless the question tells it what to: then they keep them.
     assert file.titles is not None
     assert file.models[file.titles].model == QUIET
+    # The fake once more, behind a server given 3 seconds for a whole answer: a test
+    # sends its question there to see an answer cut at its time (apps/web/e2e). The
+    # other models keep the client's five minutes.
+    hurried = file.models["hurried"]
+    assert (hurried.model, hurried.thinking) == (standard.model, True)
+    assert file.providers[hurried.provider].url == provider.url
+    assert {
+        name: (entry.answers_within_seconds, entry.timeouts.answer_s)
+        for name, entry in file.providers.items()
+    } == {standard.provider: (None, 300), hurried.provider: (3, 3)}
 
 
 async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
@@ -192,6 +206,12 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
         "groq": 30,
         "gemini": 30,
     }
+    # Nothing measured says that a cloud server needs another time for a whole answer
+    # than the client's five minutes.
+    assert {
+        name: (provider.answers_within_seconds, provider.timeouts.answer_s)
+        for name, provider in file.providers.items()
+    } == {"ollama": (None, 300), "groq": (None, 300), "gemini": (None, 300)}
 
 
 def test_a_file_says_which_models_run_where(tmp_path: Path) -> None:
@@ -313,6 +333,31 @@ MISTAKES = {
         'kind = "ollama"',
         'kind = "ollama"\nbegins_within_seconds = inf',
         "providers.ollama.begins_within_seconds",
+    ),
+    "a server given no time for an answer": (
+        'url = "http://lab.internal:8000/v1"',
+        'url = "http://lab.internal:8000/v1"\nanswers_within_seconds = 0',
+        "providers.lab.answers_within_seconds",
+    ),
+    "a server given less than none for an answer": (
+        'kind = "ollama"',
+        'kind = "ollama"\nanswers_within_seconds = -300',
+        "providers.ollama.answers_within_seconds",
+    ),
+    "a time for an answer written as a word": (
+        'url = "http://lab.internal:8000/v1"',
+        'url = "http://lab.internal:8000/v1"\nanswers_within_seconds = "300"',
+        "providers.lab.answers_within_seconds",
+    ),
+    "a time for an answer that never ends": (
+        'kind = "ollama"',
+        'kind = "ollama"\nanswers_within_seconds = inf',
+        "providers.ollama.answers_within_seconds",
+    ),
+    "a time for an answer that isn't a number": (
+        'url = "http://lab.internal:8000/v1"',
+        'url = "http://lab.internal:8000/v1"\nanswers_within_seconds = nan',
+        "providers.lab.answers_within_seconds",
     ),
     "how to tell a model not to reason, for one that can't reason": (
         "thinking = true",
@@ -632,6 +677,123 @@ async def test_a_server_that_says_nothing_is_given_the_clients_own_ninety_second
     assert standard.timeouts == Timeouts(
         connect_s=2.0, first_event_s=0.05, idle_s=20.0, request_s=3.0
     )
+
+
+# --- How long a server is given for a whole answer ------------------------------------
+
+
+def test_a_server_of_either_kind_may_say_how_long_it_is_given_for_a_whole_answer() -> None:
+    """A number of seconds, whole or not, alone or beside its time to begin: nothing ties
+    the two together, and less for the whole than to begin is no mistake."""
+    file = parsed(
+        GOOD.replace('kind = "ollama"', 'kind = "ollama"\nanswers_within_seconds = 600').replace(
+            'url = "http://lab',
+            'begins_within_seconds = 30\nanswers_within_seconds = 12.5\nurl = "http://lab',
+        )
+    )
+    shorter = parsed(
+        GOOD.replace(
+            'kind = "ollama"',
+            'kind = "ollama"\nbegins_within_seconds = 45\nanswers_within_seconds = 20',
+        )
+    )
+
+    ollama, lab = file.providers["ollama"], file.providers["lab"]
+    assert (ollama.begins_within_seconds, ollama.answers_within_seconds) == (None, 600)
+    assert (lab.begins_within_seconds, lab.answers_within_seconds) == (30, 12.5)
+    assert parsed(GOOD).providers["lab"].answers_within_seconds is None
+    assert shorter.providers["ollama"].timeouts == Timeouts(
+        connect_s=2.0, first_event_s=45, idle_s=20.0, answer_s=20, request_s=3.0
+    )
+
+
+async def test_each_value_the_file_gives_reaches_the_clients_of_its_servers_models() -> None:
+    """Each replaces the client's own where it is given, and only there: the small calls
+    keep the catalog's short limits."""
+    file = parsed(
+        GOOD.replace('kind = "ollama"', 'kind = "ollama"\nanswers_within_seconds = 600').replace(
+            'url = "http://lab',
+            'begins_within_seconds = 30\nanswers_within_seconds = 12.5\nurl = "http://lab',
+        )
+    )
+
+    async with catalogs.build(file, ollama_url="http://ollama") as catalog:
+        standard, big = catalog.get("standard").chat, catalog.get("big").chat
+
+    assert isinstance(standard, Ollama)
+    assert isinstance(big, OpenAICompatible)
+    assert standard.timeouts == Timeouts(
+        connect_s=2.0, first_event_s=90.0, idle_s=20.0, answer_s=600, request_s=3.0
+    )
+    assert big.timeouts == Timeouts(
+        connect_s=2.0, first_event_s=30, idle_s=20.0, answer_s=12.5, request_s=3.0
+    )
+
+
+class Words(httpx2.AsyncByteStream):
+    """The body of an answer that never ends: `line` every hundredth of a second."""
+
+    def __init__(self, line: bytes) -> None:
+        self._line = line
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        while True:
+            yield self._line
+            await asyncio.sleep(0.01)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class NeverEnds(httpx2.AsyncBaseTransport):
+    """A server that answers a question with a word every hundredth of a second, and never
+    ends, in its own kind's format: Ollama's lines of JSON, or OpenAI's events. As an
+    Ollama, it says its version first."""
+
+    def __init__(self) -> None:
+        self.bodies: list[Words] = []
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/version":
+            return httpx2.Response(200, json={"version": "0.40.16"})
+        if request.url.path == "/api/chat":
+            chunk: dict[str, Any] = {
+                "message": {"role": "assistant", "content": "again "},
+                "done": False,
+            }
+            line = json.dumps(chunk).encode() + b"\n"
+        else:
+            chunk = {"choices": [{"index": 0, "delta": {"content": "again "}}]}
+            line = b"data: " + json.dumps(chunk).encode() + b"\n\n"
+        self.bodies.append(Words(line))
+        return httpx2.Response(200, stream=self.bodies[-1])
+
+
+@pytest.mark.parametrize("provider", ["ollama", "lab"])
+async def test_a_server_still_writing_after_its_own_time_for_an_answer_is_cut(
+    provider: str,
+) -> None:
+    """The file's value reaches the client that asks, for either kind of server: two
+    tenths of a second here. The time limit fails a test that waits the client's own
+    five minutes."""
+    file = parsed(
+        GOOD.replace('kind = "ollama"', 'kind = "ollama"\nanswers_within_seconds = 0.2').replace(
+            'url = "http://lab', 'answers_within_seconds = 0.2\nurl = "http://lab'
+        )
+    )
+    server = NeverEnds()
+
+    async with (
+        asyncio.timeout(2),
+        catalogs.build(file, ollama_url="http://ollama", transports={provider: server}) as catalog,
+    ):
+        [offered] = [model for model in catalog if file.models[model.name].provider == provider]
+        with pytest.raises(TookTooLongError, match=r"still answering after 0\.2 s"):
+            await answered(offered)
+
+    [body] = server.bodies
+    assert body.closed
 
 
 # --- The gate by itself ---------------------------------------------------------------

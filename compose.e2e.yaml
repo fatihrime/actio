@@ -9,8 +9,8 @@
 # checks them on the two files together.
 
 # In place of ./config, for the API and the worker alike: a models file that offers the
-# fake, under the same name, and names its quiet model for titles, and the plans that
-# price them.
+# fake, under the same name, names its quiet model for titles, and offers it once more
+# behind a server given 3 seconds for an answer, and the plans that price them.
 x-e2e-config: &e2e-config
   - ./deploy/e2e/config:/app/config:ro
 

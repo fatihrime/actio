@@ -52,6 +52,18 @@ titles = "standard"
 #   90 seconds, which covers a model that the server has to load first:
 #
 #   begins_within_seconds = 30
+#
+# answers_within_seconds: how long the server is given, from the same moment, for a
+#   whole answer. An answer the model is still writing then stops there: it is kept and
+#   paid for, as one that reached a limit, and the page says so. A model that has
+#   written nothing by then counts as failing, and the models that stand in for it are
+#   asked. The first line of an answer has to come within it too, and so has a load of
+#   a model ahead of the first question. A number greater than 0. Left out, it is 300
+#   seconds, in which a full answer of 2,048 tokens needs more than 6.8 tokens a second,
+#   since loading the model and reading the conversation count too: on a machine that
+#   writes more slowly, raise it:
+#
+#   answers_within_seconds = 600
 
 [providers.ollama]
 kind = "ollama"
