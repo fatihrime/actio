@@ -115,7 +115,7 @@ The containers follow the same rules in both modes. Tests in `deploy/tests/` che
 
 The next phases add:
 
-- **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. In tests, [fakellm](reference/fakellm.md) stands in for all of them. The router will also say when an answer waits for its server, and how many are ahead of it.
+- **more providers:** cloud models behind a router with fallbacks, and a way to choose between models. Groq's and the Gemini API's can be offered in the models file already, each under a name of its own, with no second choice behind it ([ADR 0027](adr/0027-cloud-models-through-their-openai-compatible-layers.md)). In tests, [fakellm](reference/fakellm.md) stands in for all of them, beside recordings of those two. The router will also say when an answer waits for its server, and how many are ahead of it.
 
 ## Repository layout
 
@@ -124,10 +124,10 @@ The next phases add:
 | `apps/api` | The Python application: the API and the worker |
 | `apps/web` | The Next.js web app: the chat's pages and components, its calls to the API, and their tests |
 | `packages/fakellm` | A fake LLM server for tests, scripted by directives in the prompt |
-| `packages/llm` | Model clients: a neutral chat format, adapters for Ollama and for OpenAI-compatible servers, a guess at a text's tokens, and the `actio-llm` command |
+| `packages/llm` | Model clients: a neutral chat format, adapters for Ollama and for OpenAI-compatible servers, Groq and the Gemini API among them, a guess at a text's tokens, and the `actio-llm` command |
 | `packages/quota` | The usage-limits engine: Lua scripts for Valkey, and the Python reference model they're tested against |
 | `compose.yaml`, `compose.dev.yaml` | The stack for `make up`, and the overlay for `make dev` |
-| `config/` | What an installation changes without touching code. Today: `models.toml`, the models on offer, and `plans.toml`, what they cost and how much each kind of account may use |
+| `config/` | What an installation changes without touching code. Today: `models.toml`, the models on offer, and `plans.toml`, what they cost and how much each kind of account may use; and `examples/free-cloud/`, a pair of the two to copy, which offers Groq's and the Gemini API's models beside the shipped one |
 | `deploy/` | Caddy's configuration and the image it is built into, and the tests for the containers' rules |
 | `docs/` | This site, including the decision records |
 | `scripts/` | Developer scripts: tool checks, the denylist hook, the smoke test |

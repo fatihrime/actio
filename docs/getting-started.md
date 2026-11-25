@@ -87,6 +87,16 @@ Then four answers are written at once, and a fifth waits its turn. Left out, it 
 !!! note "On Linux"
     Ollama listens only on `127.0.0.1` by default, which containers can't reach, so with `make up` the model shows as `unreachable`. Ollama's `OLLAMA_HOST` setting changes where it listens: Docker's bridge address, usually `172.17.0.1`, is reachable from containers and not from your network. This follows Ollama's and Docker's documentation; this project's own Linux run, in CI, has no Ollama to try it with.
 
+Groq and the Gemini API have free tiers, and speak OpenAI's API too. `config/examples/free-cloud/` is a pair of files that offer four of their models beside the one above, which stays the default:
+
+1. Make a key for each, at <https://console.groq.com/keys> and <https://aistudio.google.com/apikey>, and put them in `.env` as `GROQ_API_KEY` and `GEMINI_API_KEY`.
+2. Run `make preflight`: it says whether each key works, whether the models are offered to it, and what its account may use.
+3. Have Actio read them, and run `make dev` or `make up` again:
+    - under `make dev`, copy the two to a folder of your own, `config/local/`, which git leaves alone, and point `ACTIO_MODELS_FILE=config/local/models.toml` and `ACTIO_PLANS_FILE=config/local/plans.toml` at the copies in `.env`. Nothing tracked changes;
+    - under `make up`, the containers read `config/models.toml` and `config/plans.toml`, so copy the two over those. That changes two tracked files, and the repository's own tests read `config/` as it is shipped: run them with the shipped pair back.
+
+The page asks the default model, and has no way yet to choose another: to chat with a cloud model there, set `default` to its name in your copy of `models.toml`. `GET /api/models` lists them all, and a turn's request may name one. Their comments say what each number is, and how each model is told whether to reason (`thinking_off`, `thinking_on`): Groq's models refuse to be told "none". On the Gemini API's free tier, what is sent may be used to improve Google's products and be read by human reviewers, so nothing private goes through a free key. What each provider was seen to do: [ADR 0027](adr/0027-cloud-models-through-their-openai-compatible-layers.md).
+
 ## Usage limits
 
 An answer costs credits, and everyone has only so many: per session, which opens with the first question and lasts five hours, and per week. At the default prices a credit is one token of an answer, and what the model reads costs a quarter of that.
