@@ -28,7 +28,7 @@ import logging
 import os
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -68,7 +68,9 @@ TIMEOUTS = Timeouts(connect_s=2.0, request_s=3.0)
 """Asking for a status is a small call: a provider that takes longer than this counts as
 away. Waiting for an answer to start, and between its pieces, keeps the adapters' own,
 much longer, patience, and so does a model's load, which takes as long as the first
-word of an answer to a model that isn't loaded."""
+word of an answer to a model that isn't loaded. A provider may say how long it is given
+to start an answer itself (`ProviderEntry.begins_within_seconds`): that one value is
+replaced for its models."""
 
 type Kind = Literal["ollama", "openai-compatible"]
 
@@ -94,6 +96,22 @@ class ProviderEntry(BaseModel):
     answers_at_once: int | None = Field(default=None, ge=1)
     """How many answers the server writes at the same time, across all the models it
     runs. Left out: see `at_once`."""
+    begins_within_seconds: float | None = Field(
+        default=None, gt=0, strict=True, allow_inf_nan=False
+    )
+    """How many seconds the server is given, from the moment a request is sent, to send
+    the first line of its answer: after that it counts as away, and the next model of a
+    chain is asked. It bounds a load ahead too, which waits as long. A number greater
+    than 0, whole or not: a string that holds one is a mistake. Left out: the client's own
+    (`Timeouts.first_event_s`), 90 seconds, which covers a model that is loaded cold."""
+
+    @property
+    def timeouts(self) -> Timeouts:
+        """How long the clients of the server's models wait: the catalog's, with the
+        server's own time to begin an answer where the file gives one."""
+        if self.begins_within_seconds is None:
+            return TIMEOUTS
+        return replace(TIMEOUTS, first_event_s=self.begins_within_seconds)
 
     @model_validator(mode="after")
     def _fits_its_kind(self) -> Self:
@@ -498,7 +516,7 @@ async def build(
                 )
             )
             if provider.kind == "ollama":
-                ollamas[name] = Ollama(client, timeouts=TIMEOUTS)
+                ollamas[name] = Ollama(client, timeouts=provider.timeouts)
             else:
                 clients[name] = client
 
@@ -511,7 +529,7 @@ async def build(
             return OpenAICompatible(
                 clients[entry.provider],
                 provider=entry.provider,
-                timeouts=TIMEOUTS,
+                timeouts=file.providers[entry.provider].timeouts,
                 thinking_off=entry.thinking_off,
                 thinking_on=entry.thinking_on,
             )

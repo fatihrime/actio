@@ -44,6 +44,14 @@ titles = "standard"
 #   requests for LM Studio or llama.cpp's server:
 #
 #   answers_at_once = 4
+#
+# begins_within_seconds: how long the server is given, from the moment a question is
+#   sent, to begin its answer. One that hasn't begun by then counts as away, and the
+#   models that stand in for its model are asked (`then`, below). A load of a model
+#   ahead of the first question waits as long. A number greater than 0. Left out, it is
+#   90 seconds, which covers a model that the server has to load first:
+#
+#   begins_within_seconds = 30
 
 [providers.ollama]
 kind = "ollama"

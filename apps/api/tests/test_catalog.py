@@ -23,13 +23,22 @@ from actio.catalog import (
     CatalogFile,
     Gate,
     ModelStatus,
+    OfferedModel,
     UnknownModelError,
     read_file,
 )
 from actio_fakellm.app import DEFAULT_MODELS as FAKE_MODELS
 from actio_fakellm.app import QUIET
 from actio_fakellm.app import create_app as create_fake_llm
-from actio_llm import ChatRequest, Ollama, OpenAICompatible, Timeouts, User
+from actio_llm import (
+    ChatRequest,
+    Ollama,
+    OpenAICompatible,
+    ProviderUnavailableError,
+    StreamEvent,
+    Timeouts,
+    User,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -120,6 +129,8 @@ def test_the_file_in_the_repository_is_valid() -> None:
     assert file.providers[standard.provider].at_once == 1  # one answer at a time
     assert standard.model == "qwen3.5:4b-q4_K_M"
     assert file.titles == "standard"
+    # Its server keeps the client's own time to begin an answer, which covers a cold load.
+    assert [provider.begins_within_seconds for provider in file.providers.values()] == [None]
 
 
 def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() -> None:
@@ -173,6 +184,13 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
     assert chain == ["groq-large", "gemini-lite", "standard"]
     assert {name: then for name, then in stand_ins.items() if then} == {
         "groq-large": ("gemini-lite", "standard")
+    }
+    # A cloud server that hasn't begun an answer in half a minute has more likely hung
+    # than is still loading: the model that stands in is asked sooner.
+    assert {name: provider.begins_within_seconds for name, provider in file.providers.items()} == {
+        "ollama": None,
+        "groq": 30,
+        "gemini": 30,
     }
 
 
@@ -275,6 +293,26 @@ MISTAKES = {
         'kind = "ollama"',
         'kind = "ollama"\nanswers_at_once = -1',
         "providers.ollama.answers_at_once",
+    ),
+    "a server given no time to begin an answer": (
+        'url = "http://lab.internal:8000/v1"',
+        'url = "http://lab.internal:8000/v1"\nbegins_within_seconds = 0',
+        "providers.lab.begins_within_seconds",
+    ),
+    "a server given less than none": (
+        'kind = "ollama"',
+        'kind = "ollama"\nbegins_within_seconds = -0.5',
+        "providers.ollama.begins_within_seconds",
+    ),
+    "a time to begin written as a word": (
+        'url = "http://lab.internal:8000/v1"',
+        'url = "http://lab.internal:8000/v1"\nbegins_within_seconds = "30"',
+        "providers.lab.begins_within_seconds",
+    ),
+    "a time to begin that never ends": (
+        'kind = "ollama"',
+        'kind = "ollama"\nbegins_within_seconds = inf',
+        "providers.ollama.begins_within_seconds",
     ),
     "how to tell a model not to reason, for one that can't reason": (
         "thinking = true",
@@ -516,6 +554,84 @@ max_output_tokens = 2048
     assert gates["standard"] is gates["small"]  # one Ollama, writing for both
     assert len({id(gates["standard"]), id(gates["big"]), id(gates["smart"])}) == 3
     assert None not in gates.values()
+
+
+# --- How long a server is given to begin an answer ------------------------------------
+
+BEGINS_WITHIN = GOOD.replace('kind = "ollama"', 'kind = "ollama"\nbegins_within_seconds = 0.05')
+"""The good file, its Ollama given a twentieth of a second to begin an answer."""
+
+
+def test_a_server_of_either_kind_may_say_how_long_it_is_given_to_begin_an_answer() -> None:
+    """A number of seconds, whole or not."""
+    file = parsed(
+        GOOD.replace('kind = "ollama"', 'kind = "ollama"\nbegins_within_seconds = 45').replace(
+            'url = "http://lab', 'begins_within_seconds = 2.5\nurl = "http://lab'
+        )
+    )
+
+    assert file.providers["ollama"].begins_within_seconds == 45
+    assert file.providers["lab"].begins_within_seconds == 2.5
+    assert parsed(GOOD).providers["lab"].begins_within_seconds is None
+
+
+class NeverBegins(httpx2.AsyncBaseTransport):
+    """A server that takes a question, and never begins its answer. As an Ollama, it says
+    its version first."""
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/version":
+            return httpx2.Response(200, json={"version": "0.40.16"})
+        await asyncio.Event().wait()  # nothing sets it: only a cancellation ends this
+        return httpx2.Response(500)
+
+
+async def answered(offered: OfferedModel) -> list[StreamEvent]:
+    """Every event of the model's answer to a short question, asked as a turn asks it."""
+    request = ChatRequest(offered.model, [User("hi")], context_window=offered.context_window)
+    async with aclosing(offered.chat.stream(request)) as events:
+        return [event async for event in events]
+
+
+@pytest.mark.parametrize("provider", ["ollama", "lab"])
+async def test_a_server_that_hasnt_begun_within_its_own_time_is_away(provider: str) -> None:
+    """The file's value reaches the client that asks, for either kind of server: a
+    twentieth of a second here. The time limit fails a test that waits the client's own
+    90 seconds."""
+    file = parsed(
+        BEGINS_WITHIN.replace(
+            'url = "http://lab', 'begins_within_seconds = 0.05\nurl = "http://lab'
+        )
+    )
+
+    async with (
+        asyncio.timeout(1),
+        catalogs.build(
+            file, ollama_url="http://ollama", transports={provider: NeverBegins()}
+        ) as catalog,
+    ):
+        [offered] = [model for model in catalog if file.models[model.name].provider == provider]
+        with pytest.raises(
+            ProviderUnavailableError, match=r"start answering within 0\.05 s"
+        ) as caught:
+            await answered(offered)
+
+    assert type(caught.value) is ProviderUnavailableError
+
+
+async def test_a_server_that_says_nothing_is_given_the_clients_own_ninety_seconds() -> None:
+    """Without waiting them: a client says how long it waits. Only the time to begin an
+    answer is the file's: the small calls, such as asking for a model's status, keep the
+    catalog's short limits."""
+    async with catalogs.build(parsed(BEGINS_WITHIN), ollama_url="http://ollama") as catalog:
+        standard, big = catalog.get("standard").chat, catalog.get("big").chat
+
+    assert isinstance(standard, Ollama)
+    assert isinstance(big, OpenAICompatible)
+    assert big.timeouts == Timeouts(connect_s=2.0, first_event_s=90.0, idle_s=20.0, request_s=3.0)
+    assert standard.timeouts == Timeouts(
+        connect_s=2.0, first_event_s=0.05, idle_s=20.0, request_s=3.0
+    )
 
 
 # --- The gate by itself ---------------------------------------------------------------

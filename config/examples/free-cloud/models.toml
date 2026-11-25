@@ -30,11 +30,18 @@ titles = "standard"
 [providers.ollama]
 kind = "ollama"
 
+# The two cloud providers are given 30 seconds to begin an answer, not the 90 a local
+# server keeps for a model it loads first: a cloud server that hasn't begun after half
+# a minute has more likely hung than is still loading, and the model that stands in is
+# asked sooner. On 2026-11-25, the Gemini API's flash-lite began its answer to a prompt
+# of 113,754 tokens after 4.0 and 4.5 seconds, in two tries.
+
 # Groq's OpenAI-compatible API. A key is made at https://console.groq.com/keys.
 [providers.groq]
 kind = "openai-compatible"
 url = "https://api.groq.com/openai/v1"
 api_key_env = "GROQ_API_KEY"
+begins_within_seconds = 30
 
 # The Gemini API's OpenAI-compatible layer. A key is made at
 # https://aistudio.google.com/apikey.
@@ -42,6 +49,7 @@ api_key_env = "GROQ_API_KEY"
 kind = "openai-compatible"
 url = "https://generativelanguage.googleapis.com/v1beta/openai"
 api_key_env = "GEMINI_API_KEY"
+begins_within_seconds = 30
 
 # The model Actio ships with, as config/models.toml offers it.
 [models.standard]
