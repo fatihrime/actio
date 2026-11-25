@@ -109,7 +109,7 @@ A model can name others of the file that are asked in its place, in order, when 
 then = ["gemini-lite", "standard"]
 ```
 
-A question to it may then go to any of the three servers. It costs what it costs with the model it was asked of, and the API's log says which model answered. Each model is asked once more first when its failure may be gone in a moment: at once when the connection to its server failed at once, as one that is refused does, and after the wait its server asked for when that is two seconds at most. A server that never answers the connection is not asked again. See [ADR 0028](adr/0028-a-model-names-those-that-stand-in-for-it.md).
+A question to it may then go to any of the three servers. It costs what it costs with the model it was asked of, and the API's log says which model answered. So does the page, under an answer that another model than the one asked wrote: the line of what the answer took ends with "answered by" and that model's title. Each model is asked once more first when its failure may be gone in a moment: at once when the connection to its server failed at once, as one that is refused does, and after the wait its server asked for when that is two seconds at most. A server that never answers the connection is not asked again. See [ADR 0028](adr/0028-a-model-names-those-that-stand-in-for-it.md).
 
 ## Usage limits
 

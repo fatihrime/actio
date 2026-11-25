@@ -415,3 +415,104 @@ After a reload each page showed the same answer, the same sentence and the same 
 - **the answer's error in the place of a server away, for a first line read after the time.** The review found the same branch by reading. A test now holds the event loop while that line arrives, so that only the clock can tell.
 
 The tests for these four were written after that run, with the two the review asked for: a load cut at the shorter time, and a stand-in's answer cut at its time, for which one more mistake was planted, the log naming the asked model. On the tree as it was committed, all 39 failed a test.
+
+### 2026-11-25: a turn says which model answered, and the page says so
+
+The decision left it under "Known, and left": "which model answered is in the log, and nowhere else yet. The turn's record and the page come in a later step." Until then the page took a stand-in's answer for the asked model's in the two places that item names. The line under the box divided the tokens a stand-in counted by the asked model's window: seen on the real page, "100% full · 12,857 of 8,000 tokens" (see the decision's Measured). And an answer that reached the end of a stand-in's own window was said as the asked model's, with no other try, though the asked model, with a larger window, may answer one: worked out from the code, not seen. The title job's log, too, named the model that was passed over, and not the one that wrote the title. It was left so that the walk could be built and looked at first, with the turn as it was.
+
+**Where it is kept:**
+
+1. **A column of the turn, `answered_by`,** written with its outcome. Chosen.
+    - Pro: every place that says a turn says it from the record, as it says when the first word came: the stream's last chunk, the conversation read, a stop's answer.
+    - Con: a migration, and the turns recorded before it have none.
+2. **Worked out where the turn's record is built,** as how much of the window a conversation takes is (ADR 0014, revision "a turn says how much of the window its conversation takes").
+    - Con: nothing that is stored says it. Which model answered was the walk's to know, in the process that ran the turn, and is gone with it.
+3. **The log alone,** as before.
+    - Con: the page can't read it.
+
+**What it holds:**
+
+1. **The model that wrote the answer, whichever it was,** the asked one too. Chosen: empty means that no model answered, never "the one asked".
+2. **A stand-in's name alone.**
+    - Con: empty would mean two things, the asked model answered or no model did, and a turn recorded before the column would read as the asked model's own answer for certain.
+
+**Whether a turn that was given up on says it:**
+
+1. **Saved with the beat,** as the draft is.
+    - Pro: a turn whose process died would say which model was writing it.
+    - Con: a running turn's record would say it after its first beat and not before. And the beat would save one more thing that the answer doesn't need, which was decided against for the moment of the first word (ADR 0014, revision "a turn says when its first word came").
+2. **Written with the outcome alone.** Chosen: a turn given up on says nothing of it, as it says nothing of its first word.
+
+**What the line under the box says after a stand-in's answer:**
+
+1. **Nothing.**
+    - Con: a conversation too large for the asked model, which a stand-in answers each time, would never say how full it is.
+2. **The stand-in's tokens over the asked model's window,** as before.
+    - Con: what was seen: more tokens than the window holds.
+3. **The stand-in's tokens over its own window,** when it is one of the models that stand in for the model that answers. Chosen: the tokens are the counting model's, and the window that held them is its own. A figure is said when its model may answer the next question: the model that answers, or one it names. Any other model's figure says nothing, as before.
+
+**Where the page says who answered, and when:**
+
+1. **The last item of the list under an answer,** "answered by" and the model's title, only when another model than the one asked wrote it, and once the models are read. Chosen.
+    - Pro: the list is what an answer took, and which model wrote it is one of those things. Last, so that nothing else in the list moves when the models come.
+    - Con: not said while the answer arrives, only once its turn has ended, as the rest of the list.
+2. **Under every answer,** the asked model's too.
+    - Con: a line that says the same of nearly every answer: what the empty conversation already says, "Answered by …".
+3. **A notice.**
+    - Con: a notice is for what needs a reader's attention. An answer that another model wrote is an answer.
+4. **While the answer arrives,** in a chunk of the stream's own.
+    - Con: which model answers is known at the first word, after `start` was sent. A new kind of chunk, for what the record says at the end.
+
+**What changed:**
+
+- **The record** (`actio.chat`): `turns.answered_by`, migration 0014, the name in the models file of the model whose answer the turn holds: the link of the walk that handed something on (`Walk.answered`), a word, a thought or its last event. `answering.answer` puts it into whatever `Ending` it records, once, before the outcome is written, and `turns._end` writes it as it writes `first_word_at`. Empty while the turn runs; when no model handed anything on, because every model failed before a word, or the turn was stopped or interrupted while it waited; for a turn given up on, with a draft or without; and for the turns recorded before. Not saved with the beat. Migration 0014 fills in nothing for the turns that exist.
+- **The API:** `TurnOut.answered_by`, by the model's `id` in `GET /api/models`, in the stream's `finish` and `message-metadata` chunks, empty in `start`, in the conversation read and in a stop's answer: the stream's last chunk and the conversation read afterwards say the same. `model` is described as the model that was asked, and `context_tokens` as of the window of the model that answered. Every recorded stream's turn has the member now, and nothing else of them changed. One recording was added: a turn whose asked model failed before its first word and whose stand-in, with a window of its own, answered (`stood_in.sse`).
+- **The title job:** one warning when a model asked in another's place answered, in the words of the turn's line: "conversation …: model second answered in place of standard". Names and ids alone. It says which model answered, not that a title was written: one that answered with nothing to make a title of is named too, and the line after it says that none came.
+- **The page** (`apps/web/lib/chat`, `components/chat`):
+    - **whose figures a turn's are** is written once, `answeredBy` in `lib/chat/figures.ts`: the model its record names, and the asked model for a turn whose record names none, as one recorded before;
+    - **the list under an answer** (`figuresOf`) ends with "answered by" and that model's title in the models list, or its name in the record when the list no longer has it, when it isn't the asked model. Not before the models are read. The models reach the list through a React context (`ModelsOnOffer` in `components/chat/message.tsx`), read by `Took` alone: the models are read again every five seconds while the model that answers can't, and an answer's words are drawn again for none of it;
+    - **the line under the box** (`contextFill`) takes the newest figure, as before, of the model that answered it: over that model's own window when it is the model that answers, or one that stands in for it, from the models list; and nothing otherwise, as before;
+    - **a turn that a stand-in answered, and that filled the stand-in's window,** says "Another model answered in place of the one you asked, and the conversation has filled its context window: the answer stops here. Try again, or start a new chat to go on.", and with no words "… its context window: it wrote no answer. Try again, or start a new chat to go on.", and offers another try. The asked model's own window, and a turn whose record names no model, are said as before, with none.
+- **The end-to-end stack** offers a fifth model, `away`, on a provider of its own at a port of the fake's container where nothing listens, so that its connection is refused at once (see Measured), with `then = ["standard"]`, a title of its own, "Away", and a window of its own, half of `standard`'s, priced as `standard`.
+
+**Tests:**
+
+- **the API's:** the record of each ending, in the stream's last chunk and in the conversation read after it, the two equal, and none in `start`: the asked model's own answer; a stand-in's; a stand-in's after the asked model was passed over, not ready; every model failed before a word; a stand-in that failed after a word, and after a thought alone; a stand-in's answer cut at its time; and a stand-in that finished and wrote nothing, whose turn has no answer (`test_turns_stand_ins_api.py`). A turn stopped while its stand-in writes, and while it waits at the stand-in's gate, in the stop's answer too; a turn given up on with a draft (`test_turns_running_api.py`) and without one (`test_turns.py`); a turn a shutdown interrupted, one cancelled from outside and one that failed inside Actio after a word, each naming the model that had written it (`test_turns_running_api.py`); the title job's line, for a stand-in that wrote the title and for one that answered with nothing to make one of, and none when the model named for titles answered (`test_titles.py`); the record of `stood_in.sse`; and the end-to-end file's `away` (`test_catalog.py`);
+- **the page's:** `figuresOf`, the item last, by its title or the record's name, and none for the asked model's answer, a record that names none, models not read or a turn that runs (`lib/chat/figures.test.ts`); `contextFill`, each row of the rule, a turn that left its question open, a turn the model that answers wrote in another's place, and one whose record names none (`lib/chat/context.test.ts`); on the page, the item of an answer that arrives a frame after its last words, of a stored one at once, and of one whose models come later, after the rest of the list, which stays the same elements, with the answer's words drawn once, also when the models are read again (`components/chat/answered-by.test.tsx`); the line under the box of a stand-in's answer (`components/chat/context-meter.test.tsx`); the two sentences and another try, and the asked model's window and a record that names none as before (`components/chat/chat-app.test.tsx`); and `stood_in.sse`, read by the real `ai` package (`tests/contract/turn-stream.test.ts`);
+- **end to end** (`apps/web/e2e/stand-in.spec.ts`): a question given the name `away` on its way out, the fake's answer, the turn's record, "answered by Fake model" last under it, the line under the box in the fake's window, and the same after a reload.
+
+**Known, and left,** each worked out from the rules, and not seen unless it says so:
+
+- **a turn that was given up on doesn't say which model was answering it;**
+- **the turns recorded between the decision and this revision don't say either:** the page takes them for the asked model's, in the line under the box, the list and the notice;
+- **the line under the box reads in the window of whoever answered last,** so in a chain it can change from one answer to the next. Seen in the look below: "100% full · 2,048 of 2,048 tokens", and after the next answer, the asked model's, "1% full · 129 of 8,192 tokens". And "start a new chat soon" is said of the window of whoever answered last, though another model of the chain, with more room, may go on;
+- **the item comes when the models are read,** which for a stored conversation can be a moment after its answers are drawn: in a window too narrow for the list's one line, it can then take a second line, and what is under the list moves down by one;
+- **"Try again" after a stand-in's full window may meet the same window again,** when the asked model still can't answer, and costs again;
+- **an answer cut at a stand-in's own longest answer** (`length`) is said as the asked model's;
+- **the usage ledger names the asked model,** whose price was paid;
+- **who answered isn't said while the answer arrives,** only once its turn has ended.
+
+#### Measured
+
+On 2026-11-25, on this tree.
+
+**On the real page,** the whole stack built from this tree, with a models file made for the look: its default model is the repository's fake, run on the machine itself, with a window of 8,192 tokens, and the local `qwen3.5:4b-q4_K_M` stands in for it, under the title "Qwen 3.5 4B, small window", with a window of 2,048 tokens and an answer of 2,000 at the longest. One guest, once in each of three engines (Playwright 1.65's Chromium, Firefox and WebKit), with made-up questions. What the page showed was the same in the three:
+
+| What was set up, and asked | What the page showed, and the API's record of the turn |
+|---|---|
+| The fake not running. A short question | The local model's answer. Under it its rate, its first word and its credits, and last "answered by Qwen 3.5 4B, small window". Under the box "6% full · 126 of 2,048 tokens" (136 in Firefox, 125 in WebKit). The record: `model` the fake, `answered_by` the local model |
+| Still not running. An essay of 2,500 words is asked for | 9,696 to 9,915 characters of it, with the same last item under them, and the notice "Another model answered in place of the one you asked, and the conversation has filled its context window: the answer stops here. Try again, or start a new chat to go on.", with "Try again". Under the box "100% full · 2,048 of 2,048 tokens · start a new chat soon". The record: `completed`, `context_window`, `answered_by` the local model, 1,901 to 1,909 credits |
+| The fake started, its status given 16.5 s to be asked anew, and "Try again" | The fake's own answer in the essay's place, the question's echo, with nothing about who answered under it, and no notice. Under the box "1% full · 129 of 8,192 tokens" (135, 125). The record: `answered_by` the fake |
+| A reload | The two answers, their lists and the line under the box as before. The lists read the same when the answers were first on the page and 2.5 s later |
+
+No request of the page's was refused, and no script on it failed. The API's log for the first two turns of each run: in Chromium's, "model fake-first is unreachable, and is passed over", then "model small answered in place of fake-first"; in Firefox's and WebKit's, which began within the 15 seconds for which the fake's status of the run before was still reused, "model fake-first failed (ConnectionFailedError), and is asked once more", "… and small is asked next", and the same last line.
+
+**The case that was seen before this revision,** on the same stack with the chain of the example: Groq's `openai/gpt-oss-120b` as the default, with `gemini-3.5-flash-lite` and then the local model in its `then`, and the decision's own made-up question of 39,893 characters, once, in Chromium. flash-lite's answer, and under it "first word after 1.2 s", "3,229 credits" and "answered by Gemini 3.5 Flash-Lite". Under the box "5% full · 12,849 of 250,000 tokens", where the decision's look had read "100% full · 12,857 of 8,000 tokens · start a new chat soon". The API's log: "model groq-large failed (ContextOverflowError), and gemini-lite is asked next", then "model gemini-lite answered in place of groq-large". It took one request that Groq refused, and one to flash-lite.
+
+**The title job's line,** on the stack of the look above with the fake named for titles too, and not running: one question, and the worker's log said "conversation …: model fake-first is unreachable, and is passed over", then "conversation …: model small answered in place of fake-first". The conversation's title was the local model's, "Why needs bike chain oil".
+
+**The end-to-end tests,** on their own stack: 79 passed, the new one in 0.7 s. The API's log of its turn: "model away is unreachable, and is passed over", then "model standard answered in place of away". From the API's container of that stack, a connection to the port of the fake's container where nothing listens was refused after 17.6 ms, and after 0.3 ms at the second and the third try.
+
+**The page's test that waits for the models to be read again,** five seconds by the real clock (`components/chat/answered-by.test.tsx`), was run eight times beside eight processes that kept the machine's processors busy, at a load of 10: eight passed.
+
+**Mistakes planted on purpose.** After the build and the review, 42 mistakes were planted one at a time in a scratch copy of the tree, 23 in the API and the end-to-end stack's files and 19 in the page, and the tests that should notice each were run: all 42 failed a test. Four of them were for what the review had found no test for, whose tests were written before the run: a turn that a shutdown interrupted, and one that failed inside Actio after a word, recorded without the model that had written them; the title job's line left out for a model that answered with nothing; and the end-to-end file's `away` given the window of the model that stands in for it.

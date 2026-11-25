@@ -1004,3 +1004,11 @@ P1's performance run left one figure outside its number and unexplained: 600 mes
 - **The run's figure was named for more than it measured.** "600 messages scrolled through" was forty turns of 500 px up from the end, 20,000 px of 414,824. All the way to the top was measured for this revision, with the change alone.
 
 **Why now, and not at the start:** the frame was in three runs' figures, 107, 114 and 126 ms, as the longest frame of a scenario named scrolling, and the page on performance wrote it down as known and not yet looked into. The probe gave the longest frame and not which one it was, so it read as the engine being slow at scrolling a long page, which nothing in the page could mend. A probe that says where a frame falls, what the page's script took of it and what was added in it showed in its first run that it was one frame, and the page's doing.
+
+### 2026-11-25: the page says which model answered
+
+A turn's record now names the model that wrote its answer, which may be one asked in the place of the one asked ([ADR 0028](0028-a-model-names-those-that-stand-in-for-it.md), revision "a turn says which model answered, and the page says so", which has the reasons, the options and the tests). Three things of this record's changed with it:
+
+- **what an answer took** (revision "an answer says what it took") has one more item, last: "answered by" and that model's title, when it isn't the model asked, once the models are read;
+- **the line under the box** (revision "the page says how full the model's window is") says a figure over the window of the model that counted it: the model that answers, or one that stands in for it. Any other model's figure says nothing, as before;
+- **a turn whose stand-in filled its own window** (revision "the page says which limit an answer reached") is said in words of its own, and offers another try: the model asked may answer it.
