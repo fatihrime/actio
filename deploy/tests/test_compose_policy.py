@@ -298,6 +298,39 @@ def test_a_rate_limit_set_in_env_reaches_the_api(limit: str) -> None:
     assert api_environment()[limit] is None  # left out: the API's own default applies
 
 
+CLOUD_KEYS = ["GROQ_API_KEY", "GEMINI_API_KEY"]
+
+
+@pytest.mark.parametrize("key", CLOUD_KEYS)
+@pytest.mark.parametrize("service", ["api", "worker"])
+def test_a_cloud_providers_key_set_in_env_reaches_the_api_and_the_worker(
+    service: str, key: str
+) -> None:
+    """A models file names the variable a provider's key is in, and the API and the
+    worker each build the providers' clients from it: the worker asks a model for a
+    conversation's title. One that isn't set is left out, and a models file that needs
+    it stops the two from starting, with a line that says so."""
+    env = os.environ | {"POSTGRES_PASSWORD": "placeholder", "VALKEY_PASSWORD": "placeholder"}
+    for name in CLOUD_KEYS:  # a developer's shell may export them
+        env.pop(name, None)
+    command = ["docker", "compose", "--env-file", ".env.example", "--file", "compose.yaml"]
+
+    def environment(**extra: str) -> dict[str, str | None]:
+        result = subprocess.run(  # noqa: S603 - the docker CLI, with arguments fixed here
+            [*command, "config", "--format", "json"],
+            cwd=ROOT,
+            env=env | extra,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        found: dict[str, str | None] = json.loads(result.stdout)["services"][service]["environment"]
+        return found
+
+    assert environment(**{key: "a-made-up-key"})[key] == "a-made-up-key"
+    assert environment()[key] is None  # left out
+
+
 def test_the_api_is_given_the_time_it_takes_to_end_its_answers(stack: dict[str, Any]) -> None:
     """Told to stop, the API doesn't drop the answers that are being written. It gives
     them a moment to finish, then halts what is left and records it as interrupted,

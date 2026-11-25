@@ -45,6 +45,14 @@ x-ollama: &ollama
   # graphics processor, which a container on macOS can't. From inside a container the
   # machine is called host.docker.internal.
   ACTIO_OLLAMA_URL: ${ACTIO_OLLAMA_URL:-http://host.docker.internal:11434}
+# The keys of the cloud providers whose models a models file may offer, such as
+# config/examples/free-cloud: Groq's and the Gemini API's. A models file names the
+# variable a provider's key is in (`api_key_env`); a key under another name is added
+# here. Without a value, each is passed on from .env when it is set there, and otherwise
+# left out. Shared by the API and the worker, so that the two can't hold different keys.
+x-cloud-keys: &cloud-keys
+  GROQ_API_KEY:
+  GEMINI_API_KEY:
 
 services:
   caddy:
@@ -114,7 +122,7 @@ services:
     user: actio
     tmpfs: [/tmp]
     environment:
-      <<: [*api-stores, *ollama]
+      <<: [*api-stores, *ollama, *cloud-keys]
       # Only Caddy and the web app can reach the API here, so trust the client address
       # and scheme that Caddy forwards.
       ACTIO_FORWARDED_ALLOW_IPS: "*"
@@ -169,8 +177,8 @@ services:
     command: [actio, --role, worker]
     environment:
       # Where its data is, Valkey for one job, counting again what the usage counters
-      # missed, and Ollama for another, a conversation's title.
-      <<: [*api-stores, *ollama]
+      # missed, and the models' servers for another, a conversation's title.
+      <<: [*api-stores, *ollama, *cloud-keys]
       # The file it touches every 5 seconds while it works, for its health check below.
       # On the tmpfs: the root filesystem is read-only.
       ACTIO_ALIVE_FILE: /tmp/actio-worker-alive
