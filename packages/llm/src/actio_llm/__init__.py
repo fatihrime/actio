@@ -6,6 +6,8 @@
 - `estimate`: a guess at a text's tokens, for when no provider has counted them.
 - `ollama`: the adapter for Ollama's native API.
 - `openai_compatible`: the adapter for servers that speak OpenAI's Chat Completions API.
+- `router`: the walk down a chain of models, each asked in the place of the one before
+  it that couldn't answer, before the first word.
 - `wire`: reading a streamed answer under deadlines, shared by the adapters.
 - `cli`: `actio-llm`, to chat with a local model from the terminal.
 """
@@ -30,6 +32,7 @@ from actio_llm.chat import (
     User,
 )
 from actio_llm.errors import (
+    FOR_NOW,
     ContextOverflowError,
     LLMError,
     ModelNotFoundError,
@@ -44,9 +47,11 @@ from actio_llm.errors import (
 from actio_llm.estimate import prompt_tokens, tokens_in
 from actio_llm.ollama import LocalModel, ModelInfo, Ollama
 from actio_llm.openai_compatible import OpenAICompatible
+from actio_llm.router import Link, Walk
 from actio_llm.wire import Timeouts
 
 __all__ = [
+    "FOR_NOW",
     "Assistant",
     "ChatProvider",
     "ChatRequest",
@@ -54,6 +59,7 @@ __all__ = [
     "Finish",
     "FinishReason",
     "LLMError",
+    "Link",
     "LoadsAhead",
     "LocalModel",
     "Message",
@@ -79,6 +85,7 @@ __all__ = [
     "UnsupportedServerError",
     "Usage",
     "User",
+    "Walk",
     "prompt_tokens",
     "tokens_in",
 ]

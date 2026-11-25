@@ -1,7 +1,8 @@
 """Why a model call failed. Adapters raise these instead of their HTTP library's errors.
 
 The classes answer what a caller has to decide: is another provider worth trying, is
-the request itself wrong, or did the answer break off half-way?
+the request itself wrong, or did the answer break off half-way? `FOR_NOW` names those
+that another try may not meet again.
 """
 
 
@@ -73,3 +74,18 @@ class ContextOverflowError(RequestRejectedError):
         """The prompt's size as the provider counted it, when it says."""
         self.context_window = context_window
         """The window the prompt had to fit in, when the provider says."""
+
+
+FOR_NOW: tuple[type[LLMError], ...] = (
+    ProviderUnavailableError,
+    StreamInterruptedError,
+    ProviderError,
+)
+"""The errors that another try may not meet again: a server away, overloaded or refusing
+for now (`RateLimitedError` is a `ProviderUnavailableError`), an answer that broke off, a
+provider that failed. A request the provider refused, or a server older than its client
+knows, would be the same the next time: those, and any other `LLMError`, are not.
+
+`isinstance(error, FOR_NOW)` says it. The walk down a chain of models (`actio_llm.router`)
+raises the first of these when every model failed, and a title that failed with one is
+asked for again later."""

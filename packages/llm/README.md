@@ -5,6 +5,7 @@ Actio's model clients: one neutral chat format, and two adapters that speak it.
 - **The neutral format** (`chat`): a `ChatRequest` goes in, and text, reasoning, tool calls and one final event with token counts stream out. The rest of Actio never sees a provider's JSON.
 - **The Ollama adapter** (`Ollama`) uses [Ollama](https://ollama.com)'s native API so that a model never answers from a quietly shortened prompt, and no answer runs without a limit.
 - **The OpenAI-compatible adapter** (`OpenAICompatible`) serves every server that speaks OpenAI's Chat Completions API: [fakellm](https://fatihrime.github.io/actio/reference/fakellm/) in tests, Groq and the Gemini API, and vLLM or any other.
+- **The walk down a chain of models** (`Walk`) asks one model, and when it can't answer before its first word, the next, in order.
 - **A command-line tool** (`actio-llm`) to try the Ollama adapter from a terminal.
 
 The design and its trade-offs are in [ADR 0007](https://fatihrime.github.io/actio/adr/0007-local-models-through-ollamas-native-api/).
@@ -151,6 +152,42 @@ Every failure is an `LLMError`. The subclasses answer what a caller has to decid
 
 Deadlines (`Timeouts`) apply to connecting, to the first chunk, and to the gap between chunks. They time each read from Ollama, never the caller's own work between two chunks.
 
+`FOR_NOW` names the errors that another try may not meet again: `isinstance(error, FOR_NOW)` is true for `ProviderUnavailableError`, `RateLimitedError` with it, `StreamInterruptedError` and `ProviderError`.
+
+## Asking another model in one's place
+
+A `Walk` is given a chain of `Link`s, in order: each a provider, the request for it, a name for the caller's log, and optionally something to hold while it is asked, such as the gate in front of its server. Its stream yields the events of the first link that answers:
+
+```python
+from contextlib import aclosing
+
+from actio_llm import Link, LLMError, Walk
+
+
+def told(failed: Link, error: LLMError, later: Link | None) -> None:
+    print(f"{failed.name} failed ({type(error).__name__}), next: {later and later.name}")
+
+
+walk = Walk(
+    [Link("groq", groq, groq_request), Link("local", ollama, local_request)],
+    on_failed=told,
+)
+async with aclosing(walk.stream()) as events:
+    async for event in events:
+        ...
+print(walk.answered.name)  # the link whose request the answer was written for
+```
+
+- **One at a time, in order:** a link is asked only after the one before it failed.
+- **Before anything was handed on, any `LLMError` moves on to the next link:** too busy, a limit, a request too large or refused, a model missing, a provider that failed, a server too old, an answer that broke off with nothing in it yet, a stream that ended without its `Finish`.
+- **After something was handed on, nothing moves on,** and the error is raised as it came. Something is a piece of text or reasoning with text in it, a tool call, or a `Finish`: a thought counts, since a page that showed it can't take it back. A piece with no text in it doesn't.
+- **A cancellation, or any exception that isn't an `LLMError`, passes through as it came,** and no later link is asked.
+- **One hold at a time:** a link that failed has its stream closed and its hold given back before the next link's hold is waited for. Closing the walk's stream early closes the open link's, and gives its hold back.
+- **When every link failed,** the first error in `FOR_NOW` is raised, and without one the last link's: the object itself.
+- **`on_failed` is told of each link that failed,** with its error and the link asked next, as it happens. `answered` says which link answered.
+
+With one link, the walk is that provider. How Actio uses it, and why a thought counts: [ADR 0028](https://fatihrime.github.io/actio/adr/0028-a-model-names-those-that-stand-in-for-it/).
+
 ## A guess at token counts
 
 Sometimes nobody has counted. Before a request is sent, its prompt has no count yet. A stream that is closed early ends without a `Finish`, and some servers report no counts at all. For those cases `actio_llm.estimate` guesses, without any model's tokenizer:
@@ -177,8 +214,8 @@ prompt_tokens(prompt)  # 31, with what a chat template writes around the two mes
 
 - **Images and structured output** (a JSON schema for the answer). They arrive with the features that use them.
 - **Unloading and pulling models.** They arrive with the model manager.
-- **A guess that learns.** The estimate uses the same rules for every model. Correcting it per model, from the counts providers report, comes with the router.
-- **A router** that picks a provider, falls back to another and retries. The errors above are shaped for it.
+- **A guess that learns.** The estimate uses the same rules for every model. Correcting it per model, from the counts providers report, comes with the rest of the router.
+- **The rest of the router:** a second try of the same model, a patience of its own for each kind of server, and a provider's health beyond its last answer. The walk above is its first part.
 
 ## Tests
 
@@ -200,3 +237,4 @@ make test-cloud                 # those of Groq and the Gemini API, sent to the 
     - Five exchanges depend on the account's or the provider's state, such as a limit that was reached or a model too busy. They were written from real answers, and are never asked live.
 - **Hand-written responses** cover what a healthy server won't produce on demand: dropped connections, stalls, malformed lines, old versions.
 - **The OpenAI-compatible adapter runs against fakellm,** in process. fakellm is a separate implementation of the format, itself checked with OpenAI's official SDK, so neither is only tested against itself. Directives in the prompt script its reasoning, tool calls and failures.
+- **The walk runs against providers and holds scripted in its test,** which note in one log, in order, when each is asked, closed, held and given back.
