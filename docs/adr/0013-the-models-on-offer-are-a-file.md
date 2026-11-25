@@ -128,3 +128,12 @@ The file has one more top-level key beside `default`: `titles`, the model that n
 - **Checked like the other settings:** a name that isn't one of the models, the model's own name, or a name twice stops the start, with one line.
 - **`GET /api/models` lists each model's `then`,** and says a model is `ready` when it or one of its stand-ins is.
 - `OfferedModel.then` carries the names, and `Catalog.chain` gives a model with its stand-ins. The rest of Actio still sees only `Catalog` and `OfferedModel`.
+
+### 2026-11-25: a model says how many tokens its server takes in a minute
+
+The example for the cloud providers' free plans wrote what a plan takes in a minute in the place of a model's `context_window`, since the file had no other place for it. A model's table may now have `tokens_a_minute` ([ADR 0029](0029-a-model-is-passed-over-for-a-request-too-large.md)).
+
+- **A model's room for one request is the smaller of its window and that figure.** A model whose room is smaller than a request, by Actio's guess at its tokens, is passed over while another model of its chain has room for it.
+- **Checked like the other settings:** a whole number of 1 or more, and anything else stops the start, with one line. Left out, the model's room is its window.
+- **`GET /api/models` gives a model's room as its `context_window`.**
+- `OfferedModel.tokens_a_minute` and `OfferedModel.room` carry it, and `Chain.asked_with` is the rule.

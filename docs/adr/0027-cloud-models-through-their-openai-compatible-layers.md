@@ -169,3 +169,11 @@ Each got a test, in one round of fixes with the review's findings. The review's 
 | Groq's `openai/gpt-oss-20b` as the model for titles | No title: "its model wrote nothing to make a title of" in the worker's log, and the conversation kept its first line |
 
 No request of the page's was refused, and no script on it failed, in any of them.
+
+## Revisions
+
+### 2026-11-25: the example's models have their own windows, and say their tokens a minute
+
+The decision gave Groq's two models "8,000 tokens of window: the free plan's tokens a minute, which a request may not exceed", and the Gemini API's two 250,000 for the same reason: the models file had one number for how much a model takes. It was written so because the file had no other place for the figure, the line under the chat's box then said how much room a conversation has there, and these servers are sent nothing of a model's window.
+
+The window is read for one thing that is recorded, though: which limit an answer reached is told by the window of its request, and with 8,000 an answer cut at its longest size could be recorded as one that filled the window. Since [ADR 0029](0029-a-model-is-passed-over-for-a-request-too-large.md) a model says its tokens a minute in a key of its own, `tokens_a_minute`, and the example's `context_window` is each model's own: 131,072 for Groq's two, 1,048,576 for the Gemini API's two, with 8,000 and 250,000 as their tokens a minute. The line under the chat's box reads as before, "of 8,000 tokens" and "of 250,000 tokens": `GET /api/models` gives the smaller of the two figures.

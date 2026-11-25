@@ -39,5 +39,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0026](0026-models-loaded-ahead-of-the-first-question.md) | A model is loaded ahead of the first question: the page asks, the API answers at once, and the load is a chat's request without messages | Accepted |
 | [0027](0027-cloud-models-through-their-openai-compatible-layers.md) | Groq and the Gemini API through their OpenAI-compatible layers, by the one client, which reads what differs leniently; what a model is told about reasoning is in the models file | Accepted |
 | [0028](0028-a-model-names-those-that-stand-in-for-it.md) | A model names the models that stand in for it, asked in its place before the first word or thought of an answer; the turn stays the asked model's, at its price | Accepted |
+| [0029](0029-a-model-is-passed-over-for-a-request-too-large.md) | A model is passed over when a request is larger than its room, its window or what its server takes in a minute, while another model has room; a guess never refuses a turn | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.
