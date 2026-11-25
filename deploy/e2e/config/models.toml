@@ -1,4 +1,5 @@
-# The models the end-to-end test stack offers (`make e2e`): the fake, under four names.
+# The models the end-to-end test stack offers (`make e2e`): the fake, under four names,
+# and a fifth model whose server isn't there, which the fake stands in for.
 #
 # compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API and
 # the worker read this file in place of config/models.toml. "standard" is the same name
@@ -28,6 +29,13 @@ url = "http://fakellm:8100/v1"
 kind = "openai-compatible"
 url = "http://fakellm:8100/v1"
 answers_within_seconds = 3
+
+# The fakellm container at a port where nothing listens: a connection there is refused at
+# once, so the model on it is never ready, and the one that stands in for it answers
+# (apps/web/e2e/stand-in.spec.ts). Nothing else is asked here.
+[providers.nowhere]
+kind = "openai-compatible"
+url = "http://fakellm:8101/v1"
 
 [models.standard]
 title = "Fake model"
@@ -68,3 +76,18 @@ model = "fake-chat"
 context_window = 8192
 max_output_tokens = 2048
 thinking = true
+
+# The model on the provider above, whose server isn't there: "standard" stands in for
+# it, and the page says under the answer that it did. The page has no way to choose it:
+# a test gives its question this model's name on its way out, as for "hurried". Priced
+# like "standard" (plans.toml), so that it isn't offered at a limit either. Its window is
+# half of "standard"'s: a page that said the answer's tokens of the asked model's window
+# would say another number than the one the test waits for.
+[models.away]
+title = "Away"
+provider = "nowhere"
+model = "fake-chat"
+context_window = 4096
+max_output_tokens = 2048
+thinking = false
+then = ["standard"]

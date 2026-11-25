@@ -162,10 +162,20 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
     hurried = file.models["hurried"]
     assert (hurried.model, hurried.thinking) == (standard.model, True)
     assert file.providers[hurried.provider].url == provider.url
+    # And a model whose server isn't there: the fake's container at a port where nothing
+    # listens, which refuses the connection at once. The fake under the default name
+    # stands in for it, so that a test sees another model answer in its place.
+    away = file.models["away"]
+    nowhere = file.providers[away.provider]
+    assert away.then == (file.default,)
+    assert away.title not in {model.title for name, model in file.models.items() if name != "away"}
+    # A window of its own, so that the test tells whose window the page divides by.
+    assert away.context_window != standard.context_window
+    assert (nowhere.kind, nowhere.url) == ("openai-compatible", "http://fakellm:8101/v1")
     assert {
         name: (entry.answers_within_seconds, entry.timeouts.answer_s)
         for name, entry in file.providers.items()
-    } == {standard.provider: (None, 300), hurried.provider: (3, 3)}
+    } == {standard.provider: (None, 300), hurried.provider: (3, 3), away.provider: (None, 300)}
 
 
 async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
