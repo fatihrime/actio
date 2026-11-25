@@ -84,6 +84,8 @@ answers_at_once = 4
 
 Then four answers are written at once, and a fifth waits its turn. Left out, it is 1 for Ollama, and there is no limit for a server that speaks OpenAI's API, such as vLLM, which takes every answer as it comes. For LM Studio or llama.cpp's server, give the number of requests it was set to handle in parallel.
 
+A provider may also say how long its server is given to begin an answer, `begins_within_seconds`. A server that hasn't begun by then counts as away, and the models that stand in for its model are asked (below). Left out, it is 90 seconds, which covers a model that the server has to load first; the example's cloud providers, below, say 30.
+
 !!! note "On Linux"
     Ollama listens only on `127.0.0.1` by default, which containers can't reach, so with `make up` the model shows as `unreachable`. Ollama's `OLLAMA_HOST` setting changes where it listens: Docker's bridge address, usually `172.17.0.1`, is reachable from containers and not from your network. This follows Ollama's and Docker's documentation; this project's own Linux run, in CI, has no Ollama to try it with.
 
@@ -105,7 +107,7 @@ A model can name others of the file that are asked in its place, in order, when 
 then = ["gemini-lite", "standard"]
 ```
 
-A question to it may then go to any of the three servers. It costs what it costs with the model it was asked of, and the API's log says which model answered. See [ADR 0028](adr/0028-a-model-names-those-that-stand-in-for-it.md).
+A question to it may then go to any of the three servers. It costs what it costs with the model it was asked of, and the API's log says which model answered. Each model is asked once more first when its failure may be gone in a moment: at once when the connection to its server failed at once, as one that is refused does, and after the wait its server asked for when that is two seconds at most. A server that never answers the connection is not asked again. See [ADR 0028](adr/0028-a-model-names-those-that-stand-in-for-it.md).
 
 ## Usage limits
 
