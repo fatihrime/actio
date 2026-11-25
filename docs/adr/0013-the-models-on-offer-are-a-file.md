@@ -137,3 +137,12 @@ The example for the cloud providers' free plans wrote what a plan takes in a min
 - **Checked like the other settings:** a whole number of 1 or more, and anything else stops the start, with one line. Left out, the model's room is its window.
 - **`GET /api/models` gives a model's room as its `context_window`.**
 - `OfferedModel.tokens_a_minute` and `OfferedModel.room` carry it, and `Chain.asked_with` is the rule.
+
+### 2026-11-25: a model states its provider's limits, its budget
+
+Beside `tokens_a_minute`, a model's table may have three more keys of its provider's limits for it: `requests_a_minute`, `requests_a_day` and `tokens_a_day` ([ADR 0030](0030-the-providers-budgets-are-counted.md)).
+
+- **The four are the model's budget.** Actio counts in Valkey what it sends to the model, keeps to nine tenths of each figure, and passes over a ready model that has nothing left of one for a request while another model of its chain has some. When none has, each is asked all the same.
+- **Checked like `tokens_a_minute`:** a whole number of 1 or more, and anything else stops the start, with one line. Any may be left out, and a model that states none has no budget.
+- **Two models of the file that are the same model on the same provider share one budget,** and must state the same four figures, a key left out being one: a difference stops the start, with one line that names both models and the key.
+- `OfferedModel.budget` carries it, `Chain.look` reads it, `Chain.asked_with` is the rule, and `counted` counts what a request takes.

@@ -53,6 +53,7 @@ nav = [
     { "0027. Groq and the Gemini API by the one client" = "adr/0027-cloud-models-through-their-openai-compatible-layers.md" },
     { "0028. A model names those that stand in for it" = "adr/0028-a-model-names-those-that-stand-in-for-it.md" },
     { "0029. A model passed over for a request too large" = "adr/0029-a-model-is-passed-over-for-a-request-too-large.md" },
+    { "0030. The providers' budgets are counted" = "adr/0030-the-providers-budgets-are-counted.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]
