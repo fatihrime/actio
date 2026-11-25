@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live e2e build demo-record
+.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live e2e build demo-record preflight
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -104,6 +104,16 @@ demo-record: ## Record the README's hero GIF from the running stack, into docs/a
 	@frames="$$(mktemp -d)" && trap 'rm -rf "$$frames"' EXIT && \
 	    pnpm --dir apps/web exec node demo/record.mts "$$frames" && \
 	    uv run python scripts/demo_gif.py "$$frames" docs/assets/hero.gif
+
+# Not part of `make check`: it asks the cloud providers, with your own keys, and each
+# model it checks answers one short question, which counts against your account's
+# limits. The keys come from the shell, and from .env when there is one, for what the
+# shell doesn't export: `export -p` writes the shell's own variables in a form it reads
+# back, so they are put back over .env's once it is loaded. A variable the shell exports
+# empty wins too. Arguments go in `args`, such as args="groq=openai/gpt-oss-20b":
+# args=--help lists them. See docs/development.md.
+preflight: ## Check the cloud providers' keys, the models offered to them and the limits they state
+	@if [ -f .env ]; then mine="$$(export -p)"; set -a; . ./.env; set +a; eval "$$mine"; fi; uv run python scripts/preflight.py $(args)
 
 # Created once and never overwritten: Postgres keeps the password it started with.
 .env:
