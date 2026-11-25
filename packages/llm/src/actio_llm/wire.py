@@ -1,8 +1,10 @@
 """Talking HTTP to a provider under deadlines. Shared by the adapters.
 
 The part worth sharing is `stream_lines`: reading a streamed answer so that a silent
-provider is noticed, a slow caller is not mistaken for one, and closing the stream
-closes the connection.
+provider is noticed, a slow caller is not mistaken for one, an answer is given only so
+long as a whole, and closing the stream closes the connection. The time for the whole
+is the one deadline that counts the caller's own time too: it is a bound, which a server
+that sends faster than it is read would otherwise stretch for ever.
 """
 
 import asyncio
@@ -19,6 +21,7 @@ from actio_llm.errors import (
     ProviderError,
     ProviderUnavailableError,
     StreamInterruptedError,
+    TookTooLongError,
 )
 
 
@@ -32,6 +35,10 @@ class Timeouts:
     local model it covers a cold load, and waiting in the queue behind another request."""
     idle_s: float = 20.0
     """Between two lines of an answer."""
+    answer_s: float = 300.0
+    """From sending a chat request to the end of its answer, by the clock: the caller's
+    own time between two lines counts too. A full answer of 2,048 tokens in 300 seconds
+    is 6.8 tokens a second. The first line has to come within it as well."""
     request_s: float = 10.0
     """For the small calls, such as listing models."""
 
@@ -59,17 +66,30 @@ async def stream_lines(
     """POST `body` as JSON and yield the answer's non-empty lines as they arrive.
 
     - No connection, known at once: `ConnectionFailedError`. Nothing was sent.
-    - Nothing within `first_event_s`, or the connection failed otherwise before the
-      answer began: `ProviderUnavailableError`. Nothing was generated.
+    - Nothing within `first_event_s`, or within `answer_s` when that is shorter, or the
+      connection failed otherwise before the answer began: `ProviderUnavailableError`.
+      Nothing was generated.
     - A gap longer than `idle_s`, or a dropped connection, after the first line:
       `StreamInterruptedError`.
+    - The answer not over `answer_s` after the request was sent, after the first line:
+      `TookTooLongError`, whatever the server is doing, and however much of its answer
+      has arrived already. No line is handed on once that time is over. A silence that
+      both times would end is the one that is over first.
     - A status other than 200: whatever `rejection` returns.
 
-    Closing the generator closes the connection.
+    Closing the generator closes the connection, and so does each of these errors.
     """
-    first_deadline = asyncio.get_running_loop().time() + timeouts.first_event_s
+    loop = asyncio.get_running_loop()
+    sent = loop.time()
+    # Before the first line, whichever of the two times is over first ends the wait.
+    begins_within_s = min(timeouts.first_event_s, timeouts.answer_s)
+    first_deadline = sent + begins_within_s
+    answer_deadline = sent + timeouts.answer_s
     too_slow = ProviderUnavailableError(
-        f"{provider} didn't start answering within {timeouts.first_event_s:g} s"
+        f"{provider} didn't start answering within {begins_within_s:g} s"
+    )
+    too_long = TookTooLongError(
+        f"{provider} was still answering after {timeouts.answer_s:g} s, the most an answer is given"
     )
     # No read timeout from the HTTP client: a timeout that spans a `yield` would also
     # count the consumer's time. Each read gets its own deadline below instead.
@@ -97,15 +117,16 @@ async def stream_lines(
         lines = response.aiter_lines()
         started = False
         while True:
-            watchdog = (
-                asyncio.timeout(timeouts.idle_s) if started else asyncio.timeout_at(first_deadline)
-            )
+            idle_deadline = loop.time() + timeouts.idle_s
+            deadline = min(idle_deadline, answer_deadline) if started else first_deadline
             try:
-                async with watchdog:
+                async with asyncio.timeout_at(deadline):
                     line = await anext(lines, None)
             except TimeoutError as error:
                 if not started:
                     raise too_slow from error
+                if answer_deadline <= idle_deadline:
+                    raise too_long from error
                 raise StreamInterruptedError(
                     f"{provider} sent nothing for {timeouts.idle_s:g} s in the middle of an answer"
                 ) from error
@@ -121,6 +142,11 @@ async def stream_lines(
                 ) from error
             if line is None:
                 return
+            # A line received already is read without waiting, however late it is read:
+            # a deadline around the read alone would hand on every line a slow caller has
+            # fallen behind by. So the clock is asked before anything is handed on.
+            if loop.time() >= answer_deadline:
+                raise too_long if started else too_slow
             if line.strip():
                 started = True
                 yield line

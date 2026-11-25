@@ -42,6 +42,7 @@ from actio_llm.errors import (
     RateLimitedError,
     RequestRejectedError,
     StreamInterruptedError,
+    TookTooLongError,
     UnsupportedFeatureError,
     UnsupportedServerError,
 )
@@ -80,6 +81,7 @@ __all__ = [
     "TextDelta",
     "Timeouts",
     "Timings",
+    "TookTooLongError",
     "ToolCall",
     "ToolResult",
     "ToolSpec",

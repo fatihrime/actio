@@ -181,8 +181,8 @@ class Ollama:
         question loaded the model again, for 1.4 to 3.4 s.
 
         The server's answer is waited for as long as a chat's first line is
-        (`Timeouts.first_event_s`): a cold load takes seconds. Hanging up before it
-        comes abandons the load at the server.
+        (`Timeouts.first_event_s`, or `Timeouts.answer_s` when that is shorter): a cold
+        load takes seconds. Hanging up before it comes abandons the load at the server.
         """
         await self._ensure_supported()
         # A request needs a message to be made; the load sends none.

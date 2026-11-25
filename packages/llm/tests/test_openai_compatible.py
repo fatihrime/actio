@@ -8,6 +8,7 @@ The second half feeds the adapter responses written here: the ways real servers 
 from one another, which one fake shouldn't try to imitate all at once.
 """
 
+import asyncio
 import copy
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
@@ -38,6 +39,7 @@ from actio_llm import (
     TextDelta,
     Timeouts,
     Timings,
+    TookTooLongError,
     ToolCall,
     ToolResult,
     ToolSpec,
@@ -1071,6 +1073,70 @@ async def test_a_list_of_models_nested_too_deep_is_the_providers_error(serve: Se
 
     with pytest.raises(ProviderError, match="isn't JSON"):
         await adapter.models()
+
+
+PATIENCE_S = 5.0
+"""How long a test of the time a whole answer is given waits for the client to end the
+answer. Its own times are tenths of a second: this keeps a client that reads such an
+answer for ever from hanging the run."""
+
+
+class Repeating(httpx2.AsyncByteStream):
+    """A response body that never ends: the same bytes, again and again, every `every_s`
+    seconds, as a server that keeps sending does."""
+
+    def __init__(self, part: bytes, *, every_s: float) -> None:
+        self._part = part
+        self._every_s = every_s
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        while True:
+            yield self._part
+            await asyncio.sleep(self._every_s)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("part", "words"),
+    [
+        (sse(delta(content="again ")), True),
+        (sse(": keep-alive"), False),
+        (sse(delta(content="")), False),
+    ],
+    ids=["words", "comments", "pieces with no text"],
+)
+async def test_an_answer_that_goes_on_past_its_time_is_cut_there(
+    serve: Serve, part: bytes, words: bool
+) -> None:
+    """A line a hundred times a second, far more often than the gap a server may leave,
+    and never an end: once the answer's time is over, and not before, the answer is
+    cut, and its connection closed. Lines with no word in them hand nothing on."""
+    body = Repeating(part, every_s=0.01)
+    timeouts = Timeouts(idle_s=0.1, answer_s=0.3)
+    adapter = serve(lambda _request: httpx2.Response(200, stream=body), timeouts=timeouts)
+    received: list[StreamEvent] = []
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+
+    async def read() -> None:
+        async with asyncio.timeout(PATIENCE_S), aclosing(adapter.stream(ask("hi"))) as events:
+            async for event in events:
+                received.append(event)  # noqa: PERF401 - the list must outlive the exception
+
+    with pytest.raises(TookTooLongError, match=r"Example was still answering after 0\.3 s"):
+        await read()
+
+    assert 0.3 <= loop.time() - began < 1.0
+    assert body.closed
+    if words:
+        assert received
+        assert set(received) == {TextDelta("again ")}
+    else:
+        assert received == []
+    assert adapter.timeouts == timeouts
 
 
 async def test_closing_the_stream_closes_the_connection(serve: Serve) -> None:

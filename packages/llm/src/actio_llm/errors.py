@@ -44,6 +44,14 @@ class StreamInterruptedError(LLMError):
     """
 
 
+class TookTooLongError(StreamInterruptedError):
+    """The answer started, and wasn't over when the time a whole answer is given was
+    (`Timeouts.answer_s`): the client ended it there, whatever the server was doing.
+
+    Events already received are real: an answer cut at its time, not one that failed.
+    A caller that doesn't know this kind takes it for an answer that broke off."""
+
+
 class ProviderError(LLMError):
     """The provider failed, or sent something that isn't its own protocol."""
 
@@ -93,9 +101,9 @@ FOR_NOW: tuple[type[LLMError], ...] = (
 )
 """The errors that another try may not meet again: a server away, overloaded or refusing
 for now (`ConnectionFailedError` and `RateLimitedError` are `ProviderUnavailableError`s),
-an answer that broke off, a provider that failed. A request the provider refused, or a
-server older than its client knows, would be the same the next time: those, and any
-other `LLMError`, are not.
+an answer that broke off (`TookTooLongError` is a `StreamInterruptedError`), a provider
+that failed. A request the provider refused, or a server older than its client knows,
+would be the same the next time: those, and any other `LLMError`, are not.
 
 `isinstance(error, FOR_NOW)` says it. The walk down a chain of models (`actio_llm.router`)
 raises the first of these when every model failed, and a title that failed with one is

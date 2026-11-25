@@ -32,6 +32,7 @@ from actio_llm import (
     StreamEvent,
     StreamInterruptedError,
     TextDelta,
+    TookTooLongError,
     ToolCall,
     UnsupportedFeatureError,
     UnsupportedServerError,
@@ -296,6 +297,33 @@ async def test_after_something_was_handed_on_the_error_is_raised_and_nobody_else
 
 
 @pytest.mark.parametrize(
+    "handed_on", [TextDelta("Half an"), ReasoningDelta("Let me think")], ids=["a word", "a thought"]
+)
+async def test_an_answer_cut_at_its_time_is_raised_as_it_came_and_nobody_else_is_asked(
+    handed_on: StreamEvent,
+) -> None:
+    """The answer is that model's, cut where its time was over: neither asked again nor
+    asked of the next."""
+    log: list[str] = []
+    error = TookTooLongError("first was still answering after 300 s")
+    failures, again = Failures(log), Again(log)
+    first = Model("first", log, handed_on, error, then=[TextDelta("Never"), DONE])
+    second = Model("second", log, TextDelta("Never"), DONE)
+    walk = Walk([link(first), link(second)], on_failed=failures, on_again=again)
+    seen: list[StreamEvent] = []
+
+    with pytest.raises(TookTooLongError) as failure:
+        await walked_into(walk, seen)
+
+    assert failure.value is error
+    assert seen == [handed_on]
+    assert (len(first.requests), second.requests) == (1, [])
+    assert (failures.told, again.told) == ([], [])
+    assert walk.answered is not None
+    assert walk.answered.name == "first"
+
+
+@pytest.mark.parametrize(
     "empty", [TextDelta(""), ReasoningDelta("")], ids=["a piece of text", "a thought"]
 )
 async def test_a_piece_with_no_text_in_it_is_not_a_word(empty: StreamEvent) -> None:
@@ -440,6 +468,10 @@ async def test_the_pause_is_the_wait_the_server_asked_for_and_nothing_is_asked_d
             id="a connection never answered",
         ),
         pytest.param((StreamInterruptedError("the connection dropped"),), id="broke off"),
+        pytest.param(
+            (TookTooLongError("first was still answering after 300 s"),),
+            id="took too long, with no word",
+        ),
         pytest.param((), id="ended without its finish"),
         pytest.param((ProviderError("500"),), id="failed"),
         pytest.param((RequestRejectedError("400: no such option"),), id="refused"),
@@ -885,6 +917,7 @@ async def test_when_every_link_failed_the_first_error_another_try_may_not_meet_i
         (ProviderUnavailableError("away"), True),
         (RateLimitedError("slow down"), True),
         (StreamInterruptedError("broke off"), True),
+        (TookTooLongError("still answering"), True),
         (ProviderError("failed"), True),
         (RequestRejectedError("refused"), False),
         (ContextOverflowError("too long"), False),

@@ -7,6 +7,7 @@ healthy server won't produce on demand: broken streams, timeouts, old versions.
 
 import asyncio
 import json
+import time
 import zlib
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing
@@ -36,6 +37,7 @@ from actio_llm import (
     TextDelta,
     Timeouts,
     Timings,
+    TookTooLongError,
     ToolCall,
     ToolResult,
     ToolSpec,
@@ -763,6 +765,26 @@ async def test_a_load_is_waited_for_as_long_as_a_first_word_not_as_a_small_call(
         )
 
 
+async def test_a_load_waits_no_longer_than_a_whole_answer_may_take(serve: Serve) -> None:
+    """A load is read as an answer's first line is: within the shorter of the time to
+    begin and the time for a whole answer. A server given less for an answer than to
+    begin one has its load cut at the shorter."""
+    silent = Paced(60.0, ndjson(LOADED))
+    ollama = serve(
+        lambda _request: httpx2.Response(200, stream=silent),
+        timeouts=Timeouts(first_event_s=5.0, answer_s=0.05),
+    )
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+
+    with pytest.raises(ProviderUnavailableError, match=r"didn't start answering within 0\.05 s"):
+        async with asyncio.timeout(5):
+            await ollama.load(MODEL, context_window=CONTEXT)
+
+    assert loop.time() - began < 1.0
+    assert silent.closed
+
+
 @pytest.mark.parametrize(
     "chunks",
     [[], [{"error": "llama runner process has terminated"}]],
@@ -811,7 +833,9 @@ async def test_an_answer_that_stalls_is_an_interruption(serve: Serve) -> None:
 
 
 async def test_a_slow_reader_is_not_mistaken_for_a_stalled_server(serve: Serve) -> None:
-    """The deadlines cover waiting for Ollama, never the time the caller takes per event."""
+    """The time to begin and the time between two lines cover waiting for Ollama, never
+    the time the caller takes per event. The time for a whole answer, further down,
+    counts that too."""
     ollama = serve(answering(piece("a"), piece("b"), piece("c"), DONE), timeouts=FAST)
     text = ""
     async with aclosing(ollama.stream(ask("hi"))) as events:
@@ -821,6 +845,233 @@ async def test_a_slow_reader_is_not_mistaken_for_a_stalled_server(serve: Serve) 
                 text += event.text
 
     assert text == "abc"
+
+
+PATIENCE_S = 5.0
+"""How long a test of the time a whole answer is given waits for the client to end the
+answer. Its own times are tenths of a second: this keeps a client that reads such an
+answer for ever from hanging the run."""
+
+
+class Endless(httpx2.AsyncByteStream):
+    """A response body that never ends: the same line, again and again, every `every_s`
+    seconds, as a server that keeps sending does. The first comes after `after_s`.
+
+    It counts the lines it sent (`sent`): a busy machine sends fewer in a given time,
+    never more, so a count that is too high is a time that was too long."""
+
+    def __init__(self, line: bytes, *, every_s: float, after_s: float = 0.0) -> None:
+        self._line = line
+        self._every_s = every_s
+        self._after_s = after_s
+        self.sent = 0
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        await asyncio.sleep(self._after_s)
+        while True:
+            self.sent += 1
+            yield self._line
+            await asyncio.sleep(self._every_s)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class HeldUp(httpx2.AsyncByteStream):
+    """A response body whose one part is read only after the event loop was held for
+    `held_s`, as when the process was busy elsewhere. Nothing waits meanwhile, so no time
+    limit around the read can fire: only the clock says how late it is."""
+
+    def __init__(self, part: bytes, *, held_s: float) -> None:
+        self._part = part
+        self._held_s = held_s
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        time.sleep(self._held_s)  # noqa: ASYNC251 - the loop is held on purpose
+        yield self._part
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("line", "words"),
+    [(ndjson(piece("again ")), True), (ndjson(piece("")), False)],
+    ids=["words", "lines with no word"],
+)
+async def test_an_answer_that_goes_on_past_its_time_is_cut_there(
+    serve: Serve, line: bytes, words: bool
+) -> None:
+    """A line a hundred times a second, far more often than the gap a server may leave,
+    and never an end: once the answer's time is over, and not before, the answer is
+    cut, and its connection closed. Lines with no word in them hand nothing on."""
+    endless = Endless(line, every_s=0.01)
+    timeouts = Timeouts(idle_s=0.1, answer_s=0.3)
+    ollama = serve(lambda _request: httpx2.Response(200, stream=endless), timeouts=timeouts)
+    received: list[StreamEvent] = []
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+
+    async def read() -> None:
+        async with asyncio.timeout(PATIENCE_S), aclosing(ollama.stream(ask("hi"))) as events:
+            async for event in events:
+                received.append(event)  # noqa: PERF401 - the list must outlive the exception
+
+    with pytest.raises(TookTooLongError, match=r"Ollama was still answering after 0\.3 s"):
+        await read()
+
+    assert 0.3 <= loop.time() - began < 1.0
+    # A line every hundredth of a second for three tenths of one: thirty at the most,
+    # and some sixty if the answer were given twice its time.
+    assert 1 <= endless.sent <= 40
+    assert endless.closed
+    if words:
+        assert received
+        assert set(received) == {TextDelta("again ")}
+    else:
+        assert received == []
+
+
+async def test_the_answers_time_counts_from_the_request_not_from_its_first_line(
+    serve: Serve,
+) -> None:
+    """A server that begins late has what is left of the time, not the whole of it again.
+    Its first line comes after half a second, of one second for the answer, and then a
+    line a hundred times a second: fifty more at the most, and a hundred if the time
+    began with the first line."""
+    endless = Endless(ndjson(piece("again ")), every_s=0.01, after_s=0.5)
+    ollama = serve(
+        lambda _request: httpx2.Response(200, stream=endless), timeouts=Timeouts(answer_s=1.0)
+    )
+
+    with pytest.raises(TookTooLongError, match=r"Ollama was still answering after 1 s"):
+        async with asyncio.timeout(PATIENCE_S):
+            await collect(ollama.stream(ask("hi")))
+
+    assert 1 <= endless.sent <= 65
+    assert endless.closed
+
+
+async def test_a_first_line_read_after_the_answers_time_is_a_server_away_not_an_answer_cut(
+    serve: Serve,
+) -> None:
+    """Nothing was handed on, so the server didn't begin in time, however the client
+    finds that out: by a wait that runs out, or, as here, by the clock, when a line that
+    took too long is read without a wait."""
+    late = HeldUp(ndjson(piece("Hel"), DONE), held_s=0.15)
+    ollama = serve(
+        lambda _request: httpx2.Response(200, stream=late), timeouts=Timeouts(answer_s=0.05)
+    )
+
+    with pytest.raises(
+        ProviderUnavailableError, match=r"didn't start answering within 0\.05 s"
+    ) as caught:
+        async with asyncio.timeout(PATIENCE_S):
+            await collect(ollama.stream(ask("hi")))
+
+    assert type(caught.value) is ProviderUnavailableError
+    assert late.closed
+
+
+async def test_what_had_arrived_when_the_answers_time_was_over_is_not_handed_on(
+    serve: Serve,
+) -> None:
+    """A reader that falls behind: forty words arrive at once, and the reader is still at
+    the first when the answer's time is over. They are read without a wait, so a time
+    limit around each read alone would hand every one of them on."""
+    body = Paced(ndjson(*(piece(f"w{number} ") for number in range(40))), 60.0)
+    ollama = serve(
+        lambda _request: httpx2.Response(200, stream=body), timeouts=Timeouts(answer_s=0.1)
+    )
+
+    async with asyncio.timeout(PATIENCE_S), aclosing(ollama.stream(ask("hi"))) as events:
+        first = await anext(events)
+        await asyncio.sleep(0.2)  # the reader's own work, past the answer's time
+        with pytest.raises(TookTooLongError):
+            await anext(events)
+
+    assert first == TextDelta("w0 ")
+    assert body.closed
+
+
+async def test_a_server_that_hasnt_begun_when_the_answers_time_is_over_is_unavailable(
+    serve: Serve,
+) -> None:
+    """The first line has to come within the shorter of the two times: then nothing has
+    been handed on, and the server counts as away, as after its time to begin."""
+    silent = Paced(60.0, ndjson(DONE))
+    ollama = serve(
+        lambda _request: httpx2.Response(200, stream=silent),
+        timeouts=Timeouts(first_event_s=5.0, answer_s=0.05),
+    )
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+
+    with pytest.raises(
+        ProviderUnavailableError, match=r"didn't start answering within 0\.05 s"
+    ) as caught:
+        async with asyncio.timeout(PATIENCE_S):
+            await collect(ollama.stream(ask("hi")))
+
+    assert type(caught.value) is ProviderUnavailableError
+    assert loop.time() - began < 1.0
+    assert silent.closed
+
+
+@pytest.mark.parametrize(
+    ("timeouts", "error", "message"),
+    [
+        (
+            Timeouts(idle_s=0.05, answer_s=3.0),
+            StreamInterruptedError,
+            r"Ollama sent nothing for 0\.05 s",
+        ),
+        (
+            Timeouts(idle_s=3.0, answer_s=0.1),
+            TookTooLongError,
+            r"Ollama was still answering after 0\.1 s",
+        ),
+    ],
+    ids=["the gap is over first", "the answer's time is over first"],
+)
+async def test_a_silence_in_an_answer_is_whichever_time_is_over_first(
+    serve: Serve, timeouts: Timeouts, error: type[StreamInterruptedError], message: str
+) -> None:
+    """And it ends when that time is over, not when the other is: each of the two is
+    three seconds here when it is the longer one."""
+    stalled = Paced(ndjson(piece("Hel")), 60.0, ndjson(DONE))
+    ollama = serve(lambda _request: httpx2.Response(200, stream=stalled), timeouts=timeouts)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+
+    with pytest.raises(StreamInterruptedError, match=message) as caught:
+        async with asyncio.timeout(PATIENCE_S):
+            await collect(ollama.stream(ask("hi")))
+
+    assert type(caught.value) is error
+    assert loop.time() - began < 1.0
+    assert stalled.closed
+
+
+@pytest.mark.parametrize("answer_s", [0.5, 300.0])
+async def test_an_answer_that_ends_within_its_time_is_read_whole(
+    serve: Serve, answer_s: float
+) -> None:
+    """And the client says how long it was given, as it says its other times. Left out,
+    an answer is given five minutes."""
+    paced = Paced(ndjson(piece("a")), 0.02, ndjson(piece("b")), 0.02, ndjson(piece("c"), DONE))
+    timeouts = Timeouts(answer_s=answer_s)
+    ollama = serve(lambda _request: httpx2.Response(200, stream=paced), timeouts=timeouts)
+
+    events = await collect(ollama.stream(ask("hi")))
+
+    assert text_of(events) == "abc"
+    assert isinstance(events[-1], Finish)
+    assert ollama.timeouts == timeouts
+    assert ollama.timeouts.answer_s == answer_s
+    assert Timeouts().answer_s == 300.0
 
 
 async def test_closing_the_stream_closes_the_connection(serve: Serve) -> None:

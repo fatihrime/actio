@@ -144,6 +144,7 @@ Every failure is an `LLMError`. The subclasses answer what a caller has to decid
 | `ConnectionFailedError` | No connection could be made, and that was known at once: nothing listens, the name doesn't resolve, or the server hung up while it was made. Nothing was sent. A kind of `ProviderUnavailableError`; a connection that was never answered, or that was made and then closed, is a plain one | Ask the same provider again at once, then another |
 | `RateLimitedError` | The provider answered 429. A kind of `ProviderUnavailableError` | Try another provider, or wait `retry_after_s` when the provider gave it |
 | `StreamInterruptedError` | The answer started, then broke off or went silent | Keep what arrived; retry only if nothing was shown |
+| `TookTooLongError` | The answer started, and wasn't over when the time for a whole answer was (`Timeouts.answer_s`). A kind of `StreamInterruptedError` | Keep what arrived: it is an answer cut at its time; another provider only if nothing was shown |
 | `ContextOverflowError` | The prompt doesn't fit the context window, or is larger than the provider takes from the account in one request | Shorten the history, or use a larger window |
 | `UnsupportedFeatureError` | The model can't reason, or can't call tools | Ask `describe()` first |
 | `ModelNotFoundError` | The server doesn't have the model | Pull it |
@@ -151,9 +152,9 @@ Every failure is an `LLMError`. The subclasses answer what a caller has to decid
 | `ProviderError` | The server failed, refused Actio's credentials, or didn't speak its own protocol | Report it; another provider may work |
 | `UnsupportedServerError` | Ollama is older than 0.40 | Upgrade Ollama |
 
-Deadlines (`Timeouts`) apply to connecting, to the first chunk, and to the gap between chunks. They time each read from Ollama, never the caller's own work between two chunks. An adapter says which it was given (`timeouts`).
+Deadlines (`Timeouts`) apply to connecting, to the first chunk, to the gap between chunks, and to the whole answer. The first chunk's and the gap's time each read from the server, never the caller's own work between two chunks. The whole answer's, `answer_s`, 300 seconds from sending the request, is the exception: it goes by the clock, the caller's time included, since it is a bound, which a server that sends faster than it is read would otherwise stretch for ever. Once it is over, `TookTooLongError` is raised, and nothing more is handed on, not even what had arrived already. Before the first chunk it is a plain `ProviderUnavailableError` when it is shorter than `first_event_s`, and when a silence would end both, the one over first says which error it is. An adapter says which it was given (`timeouts`).
 
-`FOR_NOW` names the errors that another try may not meet again: `isinstance(error, FOR_NOW)` is true for `ProviderUnavailableError`, `ConnectionFailedError` and `RateLimitedError` with it, `StreamInterruptedError` and `ProviderError`.
+`FOR_NOW` names the errors that another try may not meet again: `isinstance(error, FOR_NOW)` is true for `ProviderUnavailableError`, `ConnectionFailedError` and `RateLimitedError` with it, `StreamInterruptedError` and `TookTooLongError` with it, and `ProviderError`.
 
 ## Asking another model in one's place
 
