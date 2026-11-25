@@ -30,9 +30,12 @@ closed, however it ended.
 A turn asks the model it names, and when that one can't answer, the models that stand in
 for it, one after the other, each behind its own gate (`actio.catalog.Catalog.chain`):
 but only before the first word, or thought, was handed on (`actio_llm.Walk`, ADR 0028).
-A model that failed gives its place at its gate back before the next one's is waited
-at. Whoever answers, the turn is the asked model's: its name, and the credits held at
-its price. The log says which model failed and was passed over, and which answered in
+A model whose failure may be gone in a moment, a connection that failed at once or a
+server that asked to wait two seconds at most, is asked once more first, keeping its
+place at its gate (ADR 0028, revision of 2026-11-25). A model that failed gives its
+place at its gate back before the next one's is waited at. Whoever answers, the turn is
+the asked model's: its name, and the credits held at its price. The log says which
+model was asked once more, which failed and was passed over, and which answered in
 another's place, never what an error said.
 
 Recording a turn also settles what it cost. Credits were held for it before it started
@@ -313,8 +316,9 @@ async def answer(
 
     `chain` holds the models that can be asked now: the one the turn names, `model`,
     when it is ready, and those that stand in for it. A later one is asked only when the
-    one before it failed before anything of its answer was handed on. When every one of
-    them failed, the turn records the error `actio_llm.Walk` raises.
+    one before it failed before anything of its answer was handed on, and was asked once
+    more first when its failure could be gone in a moment. When every one of them
+    failed, the turn records the error `actio_llm.Walk` raises.
 
     The turn was started before (`turns.ask`), and `reserved` holds the credits it may
     cost. This writes its outcome, and what it used, in a transaction of its own, from
@@ -334,7 +338,8 @@ async def answer(
     # When the first piece of the answer was taken: noted once, before it is handed on.
     first_word: datetime | None = None
     # Each model is asked only once the turn has passed its gate, and gives its place
-    # back as soon as its stream is closed: before the next one's gate is waited at.
+    # back as soon as its last try's stream is closed: before the next one's gate is
+    # waited at.
     walk = Walk(
         [
             Link(
@@ -346,6 +351,7 @@ async def answer(
             for asking in chain
         ],
         on_failed=partial(_passed_over, turn_id, several=len(chain) > 1),
+        on_again=partial(_asked_again, turn_id),
     )
     beats = asyncio.create_task(
         _beat(open_session, turn_id, answer_id, collected, clock, usage, reserved, on_beat)
@@ -475,6 +481,25 @@ def _passed_over(
     elif several:
         logger.warning(
             "turn %s: model %s failed (%s), and no other is left to ask", turn_id, failed.name, kind
+        )
+
+
+def _asked_again(turn_id: uuid.UUID, failed: Link, error: LLMError, pause: float) -> None:
+    """Say in the log that a model failed before the first word, and is asked once more,
+    after how long. Its error's kind, never its text, as for `_passed_over`. Said for a
+    turn of one model too: no other line says it."""
+    kind = type(error).__name__
+    if pause:
+        logger.warning(
+            "turn %s: model %s failed (%s), and is asked once more after %g s",
+            turn_id,
+            failed.name,
+            kind,
+            pause,
+        )
+    else:
+        logger.warning(
+            "turn %s: model %s failed (%s), and is asked once more", turn_id, failed.name, kind
         )
 
 

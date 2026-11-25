@@ -6,7 +6,9 @@ that completes asks for a better one: it defers the job `WRITE_TITLE`, in the
 transaction that records it (`actio.chat.turns.finish`). The worker runs `write`, which
 asks that model for a title of a few words, from the first question alone, and writes it
 over the first line, unless a person has renamed the conversation meanwhile. When that
-model can't answer, those that stand in for it are asked in its place, as for a turn.
+model can't answer, those that stand in for it are asked in its place, as for a turn,
+and as for a turn a model whose failure may be gone in a moment is asked once more
+first.
 
 Who named a conversation is on its row (`Conversation.title_by`): `question`, `model`,
 or `person`. Only `write` makes a `question` a `model`, and nothing writes over a
@@ -339,14 +341,17 @@ async def _ask(
 
     The model is asked as a turn asks it, with those that stand in for it after it, in
     order, when it can't answer before its first word (`actio_llm.Walk`, ADR 0028): each
-    with a request of its own, behind its own gate, and all inside `WRITTEN_WITHIN_S`.
-    When all of them failed, the walk's error decides, by the rule of `FOR_NOW`.
+    with a request of its own, behind its own gate, each asked once more first after a
+    connection that failed at once, or a server that asked to wait two seconds at most,
+    and all of it inside `WRITTEN_WITHIN_S`, the pause before a second try too. When all
+    of them failed, the walk's error decides, by the rule of `FOR_NOW`.
 
     A request is shaped as a turn's is, where the two meet: the model's own context
     window, since a local server reloads its model when that changes, and reasoning off,
     for a model that can reason. A model whose server writes only so many answers at
-    once waits at its gate, as an answer does, and gives its place back once its stream
-    is closed: before the next model's gate is waited at.
+    once waits at its gate, as an answer does, keeps its place there through a second
+    try, and gives it back once its last try's stream is closed: before the next model's
+    gate is waited at.
 
     A model that isn't ready is not asked, as a turn doesn't ask one. What it can do
     isn't known then, and one that reasons unless it is told not to would spend a
@@ -392,6 +397,7 @@ async def _ask(
                     for model, status in chain.ready
                 ],
                 on_failed=partial(_passed_over, conversation_id, several=len(chain.ready) > 1),
+                on_again=partial(_asked_again, conversation_id),
             )
             async with aclosing(walk.stream()) as events:
                 return await _text_of(events)
@@ -431,6 +437,28 @@ def _passed_over(
     elif several:
         logger.warning(
             "conversation %s: model %s failed (%s), and no other is left to ask",
+            conversation_id,
+            failed.name,
+            kind,
+        )
+
+
+def _asked_again(conversation_id: uuid.UUID, failed: Link, error: LLMError, pause: float) -> None:
+    """Say in the log that a model failed before its first word, and is asked once more,
+    after how long: its error's kind, never its text, which may quote the question. Said
+    for a title asked of one model too: no other line says it."""
+    kind = type(error).__name__
+    if pause:
+        logger.warning(
+            "conversation %s: model %s failed (%s), and is asked once more after %g s",
+            conversation_id,
+            failed.name,
+            kind,
+            pause,
+        )
+    else:
+        logger.warning(
+            "conversation %s: model %s failed (%s), and is asked once more",
             conversation_id,
             failed.name,
             kind,

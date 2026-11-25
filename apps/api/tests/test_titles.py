@@ -39,6 +39,7 @@ from actio.core.settings import Settings
 from actio.identity import sessions
 from actio_llm import (
     ChatRequest,
+    ConnectionFailedError,
     ContextOverflowError,
     Finish,
     FinishReason,
@@ -1301,19 +1302,22 @@ async def test_no_line_of_the_job_carries_the_question_or_the_title(
     settings: Settings,
     clock: Any,
     offer: Any,
+    once: Any,
     work_through: Any,
     queue_books: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """At any level, the queue's own lines included, each with the trace of its error.
-    One job writes its title. The other's model fails at each of its four tries, with an
-    error that quotes the question: the queue writes the trace of the last one, which
-    fails the job."""
+    One job writes its title, at its model's second try, after a first that failed with
+    an error that quotes the question. The other's model fails at each of its four tries,
+    with such an error: the queue writes the trace of the last one, which fails the
+    job."""
     caplog.set_level(logging.DEBUG, logger="actio")
     caplog.set_level(logging.DEBUG, logger="procrastinate")
     question = "Velora Cycles: how tight should the saddle clamp be?"
     title = "Saddle clamp torque"
-    writes, catalog = offer(TextDelta(title), DONE, titles="standard")
+    refused = ConnectionFailedError(f"can't reach the server for: {question}")
+    writes, catalog = offer(once(refused), TextDelta(title), DONE, titles="standard")
     fails, failing = offer(ProviderError(f"the server choked on: {question}"), titles="standard")
     written = await started(db, question)
     await ended(db, written)
@@ -1325,10 +1329,11 @@ async def test_no_line_of_the_job_carries_the_question_or_the_title(
         await queue_books.wait_is_over()
 
     everything_said = caplog.text  # every record, with the trace of its error
-    assert (len(writes.requests), len(fails.requests)) == (1, 4)
+    assert (len(writes.requests), len(fails.requests)) == (2, 4)
     assert await named(db, written.conversation.id) == (title, "model", ANSWERED, ANSWERED)
     assert [status for _, status, *_ in await queue_books.due()] == ["failed"]
     assert "procrastinate.worker" in everything_said
+    assert everything_said.count("(ConnectionFailedError), and is asked once more") == 1
     assert everything_said.count("its model failed (ProviderError)") == 4 + 1  # the trace's
     assert "Traceback" in everything_said
     assert "saddle" not in everything_said.lower()
@@ -1472,6 +1477,124 @@ async def test_inside_the_api_a_title_waits_behind_an_answer_at_its_server_and_c
     assert answering.closed.is_set()
     title, by, *_ = await named(db, earlier.conversation.id)
     assert (title, by) == ("Fixing a flat tyre", "model")
+
+
+# --- A model asked once more ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("failure", "after"),
+    [
+        (ConnectionFailedError(f"can't reach the server for: {QUESTION}"), ""),
+        (RateLimitedError(f"429 for: {QUESTION}", retry_after_s=0.01), " after 0.01 s"),
+    ],
+    ids=["a connection that failed at once", "a server that asks for a short wait"],
+)
+async def test_a_title_is_written_at_its_models_second_try(
+    failure: LLMError,
+    after: str,
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    offer: Any,
+    once: Any,
+    work_through: Any,
+    queue_books: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Within the same run of the job, with the same request, as a turn asks it: the job
+    isn't put back. The log says so, by the error's kind."""
+    model, catalog = offer(once(failure), TextDelta("Fixing a flat tyre"), DONE, titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    first, second = model.requests
+    assert first == second
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert await queue_books.due() == []  # it succeeded, and was deleted
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model standard failed"
+            f" ({type(failure).__name__}), and is asked once more{after}",
+        )
+    ]
+    assert "flat tyre on my bike" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("failure", "after"),
+    [
+        (ConnectionFailedError("can't reach the server"), ""),
+        (RateLimitedError("429", retry_after_s=0.01), " after 0.01 s"),
+    ],
+    ids=["a connection that failed at once", "a server that asks for a short wait"],
+)
+async def test_a_title_whose_model_fails_so_twice_is_asked_for_again_in_thirty_seconds(
+    failure: LLMError,
+    after: str,
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    offer: Any,
+    work_through: Any,
+    queue_books: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Its second failure is the try's, which another try may not meet again: the job
+    is put back, as for any such failure."""
+    model, catalog = offer(failure, titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    kind = type(failure).__name__
+    assert len(model.requests) == 2
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert await queue_books.due() == put_back(1, 30)
+    assert [message for _, message in said(caplog)] == [
+        f"conversation {begun.conversation.id}: model standard failed ({kind}), and is asked"
+        f" once more{after}",
+        f"conversation {begun.conversation.id}: no title, its model failed ({kind})",
+    ]
+
+
+async def test_the_pause_before_a_second_try_is_inside_a_titles_time_limit(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    offer: Any,
+    work_through: Any,
+    queue_books: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The limit is over everything a title waits for, the pause too. Here the server
+    asks for two seconds, the most that is waited, and a title has a fifth of one: the
+    model isn't asked again, and the title is asked for again in thirty seconds. The
+    two seconds aren't waited out."""
+    monkeypatch.setattr(titles, "WRITTEN_WITHIN_S", 0.2)
+    model, catalog = offer(
+        RateLimitedError("429", retry_after_s=2), TextDelta("Never"), DONE, titles="standard"
+    )
+    begun = await started(db)
+    await ended(db, begun)
+
+    async with asyncio.timeout(1.5):
+        await run_the_job(settings, catalog, clock, work_through)
+
+    assert len(model.requests) == 1
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert await queue_books.due() == put_back(1, 30)
+    assert [message for _, message in said(caplog)] == [
+        f"conversation {begun.conversation.id}: model standard failed (RateLimitedError), and is"
+        " asked once more after 2 s",
+        f"conversation {begun.conversation.id}: no title, its model took longer than 0.2 s",
+    ]
 
 
 # --- Models that stand in for the one named for titles --------------------------------

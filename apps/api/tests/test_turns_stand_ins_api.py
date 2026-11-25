@@ -1,6 +1,6 @@
 """Turns asked of a model that others stand in for (ADR 0028): who answers, with what
-request, what the turn records and costs, the gates on the way, a stop, models that
-aren't ready, and what the log says.
+request, what the turn records and costs, the gates on the way, a stop, a model asked
+once more, models that aren't ready, and what the log says.
 
 The models are scripted (`lineup`), each behind a gate of the test's choosing. The app
 runs in process, so a request's response comes back whole once its stream has ended: a
@@ -27,11 +27,13 @@ from actio.usage.models import UsageEntry
 from actio.usage.plans import Plans
 from actio_llm import (
     ChatRequest,
+    ConnectionFailedError,
     ContextOverflowError,
     Finish,
     FinishReason,
     LLMError,
     ProviderUnavailableError,
+    RateLimitedError,
     ReasoningDelta,
     StreamInterruptedError,
     TextDelta,
@@ -446,6 +448,123 @@ async def test_a_turn_stopped_while_its_stand_in_writes_keeps_what_had_arrived(
     assert stand_in.closed.is_set()
 
 
+# --- A model asked once more ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("failure", "after"),
+    [
+        (ConnectionFailedError(f"can't reach standard: {SECRET}"), ""),
+        (RateLimitedError(f"429: {SECRET}", retry_after_s=0.01), " after 0.01 s"),
+    ],
+    ids=["a connection that failed at once", "a server that asks for a short wait"],
+)
+async def test_a_model_whose_failure_may_be_gone_in_a_moment_is_asked_once_more_and_answers(
+    failure: LLMError,
+    after: str,
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    once: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With the same request, before anything else: the answer is streamed and stored
+    once, and the turn completes. The log says that it was asked once more, by the
+    error's kind, and says of no failure."""
+    assert migrated
+    model = lineup.add("standard", once(failure), TextDelta("Hello."), DONE)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask()
+
+    turn = turn_of(response)
+    assert (turn["status"], turn["model"], turn["error"]) == ("completed", "standard", None)
+    assert said(response) == "Hello."
+    assert [c["type"] for c in chunks(response)[:-1]].count("text-start") == 1
+    messages = (await chat.read())["messages"]
+    assert [message["parts"] for message in messages[1:]] == [[{"type": "text", "text": "Hello."}]]
+    first, second = model.requests
+    assert first == second
+    assert told(caplog, turn["id"]) == [
+        f"turn {turn['id']}: model standard failed ({type(failure).__name__}), and is asked"
+        f" once more{after}"
+    ]
+    assert SECRET not in caplog.text
+
+
+async def test_a_model_that_fails_so_twice_fails_the_turn_when_none_stands_in(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Asked twice, and no more: the second failure is the turn's."""
+    assert migrated
+    model = lineup.add("standard", ConnectionFailedError("can't reach standard"))
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask()
+
+    turn = turn_of(response)
+    assert (turn["status"], turn["error"]) == ("failed", "model_unavailable")
+    assert len(model.requests) == 2
+    assert told(caplog, turn["id"]) == [
+        f"turn {turn['id']}: model standard failed (ConnectionFailedError), and is asked once more",
+        f"turn {turn['id']}: the model failed (ConnectionFailedError), recorded as"
+        " model_unavailable",
+    ]
+
+
+async def test_a_model_that_fails_so_twice_is_answered_for_by_its_stand_in(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert migrated
+    asked = lineup.add("standard", RateLimitedError("429", retry_after_s=0.01), then=["second"])
+    stand_in = lineup.add("second", TextDelta("From the stand-in."), DONE)
+    chat = Chat(await guest_on(start_app, settings, lineup))
+
+    response = await chat.ask()
+
+    turn = turn_of(response)
+    assert (turn["status"], turn["model"]) == ("completed", "standard")
+    assert said(response) == "From the stand-in."
+    assert (len(asked.requests), len(stand_in.requests)) == (2, 1)
+    assert told(caplog, turn["id"]) == [
+        f"turn {turn['id']}: model standard failed (RateLimitedError), and is asked once more"
+        " after 0.01 s",
+        f"turn {turn['id']}: model standard failed (RateLimitedError), and second is asked next",
+        f"turn {turn['id']}: model second answered in place of standard",
+    ]
+
+
+async def test_a_turn_stopped_while_its_model_waits_to_be_asked_once_more_is_stopped(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any
+) -> None:
+    """The server asked for two seconds, the most that is waited: the stop doesn't wait
+    them out. The model isn't asked again, and nothing is charged."""
+    assert migrated
+    model = lineup.add(
+        "standard", RateLimitedError("429", retry_after_s=2), TextDelta("Never."), DONE
+    )
+    chat = Chat(await guest_on(start_app, settings, lineup))
+    asked = chat.asking()
+    await asyncio.wait_for(model.closed.wait(), PATIENCE_S)
+
+    async with asyncio.timeout(0.9):
+        stopped = await chat.stop(await chat.running_turn())
+        [response] = await ended(asked)
+
+    assert (stopped.json()["status"], stopped.json()["credits"]) == ("stopped", None)
+    assert turn_of(response)["status"] == "stopped"
+    assert len(model.requests) == 1
+
+
 # --- Models that aren't ready ---------------------------------------------------------
 
 
@@ -578,14 +697,20 @@ async def test_the_log_says_which_model_was_passed_over_and_which_answered_never
     settings: Settings,
     migrated: str,
     lineup: Any,
+    once: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An error's text can quote the question, or name the account at its provider: the
-    log names its kind."""
+    log names its kind, also of a model asked once more."""
     assert migrated
-    lineup.add("standard", ProviderUnavailableError(f"busy, {SECRET}"), then=["second", "third"])
+    lineup.add("standard", ConnectionFailedError(f"refused, {SECRET}"), then=["second", "third"])
     lineup.add("second", state="missing")
-    lineup.add("third", TextDelta("From the third."), DONE)
+    lineup.add(
+        "third",
+        once(RateLimitedError(f"slow down, {SECRET}", retry_after_s=0.01)),
+        TextDelta("From the third."),
+        DONE,
+    )
     chat = Chat(await guest_on(start_app, settings, lineup))
 
     response = await chat.ask(f"Remember: {SECRET}")
@@ -593,8 +718,10 @@ async def test_the_log_says_which_model_was_passed_over_and_which_answered_never
     turn_id = turn_of(response)["id"]
     assert told(caplog, turn_id) == [
         f"turn {turn_id}: model second is missing, and is passed over",
-        f"turn {turn_id}: model standard failed (ProviderUnavailableError), and third is asked"
-        " next",
+        f"turn {turn_id}: model standard failed (ConnectionFailedError), and is asked once more",
+        f"turn {turn_id}: model standard failed (ConnectionFailedError), and third is asked next",
+        f"turn {turn_id}: model third failed (RateLimitedError), and is asked once more after"
+        " 0.01 s",
         f"turn {turn_id}: model third answered in place of standard",
     ]
     assert SECRET not in caplog.text

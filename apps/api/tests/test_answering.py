@@ -16,6 +16,7 @@ from actio.chat.parts import Part, ReasoningPart, TextPart
 from actio.core.ids import new_id
 from actio_llm import (
     Assistant,
+    ConnectionFailedError,
     ContextOverflowError,
     Finish,
     FinishReason,
@@ -134,7 +135,8 @@ def test_a_tool_call_nobody_asked_for_is_the_models_error() -> None:
     ("error", "code"),
     [
         (ProviderUnavailableError("connection refused"), "model_unavailable"),
-        (RateLimitedError("slow down", retry_after_s=2), "model_unavailable"),
+        (RateLimitedError("slow down", retry_after_s=20), "model_unavailable"),
+        (ConnectionFailedError("connection refused"), "model_unavailable"),
         (ModelNotFoundError("qwen3.5:9b"), "model_missing"),
         (ContextOverflowError("too long"), "context_overflow"),
         (UnsupportedFeatureError("does not support thinking"), "model_refused"),

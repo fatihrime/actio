@@ -10,6 +10,7 @@ from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
     Awaitable,
+    Callable,
     Iterable,
     Iterator,
     Mapping,
@@ -476,6 +477,30 @@ class ScriptedModel:
             if self.closes_when is not None:
                 await self.closes_when.wait()
             self.closed.set()
+
+
+type Once = Callable[[BaseException], Callable[[], None]]
+
+
+def _once(error: BaseException) -> Callable[[], None]:
+    raised = False
+
+    def raise_the_first_time() -> None:
+        nonlocal raised
+        if not raised:
+            raised = True
+            raise error
+
+    return raise_the_first_time
+
+
+@pytest.fixture
+def once() -> Once:
+    """Call it with an error to get what, in a `ScriptedModel`'s script, raises that
+    error the first time the model gets there, and nothing later, when the script goes
+    on past it: `lineup.add("standard", once(error), TextDelta("Hi"), DONE)` is a model
+    that fails when it is first asked, and answers when it is asked again."""
+    return _once
 
 
 def catalog_of(
