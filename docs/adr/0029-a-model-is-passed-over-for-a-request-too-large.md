@@ -163,3 +163,7 @@ A test was written for each after that run. On the tree as it was committed, all
 ### 2026-11-25: what is used in a minute and a day is counted
 
 "Known, and left" said that nothing was counted over a minute or a day yet, and that the next step would count. [ADR 0030](0030-the-providers-budgets-are-counted.md) is that step: a model may state its provider's requests a minute and a day and tokens a day beside its tokens a minute, Actio counts in Valkey what it sends to the model, and a ready model whose budget has nothing left for a request is passed over while another model of the chain has budget. The rule of the room comes first and is as it was: `tokens_a_minute` is still the whole figure for a model's room, and a model passed over for its room isn't also said to be over its budget. `Chain.asked_with` takes what the look at the budgets said as its second argument.
+
+### 2026-11-26: a count refuses a turn for now; a guess still doesn't
+
+"A guess never refuses a turn" holds: when no ready model has room for a request, every one is asked, as before, whatever their budgets. A count now refuses one for now: when no model with room for it has budget left for it, the turn is answered 429 with how long to wait, and only the models with room count for that ([ADR 0030](0030-the-providers-budgets-are-counted.md), revision of 2026-11-26).

@@ -159,3 +159,7 @@ On a MacBook Pro (M1 Pro, 16 GB), in a headless Chromium against the stack of `m
 "One that names no window is the limit on how often questions are sent", in the decision above, isn't the only such 429 any more. A plan may now limit how many answers one account has being written at once, and the API refuses one more with a 429 that names no window and has no time to wait: nobody knows when an answer ends ([ADR 0023](0023-answers-that-wait-their-turn.md)).
 
 The page didn't change for it, and treats it as the decision says of any 429 without a window: the API's words, the question back in the box, and the next question taken as soon as it is sent. No limit is held, and nothing counts down. A component test sends such a refusal, and fails if the page takes it for a usage limit.
+
+### 2026-11-26: a 429 without a window is also no model with budget left
+
+A 429 that names no window is now also the refusal of a turn that no model with room for it has budget left for, by Actio's count of what its models' providers take: it says how long to wait, and names the model asked (`model`), and no window ([ADR 0030](0030-the-providers-budgets-are-counted.md), revision of 2026-11-26). The page's source didn't change for it: it is shown in the API's words, the question back in the box, as the revision above says. A component test answers with the refusal the API was recorded giving (`no_budget.json`). A notice that counts that wait down is the next step.

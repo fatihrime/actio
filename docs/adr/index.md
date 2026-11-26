@@ -40,6 +40,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0027](0027-cloud-models-through-their-openai-compatible-layers.md) | Groq and the Gemini API through their OpenAI-compatible layers, by the one client, which reads what differs leniently; what a model is told about reasoning is in the models file | Accepted |
 | [0028](0028-a-model-names-those-that-stand-in-for-it.md) | A model names the models that stand in for it, asked in its place before the first word or thought of an answer; the turn stays the asked model's, at its price | Accepted |
 | [0029](0029-a-model-is-passed-over-for-a-request-too-large.md) | A model is passed over when a request is larger than its room, its window or what its server takes in a minute, while another model has room; a guess never refuses a turn | Accepted |
-| [0030](0030-the-providers-budgets-are-counted.md) | The providers' budgets are counted in Valkey, and a model with nothing left for a request is passed over while another has budget; a count never refuses a turn | Accepted |
+| [0030](0030-the-providers-budgets-are-counted.md) | The providers' budgets are counted in Valkey, and a model with nothing left for a request is asked after those that have budget; when no model with room for it has any, the turn is refused for now, with how long to wait | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.

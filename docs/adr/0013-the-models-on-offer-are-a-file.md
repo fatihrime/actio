@@ -146,3 +146,7 @@ Beside `tokens_a_minute`, a model's table may have three more keys of its provid
 - **Checked like `tokens_a_minute`:** a whole number of 1 or more, and anything else stops the start, with one line. Any may be left out, and a model that states none has no budget.
 - **Two models of the file that are the same model on the same provider share one budget,** and must state the same four figures, a key left out being one: a difference stops the start, with one line that names both models and the key.
 - `OfferedModel.budget` carries it, `Chain.look` reads it, `Chain.asked_with` is the rule, and `counted` counts what a request takes.
+
+### 2026-11-26: a model without budget is asked last, and a request no model has budget for is refused for now
+
+"Passes over a ready model that has nothing left", and "when none has, each is asked all the same", in the revision above, are no longer what happens. A ready model without budget for a request is asked after those of its chain that have some. And when some ready models have room for the request and none of those has budget left for it, the question is refused for now, with how long to wait; a title is asked for again later. The file's keys and what is kept of each figure are as they were ([ADR 0030](0030-the-providers-budgets-are-counted.md), revision of 2026-11-26).

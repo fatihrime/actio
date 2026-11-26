@@ -181,3 +181,136 @@ The looks took four requests of Groq's `openai/gpt-oss-120b` and three of flash-
 - **the worker dating a title's count by the time its job began.** No test moved the clock while a title was written.
 
 A test was written for each after that run. The review then found that nothing held the order of the log's lines, the room's before the budget's: three tests were written for it, a turn's two and a title's, and after them three more mistakes were planted, each of which failed one. On the tree as it was committed, all 78 failed a test.
+
+## Revisions
+
+### 2026-11-26: a turn is refused for now when no model has budget left, and a model without budget is asked last
+
+The decision left the refusal of a turn "for now", when no model of its chain has budget, to a step of its own, with what the page says of it, and asked every model as before meanwhile. Under "Known, and left" it named a consequence of passing a model over for its budget: such a model is not asked as a last resort, so when the models that have budget all fail, the turn fails, where the model passed over might have answered. This is that step, and it takes that consequence back. A notice of the page's that counts the wait down is the next one.
+
+**When no model with room for the request has budget:**
+
+1. **Ask every one, as before.**
+    - Con: a provider that has nothing left refuses, each in turn, and when all do, the question stands in the conversation with a failed turn (worked out).
+2. **Refuse the turn for now, before it starts.** Chosen.
+3. **Hold the request on the server until a model has budget.**
+    - Con: a wait can be a day's, and a second rule would be needed for which waits are short enough.
+
+**The status:**
+
+1. **503.**
+    - Con: here it says that something is away or broken, a model or Valkey, with no time known. This is a rate, with a known wait.
+2. **429.** Chosen.
+
+**What tells it from the other 429s of a turn:**
+
+1. **A `type` of its own.**
+    - Con: every problem here is `about:blank`, and told by its members.
+2. **A member that names the provider's limit.**
+    - Con: it tells whoever asks about the installation's plan. The log says it.
+3. **`model`, the model asked, as the 503 has it.** Chosen. A usage limit names a `window`, too many answers at once says `at_once`, and too many messages neither.
+
+**Which models count:**
+
+1. **Every ready one.**
+    - Con: a model passed over for its room isn't sent the request while another has room. With budget, it would keep the request from being refused, and the models that are asked would refuse it in turn; with a shorter wait, it would name a time after which it still isn't asked.
+2. **Those with room alone,** those the room's rule leaves. Chosen. When none has room, every ready model is asked and none is refused, as before: a request too large by the guess is asked all the same, and its model's own answer about its size is truer than a wait ([ADR 0029](0029-a-model-is-passed-over-for-a-request-too-large.md)).
+
+**A model without budget, while another has some:**
+
+1. **Not asked,** as it was.
+    - Con: when those that have budget fail before their first word, the turn fails.
+2. **Asked last,** after those that have budget. Chosen: Actio keeps a tenth of each figure back, so a model its count calls spent may still answer, and the other outcome is a failed turn.
+
+**A provider's own 429 that names a wait:**
+
+1. **Close the model's budget until then, here.**
+    - Con: it is what the provider says, not what Actio counted, and it needs a "not asked until" of its own.
+2. **With the circuit breaker.** Chosen.
+
+**Decision: when no model with room for a request has budget left for it, a turn is refused for now, before it starts, with a 429 that says how long to wait, and the title job asks for its title again later. A model without budget is asked last, after those that have some, where it was passed over. A guess still never refuses: when no ready model has room, every one is asked, as before.**
+
+**The rule** (`Chain.asked_with`, pure):
+
+1. **the room first, unchanged** (ADR 0029): the ready models with room for the guess, or every ready one when none has. Those are "those left";
+2. **then the budget, of those left.** A model has budget when `spent` doesn't name it:
+    - **while at least one has,** those are asked first, in the chain's order, and then those without, in the chain's order. `Asked.spent` names those without, each with what the look said: they are asked last now, not passed over;
+    - **when none has, and at least one ready model has room,** nobody is asked: the request is refused for now. `Asked.refused` is the shortest wait among those left, with its limit, and of two as short the first in the chain's order; `Asked.spent` still names each of them, in the chain's order;
+    - **when none has, and no ready model has room,** every ready model is asked, in the chain's order, and none is named, as before;
+3. **unchanged:** a model passed over for its room is not also named for its budget, and its wait is never the refusal's; a model that isn't ready counts for nothing. A chain with no ready model has nobody to ask, and that is no refusal: the route answers 503 for it before the rule is reached.
+
+**A turn** (`actio.api.turns.start_turn`):
+
+- **the rule is asked right after the look,** before the credits are held. When it refuses, the log says so in one warning, and the turn is answered 429. Nothing was committed: the question, and the conversation a first question creates, are rolled back with the request's transaction, no credits are held, and nothing is taken from a budget. The other lines of the log stay where they were, after the commit, with the turn's id;
+- **the 429:**
+    - `Retry-After` and `retry_after`, the shortest wait in whole seconds, rounded up and 1 at the least;
+    - `model`, the name of the model asked, as the 503 names it;
+    - no `window`, `resets_at`, `alternatives` or `at_once`;
+    - `detail`, the wait in the words of the rate limits' refusals (`in_words`): "No model can take this message right now: this installation has reached the limits of its models' providers. Try again in 60 seconds.";
+- **its line in the log,** a warning, by the conversation's id, since the turn's row is rolled back, with names and numbers from the models file alone, never a word of the question, each model left with its own wait and its limit in words, in the chain's order: "conversation …: no model has budget left for the request, which is refused for about … s: groq-large for about … s (tokens a minute), gemini-lite for about … s (requests a day)";
+- **a model asked last** says so in the place of "it is passed over": "turn …: model groq-large has no budget left for the request for about … s (tokens a minute): it is asked after those that have", after the room's lines and the line of a look that couldn't be had, as before;
+- **a look that can't be had refuses nothing:** `spent` is empty, as before. Its line now ends "…, and each is taken to have some left", a turn's and a title's, where it said "and none is passed over for its budget": nothing is passed over for a budget any more;
+- **everything else is as before:** the 503, the 422 for reasoning, which stays the first ready model's whoever is then asked last, the credits, each model's request, the counted clients, the record and `answered_by`.
+
+**The title job** (`actio.chat.titles._ask`) follows the same rule. When it refuses, no model is asked, the log says "conversation …: no title, no model has budget left for the request: groq-large for about … s (tokens a minute)", each model left named so in the chain's order, after the room's lines, and `NotWrittenError` is raised with that text, as for a server that is unreachable. The job is asked for again by its own waits (`ASKED_AGAIN_AFTER`), which don't follow the budget's. A model asked last says "conversation …: model … has no budget left for the request for about … s (…): it is asked after those that have".
+
+**The API's description:** the 429 of `POST /api/conversations/{conversation_id}/turns` says the fourth reason: no model that could answer can take the message right now, the installation having reached the limits of its models' providers; `model` names the model asked, and `Retry-After` says how long to wait. `Problem`'s description lists `model` for that 429 beside the 503's.
+
+**The recorded refusal:** `apps/api/tests/fixtures/turns/no_budget.json`, recorded as `limit_reached.json` is ([ADR 0021](0021-usage-limits-in-the-page.md)): the 429 a question gets when its one model's budget of one request a minute was spent at the test's own moment, a wait of 60 seconds.
+
+**The page's source is unchanged.** A 429 that names no window is that question's own problem: the page says the API's `detail` in a notice with "Dismiss", and the question is back in the box. A component test answers with the recorded refusal, and holds that.
+
+**Unchanged:** the look, the counted clients, the buckets and their script, the models file's keys, the tables. No migration.
+
+**Tests:**
+
+- **the rule** (`test_catalog.py`): those with budget asked first and those without after them, each group in the chain's order, the asked model among those without; none of those with room with budget, nobody asked, the shortest wait, each named in the chain's order, and of two as short the first; a model without room that neither shortens the wait nor, with budget, keeps the refusal away; none with room nor budget, every ready one asked and none named; none with room and one with budget, asked first; a model that isn't ready never counted for budget or for its wait, and a chain with none ready no refusal; a look that said nothing, refusing nothing;
+- **a turn** (`test_turns_budgets_api.py`): the 429 whole, with its header; nothing left behind, each shown apart: a first question's conversation that doesn't exist afterwards, a later question's conversation that reads back as it was, the usage as before, no model sent anything, and no bucket holding more taken than before; a question answered again whose earlier answer is still the one shown; the same question, under the same id, answered once the wait is over by the test's clock; each of the four limits with its own wait, a day's in hours; two models without budget, the shorter wait whichever comes first, and the log's line whole, naming both in the chain's order, with no word of the question in the log; the asked model without budget asked after a stand-in that fails before its first word, answering by its own name, with the log's lines in order, and sent nothing when the stand-in answers; none with room nor budget, answered as before, with nothing said of budgets; a chain whose other model isn't ready, refused and not answered 503; budgets that can't be read, refusing nothing, with the buckets spent where a look would have found them; and an account at its usage limit, told of the budgets, with nothing held;
+- **a title** (`test_titles.py`): none with budget, nothing asked or taken, the log's line, the job put back, and the title written at its next try once a budget has come back; the named model without budget writing the title after its stand-in with budget failed; and none with room nor budget, asked as before;
+- **the recorded refusal** (`test_turn_fixtures.py`), and the page's test of it (`components/usage/usage.test.tsx`).
+
+**Known, and left:**
+
+- **the page says the API's sentence once, and counts nothing down** (read in the code: `explain` in `lib/chat/outcomes.ts`): its notice stays after the wait is over, until it is dismissed or the next question is sent. A notice that counts down is the next step;
+- **the wait is this request's, at the moment it was refused** (worked out): another request may take what came back meanwhile, and a shorter question may fit sooner;
+- **each refused try counts against "too many messages"** (read in the code: that limit, `limits.turn`, is taken before the look);
+- **Actio refuses by its own count,** which keeps a tenth of each figure back, and counts a prompt by its guess, which was seen on both sides of the providers' counts (above: 1.07 to 1.12 of Groq's count of long prompts and 0.63 of its count of one sentence, 0.90 and 0.98 of flash-lite's). So a question may be refused that its provider would have taken, and one let through that its provider refuses (worked out);
+- **with a day's tokens spent, a long question waits long** (worked out): with `tokens_a_day = 200000`, 180,000 are kept, about 2 tokens a second, and a request of 5,000 tokens then waits 40 minutes at the most;
+- **the Gemini API's day starts over at midnight Pacific time,** and a bucket refills steadily: Actio may name a wait of minutes where the provider's is hours. The provider's own refusal then moves the walk on, or fails the turn (worked out);
+- **a model asked last that its provider refuses is counted as a request and its guess all the same** (read in the code: `counted` gives them back only after a refused connection), and at the Gemini API a refused request counted against its minute (seen, ADR 0028's look);
+- **a provider's own 429 still closes nothing:** that is for the circuit breaker (read in the code);
+- **the title job's waits are its own,** so a title whose models stay without budget past its fourth try is not written (read in the code: `ASKED_AGAIN_AFTER`);
+- **a refusal of one second is still a refusal:** nothing waits on the server (read in the code: `Spent.seconds` is 1 at the least, and the rule refuses whatever the wait);
+- **the look and the refusal are inside the turn's transaction** (read in the code): the question is written, and under a plan that limits answers at once the account's lock of admissions taken, before the look, and both are held while Valkey is asked, until the refusal rolls them back.
+
+**How to reverse it:** for an installation, leave the four keys out: nothing is counted, and nothing refused. In the code: `Asked.refused`, and the branch of `Chain.asked_with` that sets it, which asks every model left again when none has budget; the refusal in `actio.api.turns.start_turn` (`_no_budget`, `_waits`) and in `actio.chat.titles._ask`; for "asked last", `asked_with` giving those with budget alone again, with the words "it is passed over" in the two lines; the 429's sentence in the route's `responses` and `ProblemDocument`'s, with `make openapi`; and `no_budget.json` with its two tests.
+
+**Measured,** on the real stack, built from the tree as it was committed, on 2026-11-26 by the machine's clock (from 22:48 UTC on the 25th), with models files made for the look and the shipped local model, `qwen3.5:4b-q4_K_M` on Ollama. No request went to a cloud provider: the refusal is by Actio's own count. Each of these was seen once, unless it says otherwise.
+
+**A refusal.** The model alone in its chain, stating `requests_a_minute = 2`, of which 1 is kept, and naming titles too. One guest, through the API:
+
+| When, UTC | What was asked | What came back |
+|---|---|---|
+| 22:48:05 | A short question | The model's answer after 4.61 s, for 19 credits |
+| 22:48:09 | A first question, in a conversation of its own | 429, as `application/problem+json`, with `Retry-After: 56`: "No model can take this message right now: this installation has reached the limits of its models' providers. Try again in 56 seconds.", `retry_after` 56 and `model` "standard". Reading the conversation answered 404, and the usage said 19 credits, as before. The log: "conversation …: no model has budget left for the request, which is refused for about 56 s: standard for about 56 s (requests a minute)". A second later Valkey held one bucket, its one request taken, full again in 54.7 s |
+
+**The first conversation's title,** by the worker's log. Its job began at 22:48:09.77 and said "conversation …: no title, no model has budget left for the request: standard for about 56 s (requests a minute)": to run again, after 0.135 s. It ran again at 22:48:39.98, 30 s later: "… for about 26 s", after 0.044 s. And at 22:50:40.67, two minutes later, it ended well after 0.584 s: the conversation had a title, written by the model. That request took the minute's one: seven seconds later Valkey said full again in 51.5 s.
+
+**The page,** in Chromium at http://localhost:8080, twice, at 22:51:43 and 22:52:46. The first run read the page at the very instant the refusal's sentence appeared, and found the box still empty and the question still shown as a message; the second waited for the question, which was back in the box 54 ms after the sentence was first seen, at each of its two refusals. Otherwise the two runs were alike:
+
+- a first question was answered. A second in the same conversation was refused, with `Retry-After: 60`: the page said the API's sentence, "… Try again in 60 seconds.", in a notice with "Dismiss". With the question back in the box, the conversation showed its two messages, and the API had two;
+- "Dismiss" took the notice away, and the question stayed in the box;
+- a first question in a new chat was refused, with `Retry-After: 59`: with the question back in the box, no message was shown, the address was still `/`, and the list of conversations was as long as before (read in the second run);
+- no error of the page's script.
+
+**A model asked last.** The same model with the same budget, and the repository's fake model, run on the same machine, standing in for it without a budget; no model for titles. One guest, through the API, at 22:53:48 and 22:53:49:
+
+1. a question: the local model's own answer, after 0.35 s;
+2. a question that tells the fake to fail (`[[fail: 503]]`): the log said "turn …: model standard has no budget left for the request for about 60 s (requests a minute): it is asked after those that have", then "turn …: model fake failed (ProviderUnavailableError), and standard is asked next", and the local model answered after 0.40 s, the turn's `answered_by` its own name;
+3. a third question: the first of those lines again, then "turn …: model fake answered in place of standard", and the fake's answer after 0.06 s.
+
+**The end-to-end tests,** on their own stack: 79 passed, none of them new. That stack's models state no limit, and the page's source is unchanged.
+
+**Mistakes planted on purpose.** After the build, 36 mistakes were planted one at a time in a scratch copy of the tree, 35 in the API and one in the page (any 429 with a wait taken for a usage limit), and the tests that should notice each were run: every one failed a test. Two of them proved less than they seemed, as they were first planted: the refusal raised only after the credits were held, and only after the turn was committed, had also lost their line in the log, and the test of that line is what failed. Planted again with the line as it is, the first failed three tests and the second five. Five mistakes of the rule were then planted against a turn's tests alone and a title's alone, since a rule that must hold at three levels can be held at one: nine of those ten failed a test, and the tenth is no mistake where it was run, the longest wait in the place of the shortest at a title, which names each model's wait and never the refusal's own. On the tree as it was committed, after the review's corrections, all 46 plantings were run once more: 45 failed a test, and the one that failed none is that one.
+
+**Not measured:** a refusal on a cloud provider's figures, a wait of a day, which the tests hold by the test's clock, and the page in Firefox and WebKit, whose source is unchanged.
