@@ -226,3 +226,127 @@ And at the whole stack: the end-to-end tests of `turns.spec.ts`, run against a s
     - **readers:** `READERS_PER_ACCOUNT`, or the `join` in `follow_turn`;
     - **the size:** the `request_body` block, and `handle_errors 413`, in the Caddyfile;
     - **the proxy's image:** the `caddy` service's `build`, in `compose.yaml`, back to the pinned `image` it was, with the Caddyfile mounted. Then the stack has to be told to restart the proxy after every change to the file.
+
+## Revisions
+
+### 2026-11-26: a place that comes free goes to the account that has had the least
+
+The decision's "Not done yet" said: "**fairness between accounts.** The gate takes turns in the order they came, whoever asked them." It is done now, with the router and before the developer gateway, whose requests will wait at the same gate, and whose clients may send several at once. First come, first served, one account that asks three long questions at once holds up everyone who asks after it, for all three: on the running stack, a guest who asked one question a second after another guest's two had its first word after 37.0 s, behind both (Measured, below).
+
+**Worked out** over made-up traffic, by a throwaway script outside the repository, and not seen on a real server. Four rules for which waiting answer gets a place that comes free:
+
+- **first come, first served:** the gate as it was;
+- **a ring:** the accounts that have answers waiting, each in turn, a new one at the back;
+- **the least served, forgotten when absent:** the account holding the fewest places, then the one given a place the longest ago, then the one that came first; an account is forgotten as soon as it has nothing at the gate;
+- **the least served, remembered while anyone waits:** the same, an account remembered while it has something at the gate, and the others until nobody waits.
+
+| Made-up traffic | First come, first served | A ring | Least served, forgotten when absent | Least served, remembered while anyone waits |
+|---|---|---|---|---|
+| One answer at a time, 54 s each. A asks three at 0 s, B one at 1 s, C one at 2 s | A1 A2 A3 B1 C1. B waited 161 s, C 214 s, A's last 108 s | A1 A2 B1 C1 A3. B 107 s, C 160 s, A's last 216 s | A1 B1 C1 A2 A3. B 53 s, C 106 s, A's last 216 s | the same |
+| One at a time, 30 s each. A asks two at 0 s. B and C each ask one question, and the next one 10 s after its answer ended, for an hour | A's second waited 30 s | 30 s | **never passed within the hour:** A got 1 answer, B 60, C 60 | 90 s; A 2, B 60, C 59 |
+| One at a time, an hour, 200 runs. H keeps three questions at the gate all the time; three others each ask one question, and the next 1 to 4 minutes after its answer ended; answers of 20 to 60 s | the others: median wait 145 s, 9 in 10 within 192 s, longest 256 s, 10.5 answers each; H 59.2 answers | 81 s, 124 s, 206 s, 13.1 each; H 51.5 | 28 s, 60 s, 136 s, 16.3 each; H 41.6 | 27 s, 66 s, 157 s, 16.2 each; H 42.0 |
+| One at a time, 30 s each. A asks two at 0 s; then a new account asks one question every 25 s, for an hour (more than the server can write) | A's second waited 30 s | 30 s | not within the hour | not within the hour |
+
+And for a server that writes four at once: A asks three at 0 s, 60 s each; B one at 1 s, 10 s long; at 2 s A asks a fourth, at 3 s B a second. When B's first ends at 11 s, A holds three places and B none.
+
+**Which waiting answer gets a place that comes free:**
+
+1. **The one that came first, whoever asked it,** as before.
+    - Con: one account's questions at once hold up everyone after them. In the first case B waited 161 s and C 214 s, behind all three of A's. Where H keeps three questions at the gate all the time, the three others waited 145 s at the median, and 256 s at the longest, and had 10.5 answers each in the hour to H's 59.2.
+2. **A ring.**
+    - Con: an account that comes goes to the back, behind accounts that have had answers already: in the first case B waited 107 s and C 160 s, behind A's first two. Where H keeps three at the gate, the others waited 81 s at the median and 206 s at the longest, and had 13.1 answers each to H's 51.5.
+3. **The least served, forgotten when absent.**
+    - Con: an account that asks again soon after each answer comes back as one never given a place, every time, and goes before an answer that has waited all along. Where B and C each ask again 10 s after their answer, A's second didn't pass within the hour: A had 1 answer, B and C 60 each.
+4. **The least served, remembered while anyone waits.** Chosen.
+    - Pro: in the first case B waited 53 s and C 106 s; where H keeps three at the gate, the others waited 27 s at the median and 157 s at the longest, and had 16.2 answers each to H's 42.0; where B and C ask again 10 s after each answer, A's second passed after 90 s.
+    - Con: A's last answer waits longest, 216 s in the first case where first come, first served had it wait 108 s; and A's second waited 90 s where B and C keep asking, where it waited 30 s first come, first served. Where a new account asks every 25 s for answers of 30 s, more than the server can write, A's second didn't pass within the hour, where first come, first served had it wait 30 s: every account that comes is one never given a place, and goes first.
+
+**What counts first, the places an account holds or when it was last given one:**
+
+1. **When it was last given one, alone.**
+    - Con: in the case of four at once, A's fourth gets the place, A was given its last one before B was: A then holds four places and B none, and B's second waits 57 s.
+2. **The places it holds, and of those that hold as few, when it was last given one.** Chosen: B's second gets the place, and waits 8 s.
+
+**Whose answer it is:**
+
+1. **The conversation's.**
+    - Con: one account's many conversations are the burst: each of the questions above was in a conversation of its own.
+2. **The network address's.**
+    - Con: the gate doesn't know it, and people behind one router share it.
+3. **The account's,** a guest's too. Chosen.
+
+**Where:** in the process, as the decision above has the gate. Unchanged.
+
+**Decision: a place that is given back while answers wait goes on at once, to the waiting answer of the account that holds the fewest places at the gate; of those that hold as few, the account given a place there the longest ago, one of which nothing is remembered before every one that is; of those, the one whose answer came first. One account's own answers pass in the order they came. An account is remembered while it holds a place or has an answer waiting, and beyond that until nobody waits. A turn waits as the answer of the account that asked it, and a title as the answer of the account its conversation belongs to.**
+
+**The rule** (`actio.catalog.Gate`):
+
+- **While a place is free, an answer that comes passes at once,** without waiting for anything. A place is never free while an answer waits: one that is given back goes on in the same step.
+- **A place given back while answers wait goes on at once,** to the waiting answer of the account that holds the fewest places at the gate at that moment; of those that hold as few, the one given a place there the longest ago, an account of which nothing is remembered before every one that is; of those, the one whose answer came first. Of one account's waiting answers, the one that came first.
+- **"Given a place" is counted, not timed:** the gate numbers the places it gives, at once or after a wait, and remembers each account's last number. It reads no clock.
+- **What is remembered, and for how long:** an account's last number, while the account holds a place or has an answer waiting at the gate, and beyond that until nobody waits there. Whenever nobody waits, the gate keeps nothing at all of an account that holds no place: no number, and no entry that counts to nothing. Guests are accounts, and there is no end of them.
+- **An answer that gives up waiting,** stopped, ended by a shutdown or past a title's time, leaves, and changes nothing for the others: who holds what and what is remembered stay as they were, but that the absent are forgotten when it was the last one waiting. One that was cancelled while it waited, and hasn't left its line yet when a place is given back in that same step of the event loop, isn't handed the place: it goes to the next one by the rule, and is free when nobody else waits.
+- **A place is never lost and never doubled:** never more than `answers_at_once` are held, and none is free while an answer waits. That includes an answer handed a place that is cancelled before it could go on with it, in the same step of the event loop: it counts as given that place, and gives it back at once, as one that ended at once would, and the place goes on by the rule. So its account's next answer waits as that of an account given a place just then. Not counting it would take a second record of each account's number before the last, for a moment that only a cancellation in that very step makes.
+- **A place is given back however the answer ended,** in a step that awaits nothing, as before.
+- **`Gate.full`** still says whether an answer that comes now has to wait: true while every place is held, one handed on and not yet gone on with included. `Catalog.load_ahead` reads it, as before. **`Gate.waiting`** is still how many answers wait.
+- **The way in takes the account, and there is none without one:** `async with gate.passing(account):`. The gate is given a key that it only compares and hashes, and knows nothing of accounts: `actio.catalog` doesn't import `actio.identity`. `Gate.accounts`, how many accounts it keeps anything of, is for the tests.
+
+**Whose answer it is:**
+
+- **a turn's** is the account that asked it, `principal.user_id`, a guest's too: the route gives it to `answering.answer`, and the turn waits as that account's answer at its own model's gate and at each stand-in's;
+- **a title's** is the account its conversation belongs to, from the conversation's row, which the job read already;
+- **a load ahead** takes no place, and reads `Gate.full`, as before.
+
+**Unchanged:** `answers_at_once` in the models file, and one gate for each provider that has one; a plan's `answers_at_once`, counted from the turns' rows; the beat, the hold on the credits and the stream of a turn that waits; Stop and the shutdown; the place kept through a second try, and given back before the next model's gate is waited at; the walk and `packages/llm`; the breaker, the budgets and a provider's own wait; what a turn streams; the log's lines, `turn …: waited 12.3 s for the model's server` and `…, and didn't get its turn`; the routes and `apps/api/openapi.json`; the page; the tables, with no migration; the settings; the containers.
+
+**Tests:**
+
+- **the gate's** (`test_catalog.py`): one account's answers in the order they came, as many as the server takes; one account's three at once, and another account's first answered second; two accounts with answers waiting taking turns, each in the order it asked; four at once, B's second before A's fourth, by the places held; an account that left remembered while somebody waits, and forgotten once nobody waits, and one that holds a place remembered then all the same; forty accounts that came, waited, gave up and went, after which the gate keeps what a new one keeps; an answer that gives up waiting, which changes nothing for the others, what is remembered of an absent account included; an answer handed a place and cancelled in that step, whose place goes on by the rule, with `full` and `waiting` right, and whose account's next answer passes as that of an account given the place; an answer cancelled in the step in which a place is given back, which isn't handed it, and a place that is free when only such a one waits; the last answer waiting giving up, after which the absent are forgotten; of two accounts alike, the one whose waiting answer came first, though the other has waited there for longer; three at once, where a place given back no longer counts as its account's when the next is chosen; a place given back however the answer ended; and a property test against a gate written the plain way, without an event loop: four accounts' answers that come, end, end with the answer handed their place cancelled in that step, and give up waiting, at a gate of one to four places;
+- **a turn's** (`test_turns_running_api.py`): another guest's question answered before the second of the guest that came first, its model asked before, with the log's lines as before; one account's turns in the order they came; a turn stopped while it waits, and a shutdown, each turn another guest's, which leave the gate as before and keep nothing there;
+- **a stand-in's** (`test_turns_stand_ins_api.py`): a turn that waits at its stand-in's gate as its own guest's answer, after another guest's that came later;
+- **a title's** (`test_titles.py`): a title that waits as its conversation's account's answer: with the place held, a turn of A's, then the title of A's conversation, then a turn of B's pass A's turn, B's turn, the title; and a title given up on at the gate that keeps nothing there.
+
+**Known, and left,** each worked out, and not seen, unless it says so:
+
+- **an account's second answer at once can be passed by every account that has had no place since somebody last waited, however many they are:** with a new account asking every 25 s, for answers of 30 s, more than the server can write, it didn't pass within the hour, where first come, first served had it wait 30 s. New guests are limited to 30 an hour for a network address ([ADR 0011](0011-rate-limits-as-token-buckets-in-valkey.md));
+- **one person with several guest sessions is several accounts,** each with a share;
+- **a place is a place, whatever the answer costs the server:** a long answer and a short one count alike;
+- **the gate is in the process, as before:** the API's and a separate worker's are apart, so under `make up`, where the worker is a container of its own, a title's request doesn't wait at the API's gate, and no account's share there counts it (read in the code; the decision above says the same of a second API process);
+- **a reader isn't told that its answer waits, nor at which place:** the next step;
+- **the queue has no limit of its own,** as before;
+- **while somebody always waits, the gate remembers every account given a place since nobody last waited:** a number each, with no limit of its own. With a new account every 25 s, as above, that is 144 an hour;
+- **a turn stopped in the very step in which it is handed a place goes on with it until its next wait,** and stops there, as before: its cancel scope leaves a task alone whose wait is already over, and tries again on the loop's next round (read in anyio 4.16.0). The log says that it waited, and the place comes back when it stops;
+- **the log's `waited` line says how long, not who passed;**
+- **the developer gateway's requests will wait as the answers of their key's account,** when they come.
+
+**How to reverse it:** in the code, `Gate` back to the `asyncio.Semaphore` it was, behind `async with gate:`, without `_Waiting`; and the account that `actio.api.turns.start_turn` and `_write`, `answering.answer` and `_through`, and `titles.write`, `_first_question` and `_ask` hand to it. Or, keeping the gate, the same key for every answer: all the answers are then one account's, and pass in the order they came.
+
+**Measured**
+
+On 2026-11-26, on a MacBook Pro (M1 Pro, 16 GB), the machine of the measurements above. No cloud provider was asked anything for this step.
+
+**On the running stack** (`make up`, the shipped config, the local model `qwen3.5:4b-q4_K_M` on Ollama, which writes one answer at a time), through the API, by a script outside the repository. Guest A asked two questions in the same moment, each in a conversation of its own; guest B one, a second later; guest C one, a second after that. Each asked for about 400 words. The model was loaded before, by a fourth guest's question. Each row is one run.
+
+| | A's first | A's second | B's | C's | Answered in the order |
+|---|---|---|---|---|---|
+| Asked at | 0.0 s | 0.1 to 0.2 s | 1.0 s | 2.0 s | |
+| First word after, before the step: the tree at `852b3b9` | 0.8 s | 16.3 s | 37.0 s | 73.2 s | A1, A2, B1, C1 |
+| On the step's first build | 0.2 s | 48.3 s | 16.1 s | 29.9 s | A1, B1, C1, A2 |
+| On the tree as it was committed | 0.1 s | 81.2 s | 16.1 s | 33.9 s | A1, B1, C1, A2 |
+
+- **The API's log, before:** `turn …: waited 16.2 s for the model's server` (A's second), `… waited 35.3 s …` (B's), `… waited 72.7 s …` (C's). **On the tree as it was committed:** `… waited 15.3 s …` (B's), `… waited 33.3 s …` (C's), `… waited 80.9 s …` (A's second). The lines are as they were.
+- **The model didn't write at one speed,** so a wait is not a number of answers: the answers, of 449 to 561 words, took 14 to 45 s to write, the later ones of a run the longest. Before the step 16, 20, 37 and 41 s, in the order they were written; on the tree as it was committed 16, 18, 45 and 38 s, so that A's second waited 81.2 s behind three answers. The cause wasn't looked for.
+- **Seen beside it, and older than this step:** under `make up` the worker is a container of its own, and its requests for the conversations' titles waited inside Ollama, behind the answers, where no gate of the API's counts them ("Known, and left", above). Ollama's own log shows five such requests, in the three runs, ended after 30 seconds without an answer, each behind an answer that took longer to write; the worker's log said of the last `no title, its model took longer than 30 s`, asked for it again half a minute later, and wrote it.
+
+**Mistakes planted on purpose,** each alone in a scratch copy of the tree, with the tests that should notice run until the first one failed. On the step's first build, while the review read it, 35: 33 failed a test. The two that failed none:
+
+- **the answers that come to wait not numbered:** of two accounts alike, the gate then takes the one whose line is older, which is the one whose answer came first unless that account's first answer gave up meanwhile. No test had an answer give up ahead of another account's. One does now;
+- **the rule asked with the place just given back still counted as its account's:** it shows only at three places or more, where the account that gives one back holds as many afterwards as another. A test of three at once holds it now.
+
+Two more failed one test alone, of 583, and that one a turn's, not the gate's (`test_a_shutdown_ends_the_turns_that_wait_too_and_leaves_the_gate_free`): **a place handed to an answer that was cancelled in that step and hadn't left its line,** and **the absent still remembered after the last answer waiting gave up.** The property test drew neither: it lets the loop run after each step, so it never has two things happen in one, and the second needs five steps in one order. Each has a test of the gate by itself now.
+
+On the tree as it was committed, 36, one more among them, for what an answer handed a place and cancelled leaves of its account: 35 failed a test. The one that failed none was **an account that holds a place forgotten too, once nobody waits,** which the property test had caught on the first build and drew no case for this time: it draws new cases at every run, and what it alone catches isn't caught every time. It got a test of its own, which it then failed.
+
+**The review,** by a reviewer that had not seen the build, once: nothing that had to be fixed, and four smaller points, all taken. That no test of the gate by itself had an answer cancelled in the step in which a place is given back, which the planting showed too; that the test of an answer handed a place and cancelled didn't show what counting it as given does, for which that account's next answer now stands in line; a time limit around the ways in that two tests take by hand; and, under "Known, and left", what the gate remembers while somebody always waits.
+
+**Not measured:** a server that writes several answers at once, whose part of the rule the tests hold alone; more than three accounts, and an hour of people asking, on a real server: the table of made-up traffic is worked out; the developer gateway's requests, which don't exist yet; and the page, whose source did not change. The end-to-end tests were not run for this step: nothing of the chat, a route, a stream, the containers or the fake model changed, and that stack's models have no gate.
