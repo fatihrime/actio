@@ -38,7 +38,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from actio import catalog as catalogs
 from actio.api.dependencies import get_clock, get_new_id
 from actio.app import create_app
-from actio.catalog import Catalog, CatalogFile, Gate, ModelStatus, OfferedModel, budget_of
+from actio.catalog import (
+    Catalog,
+    CatalogFile,
+    Gate,
+    ModelStatus,
+    OfferedModel,
+    OwnWait,
+    budget_of,
+)
 from actio.chat import running as turn_runner
 from actio.core import jobs, schema
 from actio.core.database import create_engine, create_session_factory
@@ -550,16 +558,18 @@ class Lineup:
     Each is on a provider called `scripted`, as `scripted-<its name>`, unless a test
     gives it another name there (`on_server`): two models with the same name there that
     each have a budget share it, as two models of a models file do, and they share one
-    breaker, whether or not they have a budget.
+    breaker and one provider's own wait, whether or not they have a budget.
 
-    The models keep their breakers for as long as the lineup lives: every catalog it
-    gives has the same ones, which a test reads through `catalog().get(name).breaker`."""
+    The models keep their breakers, and the waits their providers named, for as long as
+    the lineup lives: every catalog it gives has the same ones, which a test reads
+    through `catalog().get(name).breaker` and `catalog().get(name).own_wait`."""
 
     def __init__(self) -> None:
         self._offered: dict[str, OfferedModel] = {}
         self._thinking: dict[str, bool] = {}
         self._states: dict[str, State] = {}
         self._breakers: dict[str, Breaker] = {}
+        self._own_waits: dict[str, OwnWait] = {}
 
     def add(
         self,
@@ -620,7 +630,7 @@ class Lineup:
         provider's limits, such as `{"requests_a_day": 10}`: each figure is kept as the
         catalog keeps it (`actio.catalog.budget_of`). `on_server` is its name on its
         server, `scripted-<name>` unless given, and the models with one name there share
-        one breaker."""
+        one breaker and one provider's own wait."""
         model = on_server or f"scripted-{name}"
         self._offered[name] = OfferedModel(
             name=name,
@@ -635,6 +645,7 @@ class Lineup:
             tokens_a_minute=tokens_a_minute,
             budget=None if budget is None else budget_of(SCRIPTED, model, budget),
             breaker=self._breakers.setdefault(model, Breaker()),
+            own_wait=self._own_waits.setdefault(model, OwnWait()),
         )
         self._thinking[name] = thinking
         self._states[name] = state

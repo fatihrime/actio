@@ -9,10 +9,10 @@ over the first line, unless a person has renamed the conversation meanwhile. Whe
 model can't answer, those that stand in for it are asked in its place, as for a turn,
 and as for a turn a model whose failure may be gone in a moment is asked once more
 first, one whose room is too small for the request is passed over while another's
-isn't, one whose budget has nothing left for it is asked after those that have some,
-and one that keeps failing is asked after those that don't. What a title's request
-takes of a model's budget counts as a turn's does, and so does what its tries say of
-whether a model keeps failing.
+isn't, one whose budget has nothing left for it, or whose provider said to wait, is
+asked after those that have some, and one that keeps failing is asked after those that
+don't. What a title's request takes of a model's budget counts as a turn's does, and so
+does what its tries say of whether a model keeps failing, or of its provider's wait.
 
 Who named a conversation is on its row (`Conversation.title_by`): `question`, `model`,
 or `person`. Only `write` makes a `question` a `model`, and nothing writes over a
@@ -387,11 +387,14 @@ async def _ask(
     model whose room is smaller than the request, by Actio's guess at it, is passed over
     while another of them has room, as for a turn (`Chain.asked_with`): the log says it,
     with the two numbers. One whose budget has nothing left for the request, by one look
-    at their budgets in `budgets`, is asked after those that have some: the log says it,
+    at their budgets in `budgets`, or whose provider said to wait, until that is over
+    (`Chain.with_own_waits`), is asked after those that have some: the log says it,
     with the wait and the limit in the way. When none of those with room has any, none
     is asked, the log names each with its wait, and the title is asked for again later,
-    by the job's own waits. A look that can't be had refuses nothing, and has nobody
-    asked last, and the log says that too. What each request takes of a model's budget
+    by the job's own waits. A look that can't be had refuses nothing by itself, and has
+    nobody asked last for a budget's count, and the log says that too. A 429 a title's
+    model answers with is noted for the turns of the same catalog, as a turn's is, and
+    so is an answer that ends such a wait. What each request takes of a model's budget
     is counted there, as a turn's is. Within each of those groups, a model whose breaker
     says it keeps failing is asked after those that don't, and the log says each that
     this moved, as a turn's does; it refuses nothing. Each try of a model is recorded in
@@ -419,16 +422,17 @@ async def _ask(
                 )
             messages = [User(_asking(question))]
             # As for a turn: a ready model whose room is smaller than the guess at the
-            # request is passed over while another has room, and one whose budget has
-            # nothing left for it is asked after those that have some. When no model with
-            # room has budget, none is asked, and the title is asked for again later;
-            # when none has room, every one is asked.
+            # request is passed over while another has room, and one that has no budget
+            # left for it, by the look or by its provider's word, is asked after those
+            # that have some. When no model with room has budget, none is asked, and the
+            # title is asked for again later; when none has room, every one is asked.
             tokens = prompt_tokens(messages)
             try:
                 spent = await chain.look(budgets, tokens, now=now)
                 unread = None
             except BudgetsUnavailableError as error:
                 spent, unread = {}, type(error.__cause__).__name__
+            spent = chain.with_own_waits(spent, now)
             # As for a turn: within each of those, one that keeps failing is asked after
             # those that don't, by their breakers now, and that refuses nothing.
             asked = chain.asked_with(tokens, spent, chain.failing(now))
@@ -449,8 +453,8 @@ async def _ask(
                     unread,
                 )
             if asked.refused is not None:
-                # Names and numbers from the models file alone. The job's own waits
-                # decide when it is asked for again, not the budget's.
+                # Names and numbers alone. The job's own waits decide when it is asked
+                # for again, not the budget's, nor the provider's.
                 waits = ", ".join(
                     f"{model.name} for about {short.seconds} s ({short.limit})"
                     for model, short in asked.spent

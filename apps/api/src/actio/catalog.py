@@ -16,13 +16,15 @@ what to call it at its provider, its limits, and the client to stream an answer 
   passed over while another has room (`OfferedModel.room`, ADR 0029), and then a model
   whose provider's plan has nothing left for the request, by what `Chain.look` read of
   its budget, is asked after those that have some (`OfferedModel.budget`, ADR 0030).
-  When none of those with room has any, the request is refused for now. Within each of
-  those two groups, a model that keeps failing, by what `Chain.failing` read of its
-  breaker, is asked after those that don't (`OfferedModel.breaker`, ADR 0031): that
-  never refuses anything.
+  A model whose provider said to wait, longer than the walk waits out itself, counts as
+  one with no budget left until that wait is over (`OfferedModel.own_wait`,
+  `Chain.with_own_waits`). When none of those with room has any, the request is
+  refused for now. Within each of those two groups, a model that keeps failing, by what
+  `Chain.failing` read of its breaker, is asked after those that don't
+  (`OfferedModel.breaker`, ADR 0031): that never refuses anything.
 - `asked_through` gives the client a model is asked through: one that records each try
-  in the model's breaker, around the one `counted` gives, which counts in its budget
-  what each request takes of it.
+  in the model's breaker, and notes the wait its provider names (`OwnWait`), around
+  the one `counted` gives, which counts in its budget what each request takes of it.
 - `Catalog.load_ahead` has a model's server load it into memory before the first
   question to it, where the server can be asked to (ADR 0026): the model itself, never
   one that stands in for it.
@@ -74,6 +76,7 @@ from actio_llm import (
     ModelNotFoundError,
     Ollama,
     OpenAICompatible,
+    RateLimitedError,
     ReasoningDelta,
     StreamEvent,
     TextDelta,
@@ -84,6 +87,7 @@ from actio_llm import (
 )
 from actio_llm.breaker import Closed, Opened, OpenedAgain
 from actio_llm.openai_compatible import OWN_MEMBERS
+from actio_llm.router import WAITS_AT_MOST_S
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +119,11 @@ LIMITS: dict[str, tuple[Counts, Period]] = {
 }
 """The keys of a model's table that state its provider's limits for it, each with what it
 counts, and over which period: its budget's buckets, in this order."""
+
+BELIEVED_AT_MOST = timedelta(days=1)
+"""The longest wait a provider may name that Actio keeps as it was named (`believed`). A
+provider's longest period is a day, of requests or of tokens: a wait named longer is
+taken for a day, after which one request finds out what the provider says then."""
 
 type Kind = Literal["ollama", "openai-compatible"]
 
@@ -434,6 +443,70 @@ def budget_of(provider: str, model: str, stated: Mapping[str, int | None]) -> Bu
     return Budget(buckets) if buckets else None
 
 
+def believed(retry_after_s: float | None) -> timedelta | None:
+    """How long Actio takes a model's provider to refuse its requests, from the wait in
+    seconds that a 429 of it named (`RateLimitedError.retry_after_s`): kept until it is
+    over (`OwnWait`), and meanwhile the model counts as having no budget left.
+
+    `None`, nothing kept, when it named none, `nan` or `inf`, and for a wait of
+    `WAITS_AT_MOST_S` or less, negative ones among them: the walk waits those out itself
+    and asks the model once more (`actio_llm.router`), so nothing is left of them to
+    keep. Otherwise the wait, and `BELIEVED_AT_MOST` when it is that or more.
+
+    Numbers alone are compared before a `timedelta` is made, which a wait as long as
+    `1e308` seconds can't be: it never raises, as the end of a try, where it is asked,
+    must not."""
+    # `nan` compares false with everything, and `inf` is no moment to wait for.
+    if retry_after_s is None or not WAITS_AT_MOST_S < retry_after_s < math.inf:
+        return None
+    if retry_after_s >= BELIEVED_AT_MOST.total_seconds():
+        return BELIEVED_AT_MOST
+    return timedelta(seconds=retry_after_s)
+
+
+class OwnWait:
+    """What a model's provider last said of when it takes requests again: the moment the
+    wait its 429 named is over, when Actio keeps it (`believed`). Until then the model
+    counts as having no budget left (`Chain.with_own_waits`).
+
+    Nothing here reads a clock or logs: every moment is given."""
+
+    def __init__(self) -> None:
+        self._until: datetime | None = None
+        self._words = 0
+
+    @property
+    def words(self) -> int:
+        """How many waits of the provider's have been noted here so far (`told`). A try
+        reads it when it begins, and gives it to `over` when it ends answered."""
+        return self._words
+
+    def told(self, until: datetime) -> None:
+        """The provider's newest word: its wait is over at `until`. It replaces what was
+        kept, whether that was later or sooner."""
+        self._until = until
+        self._words += 1
+
+    def left(self, now: datetime) -> timedelta | None:
+        """How long until the wait is over, at `now`. `None` when nothing is kept, and
+        from the moment it is over on."""
+        if self._until is None or now >= self._until:
+            return None
+        return self._until - now
+
+    def over(self, now: datetime, *, words: int) -> bool:
+        """The model answered a try that began when `words` waits had been noted
+        (`words`, read then): forget the wait, unless another has been noted since. An
+        answer to a request that was sent before a refusal was heard says nothing of
+        that refusal's wait, however late it ends. Whether a wait that was still running
+        at `now` was forgotten."""
+        if words != self._words:
+            return False
+        running = self.left(now) is not None
+        self._until = None
+        return running
+
+
 @dataclass(frozen=True, slots=True)
 class OfferedModel:
     """A model on offer: everything needed to ask it something."""
@@ -472,6 +545,15 @@ class OfferedModel:
     `Chain.asked_with`). Each try of it is recorded there (`asked_through`). Kept in the
     process, and shared by two models of the file that are one model on one provider,
     as a budget is. A new one for each model on offer unless given."""
+    own_wait: OwnWait = field(default_factory=OwnWait, compare=False, repr=False)
+    """The wait its provider last named, in a 429, when that is longer than the walk
+    waits out itself (`believed`, ADR 0030): until it is over, a ready model counts as
+    having no budget left, whether or not it has a budget, by the budget's rule
+    (`Chain.with_own_waits`, `Chain.asked_with`). Each try of it notes it there, and an
+    answer of the model to a request sent after it was noted ends it (`asked_through`).
+    Kept in the process, and shared by
+    two models of the file that are one model on one provider, as its breaker is. A new
+    one for each model on offer unless given."""
 
     @property
     def room(self) -> int:
@@ -497,19 +579,39 @@ class ModelStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ProvidersWait:
+    """The limit in the way of a model whose provider said to wait (`OwnWait`): no
+    bucket of Actio's count, but the provider's own word. In words, as a bucket is."""
+
+    def __str__(self) -> str:
+        return "its provider's own wait"
+
+
+PROVIDERS_WAIT = ProvidersWait()
+"""The limit a `Spent` names when a provider's own wait is in the way."""
+
+
+@dataclass(frozen=True, slots=True)
 class Spent:
-    """What a look said of a model whose budget has nothing left for a request now
-    (`Chain.look`): how long until it has, and the limit in the way, the one of its
-    buckets that takes the longest to have room for it."""
+    """What is known of a model that has no budget left for a request now: how long
+    until it has, and the limit in the way. By a look at its budget (`Chain.look`), the
+    one of its buckets that takes the longest to have room for it; or by its provider's
+    own wait (`PROVIDERS_WAIT`, `Chain.with_own_waits`). Either limit reads as words:
+    `tokens a minute`, `its provider's own wait`."""
 
     wait: timedelta
-    limit: Bucket
+    limit: Bucket | ProvidersWait
 
     @property
     def seconds(self) -> int:
         """The wait in whole seconds, rounded up, and 1 at the least: as the log says
         it."""
-        return max(1, math.ceil(self.wait.total_seconds()))
+        return _whole_seconds(self.wait)
+
+
+def _whole_seconds(wait: timedelta) -> int:
+    """A wait in whole seconds, rounded up, and 1 at the least: as the log says it."""
+    return max(1, math.ceil(wait.total_seconds()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,10 +629,10 @@ class Asked:
     in the chain's order."""
     spent: tuple[tuple[OfferedModel, Spent], ...] = ()
     """Those that are ready, are not passed over for their room, and whose budget has
-    nothing left for the request now, in the chain's order, each with what the look
-    said of it: asked after those that have budget, or, when the request is refused,
-    the reason it is. Empty when no ready model has room and none has budget: every one
-    is asked then, and none is named."""
+    nothing left for the request now, in the chain's order, each with what was said of
+    it, by the look or by its provider: asked after those that have budget, or, when
+    the request is refused, the reason it is. Empty when no ready model has room and
+    none has budget: every one is asked then, and none is named."""
     refused: Spent | None = None
     """When the request is refused for now: some ready models have room for it, and
     none of those has budget left for it. The shortest wait among them, with its limit:
@@ -594,6 +696,23 @@ class Chain:
                 spent[offered.name] = Spent(wait, limit)
         return spent
 
+    def with_own_waits(self, spent: Mapping[str, Spent], now: datetime) -> dict[str, Spent]:
+        """What a look said (`spent`, by name), with each ready model of the chain whose
+        provider's own wait isn't over at `now` (`OfferedModel.own_wait`): that model
+        has no budget left until then, whether or not it has a budget, the limit in the
+        way being `PROVIDERS_WAIT`. Of a model that both name, the longer wait; of two as
+        long, the provider's own. A model that isn't ready is never added. Asks nobody
+        anything."""
+        found = dict(spent)
+        for offered, _ in self.ready:
+            left = offered.own_wait.left(now)
+            if left is None:
+                continue
+            counted = found.get(offered.name)
+            if counted is None or left >= counted.wait:
+                found[offered.name] = Spent(left, PROVIDERS_WAIT)
+        return found
+
     def failing(self, now: datetime) -> dict[str, Failing]:
         """The ready models of the chain whose breaker says that they are failing at
         `now`, by their names, each with what it says (ADR 0031). A model that isn't
@@ -620,7 +739,7 @@ class Chain:
 
         Then the budget, of those left. A model has budget when `spent` doesn't name it:
         it has no budget, or the look said that the request fits it now, or the look
-        couldn't be had and `spent` is empty.
+        couldn't be had, and its provider didn't say to wait (`with_own_waits`).
 
         - While at least one has budget, those are asked first, in the chain's order,
           and then those without, in the chain's order: Actio keeps a tenth of each
@@ -957,31 +1076,60 @@ def asked_through(
       a request too large or refused, a model its server hasn't got or a server too old,
       or it raised anything else.
 
+    The same end of a try also says what its provider said of when it takes requests
+    again (`OfferedModel.own_wait`), dated when the try ended:
+
+    - **a 429 whose wait is kept** (`RateLimitedError`, `believed`): the wait, until
+      it is over, whatever was kept before it. Meanwhile the model counts as having no
+      budget left (`Chain.with_own_waits`). It is still a failure of the breaker's;
+    - **a try that ended answered,** by the rule above, while a wait was still running:
+      the wait is over, unless it was noted after that try began. An answer to a
+      request sent before a refusal was heard says nothing of the refusal's wait;
+    - **nothing else changes it:** a 429 that named no wait, or one the walk waits out
+      itself, any other error, a try closed before anything was handed on.
+
     The model's events are handed on as they come, and its errors as they came, the
     same objects: the walk sorts them by kind, and the counted client inside reads them
-    too. What the end of a try changed of the breaker is said in the log, a warning, by
-    the model's name and numbers alone. `OfferedModel.chat` stays the bare client:
-    whether a server has a model, and a load ahead, are recorded nowhere."""
-    return _Recorded(offered.name, counted(offered, budgets, tokens, clock), offered.breaker, clock)
+    too. What the end of a try changed of the breaker, and then of the provider's wait,
+    is said in the log, a warning each, by the model's name and numbers alone.
+    `OfferedModel.chat` stays the bare client: whether a server has a model, and a load
+    ahead, are recorded nowhere."""
+    return _Recorded(
+        offered.name,
+        counted(offered, budgets, tokens, clock),
+        offered.breaker,
+        offered.own_wait,
+        clock,
+    )
 
 
 class _Recorded:
-    """A model's client that records each try of it in its breaker: see
-    `asked_through`."""
+    """A model's client that records each try of it in its breaker, and notes the wait
+    its provider names: see `asked_through`."""
 
     def __init__(
-        self, name: str, chat: ChatProvider, breaker: Breaker, clock: Callable[[], datetime]
+        self,
+        name: str,
+        chat: ChatProvider,
+        breaker: Breaker,
+        own_wait: OwnWait,
+        clock: Callable[[], datetime],
     ) -> None:
         self._name = name
         self._chat = chat
         self._breaker = breaker
+        self._own_wait = own_wait
         self._clock = clock
 
     async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        # How many of the provider's waits had been noted when this try began: its
+        # answer ends no wait that was noted after that.
+        words = self._own_wait.words
         call = self._breaker.begins(self._clock())
         handed_on = False
         finished = False
         outcome: Literal["answered", "failed"] | None = None
+        wait: timedelta | None = None
         try:
             async with aclosing(self._chat.stream(request)) as events:
                 async for event in events:
@@ -994,6 +1142,8 @@ class _Recorded:
             # Cut at its time after something was handed on, it is an answer.
             cut = handed_on and isinstance(error, TookTooLongError)
             outcome = "answered" if cut else "failed"
+            if isinstance(error, RateLimitedError):
+                wait = believed(error.retry_after_s)
             raise
         except BaseException:
             # A stop, a cut, a cancellation, the request's own refusal, or anything else:
@@ -1001,9 +1151,11 @@ class _Recorded:
             outcome = "answered" if handed_on else None
             raise
         finally:
-            # Every ending, once, and nothing awaited: a stop or a cancellation that
-            # closes the stream records it too.
-            self._said(call.ends(outcome, self._clock()))
+            # Every ending, once, by one moment, and nothing awaited: a stop or a
+            # cancellation that closes the stream records it too.
+            ended = self._clock()
+            self._said(call.ends(outcome, ended))
+            self._heard(wait, outcome, ended, words)
 
     def _said(self, change: Change | None) -> None:
         """Say in the log what the end of a try changed of the breaker: names and
@@ -1029,6 +1181,31 @@ class _Recorded:
                 logger.warning("model %s: it answered, and is asked in its place again", self._name)
             case None:
                 pass
+
+    def _heard(
+        self,
+        wait: timedelta | None,
+        outcome: Literal["answered", "failed"] | None,
+        ended: datetime,
+        words: int,
+    ) -> None:
+        """Note what the end of a try said of the provider's own wait, at `ended`, and
+        say it in the log: names and numbers alone. `words` is how many of the provider's
+        waits had been noted when the try began (`OwnWait.words`)."""
+        if wait is not None:
+            self._own_wait.told(ended + wait)
+            logger.warning(
+                "model %s: its provider said to wait %d s, and until then it counts as having"
+                " no budget left",
+                self._name,
+                _whole_seconds(wait),
+            )
+        elif outcome == "answered" and self._own_wait.over(ended, words=words):
+            logger.warning(
+                "model %s: it answered before its provider's wait was over, and counts as"
+                " having budget again",
+                self._name,
+            )
 
 
 @asynccontextmanager
@@ -1090,8 +1267,10 @@ async def build(
             )
 
         # One for each model on a provider: two models of the file that are one model on
-        # one provider fail together, as they share a budget.
+        # one provider fail together, and are told to wait together, as they share a
+        # budget.
         breakers = {(entry.provider, entry.model): Breaker() for entry in file.models.values()}
+        own_waits = {(entry.provider, entry.model): OwnWait() for entry in file.models.values()}
         models = {
             name: OfferedModel(
                 name=name,
@@ -1106,6 +1285,7 @@ async def build(
                 tokens_a_minute=entry.tokens_a_minute,
                 budget=budget_of(entry.provider, entry.model, entry.stated),
                 breaker=breakers[entry.provider, entry.model],
+                own_wait=own_waits[entry.provider, entry.model],
             )
             for name, entry in file.models.items()
         }

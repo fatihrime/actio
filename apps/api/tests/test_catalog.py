@@ -7,6 +7,8 @@ and an OpenAI-compatible server by fakellm.
 
 import asyncio
 import json
+import math
+import sys
 import tomllib
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
@@ -25,7 +27,9 @@ from valkey.exceptions import ValkeyError
 
 from actio import catalog as catalogs
 from actio.catalog import (
+    BELIEVED_AT_MOST,
     LIMITS,
+    PROVIDERS_WAIT,
     Asked,
     Budget,
     CatalogError,
@@ -34,9 +38,11 @@ from actio.catalog import (
     Gate,
     ModelStatus,
     OfferedModel,
+    OwnWait,
     Spent,
     UnknownModelError,
     asked_through,
+    believed,
     budget_of,
     counted,
     kept,
@@ -2164,6 +2170,470 @@ async def test_through_a_walk_each_try_is_recorded_and_closed_in_the_walks_own_o
         None,
         Opened(5, 5, timedelta(seconds=30)),
     ]
+
+
+# --- A provider's own wait ------------------------------------------------------------
+
+DAY = timedelta(days=1)
+
+
+@pytest.mark.parametrize(
+    ("named", "kept_for"),
+    [
+        pytest.param(None, None, id="none"),
+        pytest.param(math.nan, None, id="nan"),
+        pytest.param(math.inf, None, id="inf"),
+        pytest.param(-math.inf, None, id="-inf"),
+        pytest.param(-1e308, None, id="a long time ago"),
+        pytest.param(-1.0, None, id="a second ago"),
+        pytest.param(0, None, id="no wait"),
+        pytest.param(1, None, id="a second"),
+        pytest.param(2.0, None, id="the walk's longest"),
+        # Larger by the least a float can be, kept as the 2 s a `timedelta` holds of it.
+        pytest.param(math.nextafter(2.0, math.inf), timedelta(seconds=2), id="the next larger"),
+        pytest.param(2.001, timedelta(seconds=2.001), id="2.001 s"),
+        pytest.param(49.846993202, timedelta(seconds=49.846993202), id="the Gemini API's minute"),
+        pytest.param(83_280.0, timedelta(hours=23, minutes=8), id="the Gemini API's 23 hours"),
+        pytest.param(86_399.5, timedelta(seconds=86_399.5), id="half a second short of a day"),
+        pytest.param(86_400, DAY, id="a day"),
+        pytest.param(86_401.0, DAY, id="a day and a second"),
+        pytest.param(1e308, DAY, id="1e308 s"),
+        pytest.param(sys.float_info.max, DAY, id="the largest float"),
+    ],
+)
+def test_a_wait_a_provider_names_is_kept_when_longer_than_the_walks_and_for_a_day_at_most(
+    named: float | None, kept_for: timedelta | None
+) -> None:
+    """The walk waits 2 s or less out itself, and asks once more: nothing is left of
+    such a wait to keep. Nonsense is no wait, and a wait longer than a day is a day's,
+    whatever it is: nothing raises."""
+    assert believed(named) == kept_for
+    assert BELIEVED_AT_MOST == DAY
+
+
+def test_a_providers_wait_is_left_until_its_moment_and_its_newest_word_replaces_it() -> None:
+    wait = OwnWait()
+    nothing_yet = wait.left(NOON)
+    wait.told(NOON + timedelta(seconds=49))
+    before, nearly, at, after = (
+        wait.left(NOON + timedelta(seconds=seconds)) for seconds in (0, 48.5, 49, 50)
+    )
+    wait.told(NOON + timedelta(minutes=5))
+    later = wait.left(NOON)
+    wait.told(NOON + timedelta(seconds=10))
+    sooner = wait.left(NOON)
+
+    assert nothing_yet is None
+    assert (before, nearly, at, after) == (
+        timedelta(seconds=49),
+        timedelta(seconds=0.5),
+        None,
+        None,
+    )
+    assert (later, sooner) == (timedelta(minutes=5), timedelta(seconds=10))
+
+
+def test_a_providers_wait_that_is_over_is_forgotten_and_says_whether_it_was_running() -> None:
+    """Whether it was running at the moment given: at its own moment it was over
+    already. Forgotten all the same, also for a moment before it."""
+    wait = OwnWait()
+    with_nothing_kept = wait.over(NOON, words=wait.words)
+    wait.told(NOON + timedelta(seconds=49))
+    running, again = wait.over(NOON, words=wait.words), wait.over(NOON, words=wait.words)
+    forgotten = wait.left(NOON)
+    wait.told(NOON + timedelta(seconds=49))
+    at_its_moment = wait.over(NOON + timedelta(seconds=49), words=wait.words)
+
+    assert (with_nothing_kept, running, again, forgotten) == (False, True, False, None)
+    assert at_its_moment is False
+    assert wait.left(NOON) is None
+
+
+def test_an_answer_to_a_request_sent_before_the_providers_word_leaves_its_wait() -> None:
+    """A try reads how many times the provider has said to wait when it begins. Its
+    answer ends the wait only when the provider has said nothing since: one named
+    while the try was under way stays, and so does a second word's after a first."""
+    wait = OwnWait()
+    before_any = wait.words
+    wait.told(NOON + timedelta(seconds=49))
+    after_the_first = wait.words
+    sent_before = wait.over(NOON, words=before_any)
+    still_left = wait.left(NOON)
+    wait.told(NOON + timedelta(seconds=30))
+    sent_between = wait.over(NOON, words=after_the_first)
+    left_of_the_second = wait.left(NOON)
+    sent_after = wait.over(NOON, words=wait.words)
+
+    assert (before_any, after_the_first, wait.words) == (0, 1, 2)
+    assert (sent_before, still_left) == (False, timedelta(seconds=49))
+    assert (sent_between, left_of_the_second) == (False, timedelta(seconds=30))
+    assert sent_after is True
+    assert wait.left(NOON) is None
+
+
+def told_to_wait(seconds: float | None) -> RateLimitedError:
+    """A provider's 429 that names a wait, in words that must stay out of the log."""
+    return RateLimitedError(f"429: slow down, {SECRET}", retry_after_s=seconds)
+
+
+def waits_line(model: str, seconds: int) -> str:
+    """The log's line for a model whose provider said to wait, and is believed."""
+    return (
+        f"model {model}: its provider said to wait {seconds} s, and until then it counts as"
+        " having no budget left"
+    )
+
+
+def over_line(model: str) -> str:
+    """The log's line for a model that answered while its provider's wait was running."""
+    return (
+        f"model {model}: it answered before its provider's wait was over, and counts as having"
+        " budget again"
+    )
+
+
+async def test_a_429_that_names_a_longer_wait_than_the_walks_is_kept_from_the_end_of_its_try(
+    budgets: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Dated by the clock when the try ended, 10 s after it began, and handed on as it
+    came, the same object. The log says it by the model's name and the wait alone, in
+    whole seconds, rounded up."""
+    error = told_to_wait(49.2)
+    model = offered("watched", chat=Says(error))
+    begun_then_ended = iter([NOON, NOON + timedelta(seconds=10)])
+
+    with pytest.raises(RateLimitedError) as raised:
+        await read(asked_through(model, budgets, GUESS, lambda: next(begun_then_ended)), into=[])
+
+    assert raised.value is error
+    assert model.own_wait.left(NOON) == timedelta(seconds=59.2)
+    assert model.own_wait.left(NOON + timedelta(seconds=59.2)) is None
+    assert caplog.messages == [waits_line("watched", 50)]
+    assert SECRET not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "named",
+    [None, 0, 0.01, 1, 2.0, math.nan, math.inf, -1.0],
+    ids=["none", "no wait", "a moment", "a second", "2 s", "nan", "inf", "a second ago"],
+)
+async def test_a_429_whose_wait_the_walk_waits_out_or_that_names_none_keeps_nothing(
+    named: float | None, budgets: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The error is handed on as it came, and nothing is said of a wait."""
+    error = told_to_wait(named)
+    model = offered("watched", chat=Says(error))
+
+    with pytest.raises(RateLimitedError) as raised:
+        await read(asked_through(model, budgets, GUESS, lambda: NOON), into=[])
+
+    assert raised.value is error
+    assert model.own_wait.left(NOON) is None
+    assert caplog.messages == []
+
+
+@pytest.mark.parametrize(
+    "named",
+    [86_400, 86_401, 1e308, sys.float_info.max],
+    ids=["a day", "a day and a second", "1e308 s", "the largest float"],
+)
+async def test_a_429_that_names_a_day_or_more_is_kept_for_a_day(
+    named: float, budgets: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    error = told_to_wait(named)
+    model = offered("watched", chat=Says(error))
+
+    with pytest.raises(RateLimitedError) as raised:
+        await read(asked_through(model, budgets, GUESS, lambda: NOON), into=[])
+
+    assert raised.value is error
+    assert model.own_wait.left(NOON) == DAY
+    assert caplog.messages == [waits_line("watched", 86_400)]
+
+
+async def test_a_wait_kept_keeps_a_429s_request_and_guess_counted_in_the_budget_as_before(
+    budgets: Budgets,
+) -> None:
+    """The counted client inside is handed the error as it came: a refused request was
+    sent, and stays counted."""
+    error = told_to_wait(49)
+    model = counted_model(Says(error))
+
+    with pytest.raises(RateLimitedError) as raised:
+        await read(asked_through(model, budgets, GUESS, lambda: NOON), into=[])
+
+    assert raised.value is error
+    assert model.own_wait.left(NOON) == timedelta(seconds=49)
+    assert await taken(budgets, model_budget(model)) == {
+        "requests a minute": 1,
+        "tokens a minute": GUESS,
+    }
+
+
+async def test_a_429_that_names_a_wait_is_still_a_failure_whose_breakers_line_comes_first(
+    budgets: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Five of five tries open the breaker, and the fifth's end says that first."""
+    model = offered("watched", chat=Says(told_to_wait(49)))
+    client = asked_through(model, budgets, GUESS, lambda: NOON)
+
+    for _ in range(5):
+        await to_its_end(client)
+
+    assert model.breaker.failing(NOON) == Failing(timedelta(seconds=30))
+    assert caplog.messages == [
+        *[waits_line("watched", 49)] * 4,
+        "model watched: 5 of its last 5 requests failed, and for 30 s it is asked after"
+        " models that aren't failing",
+        waits_line("watched", 49),
+    ]
+    assert SECRET not in caplog.text
+    assert "RateLimitedError" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("script", "reading", "ends_it"),
+    [
+        pytest.param((WORDS, FINISHED), to_its_end, True, id="an answer"),
+        pytest.param((THOUGHT, FINISHED), to_its_end, True, id="an answer of a thought"),
+        pytest.param((WORDS, FINISHED), closed_after_one, True, id="closed after a word"),
+        pytest.param((WORDS, TookTooLongError(SECRET)), to_its_end, True, id="cut at its time"),
+        pytest.param(
+            (TextDelta(""), WORDS, FINISHED), closed_after_one, False, id="closed before a word"
+        ),
+        pytest.param((ProviderUnavailableError(SECRET),), to_its_end, False, id="too busy"),
+        pytest.param((WORDS,), to_its_end, False, id="no finish after a word"),
+        pytest.param((ContextOverflowError(SECRET),), to_its_end, False, id="too large"),
+        pytest.param((told_to_wait(1),), to_its_end, False, id="a 429 the walk waits out"),
+        pytest.param((told_to_wait(None),), to_its_end, False, id="a 429 that names none"),
+    ],
+)
+async def test_only_a_try_that_answered_ends_a_providers_wait_before_its_time(
+    script: tuple[StreamEvent | Exception, ...],
+    reading: Callable[[ChatProvider], Awaitable[None]],
+    ends_it: bool,
+    budgets: Budgets,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An answer, by the breaker's rule, ends it, with its line. Anything else leaves
+    the wait as it was, and says nothing of it."""
+    model = offered("watched", chat=Tries((told_to_wait(49),), script))
+    client = asked_through(model, budgets, GUESS, lambda: NOON)
+    await to_its_end(client)
+    caplog.clear()
+
+    await reading(client)
+
+    assert model.own_wait.left(NOON) == (None if ends_it else timedelta(seconds=49))
+    assert caplog.messages == ([over_line("watched")] if ends_it else [])
+
+
+async def test_an_answer_under_way_when_the_provider_said_to_wait_doesnt_end_that_wait(
+    budgets: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two requests at once: the first is taken, and writes; the second is refused, with
+    a wait of 49 s. The first one's answer ends after that, and was sent before it: the
+    wait stays, and nothing is said. The next answer, sent after it, ends it."""
+    model = offered(
+        "watched", chat=Tries((WORDS, FINISHED), (told_to_wait(49),), (WORDS, FINISHED))
+    )
+    client = asked_through(model, budgets, GUESS, lambda: NOON)
+
+    async with aclosing(client.stream(REQUEST)) as under_way:
+        first_word = await anext(under_way)
+        await to_its_end(client)  # refused meanwhile
+        caplog.clear()
+        rest = [event async for event in under_way]
+    left_after_the_first = model.own_wait.left(NOON)
+    said_after_the_first = list(caplog.messages)
+    await to_its_end(client)
+
+    assert (first_word, rest) == (WORDS, [FINISHED])
+    assert left_after_the_first == timedelta(seconds=49)
+    assert said_after_the_first == []
+    assert model.own_wait.left(NOON) is None
+    assert caplog.messages == [over_line("watched")]
+
+
+async def test_an_answer_with_no_wait_running_says_nothing_of_one(
+    budgets: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A model never told to wait, and one whose wait is over by the clock when it
+    answers."""
+    never_told = offered("never", chat=Says(WORDS, FINISHED))
+    told = offered("watched", chat=Tries((told_to_wait(49),), (WORDS, FINISHED)))
+    now = NOON
+    await to_its_end(asked_through(never_told, budgets, GUESS, lambda: now))
+    client = asked_through(told, budgets, GUESS, lambda: now)
+    await to_its_end(client)
+    now += timedelta(seconds=49)
+
+    await to_its_end(client)
+
+    assert caplog.messages == [waits_line("watched", 49)]
+
+
+@pytest.mark.parametrize(
+    ("words", "ends_it"), [((), False), ((WORDS,), True)], ids=["before a word", "after one"]
+)
+async def test_a_try_a_stop_cuts_off_ends_a_providers_wait_only_once_a_word_was_handed_on(
+    words: tuple[StreamEvent, ...],
+    ends_it: bool,
+    budgets: Budgets,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancelled through a scope, as a turn's halt does, while its model waits."""
+    chat = HeldAfter(*words)
+    model = offered("watched", chat=chat)
+    model.own_wait.told(NOON + timedelta(seconds=49))
+    stop = anyio.CancelScope()
+
+    async def turn() -> None:
+        with stop:
+            await read(asked_through(model, budgets, GUESS, lambda: NOON), into=[])
+
+    running = asyncio.create_task(turn())
+    await asyncio.wait_for(chat.waiting.wait(), 5)
+    stop.cancel()
+    await asyncio.wait_for(running, 5)
+
+    assert stop.cancelled_caught
+    assert model.own_wait.left(NOON) == (None if ends_it else timedelta(seconds=49))
+    assert caplog.messages == ([over_line("watched")] if ends_it else [])
+
+
+async def test_a_later_429_replaces_the_wait_kept_with_a_later_moment_or_a_sooner_one(
+    budgets: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The provider's newest word, from the end of the try that heard it."""
+    model = offered(
+        "watched", chat=Tries((told_to_wait(49),), (told_to_wait(300),), (told_to_wait(5),))
+    )
+    now = NOON
+    client = asked_through(model, budgets, GUESS, lambda: now)
+
+    await to_its_end(client)
+    now += timedelta(seconds=10)
+    await to_its_end(client)
+    later = model.own_wait.left(now)
+    await to_its_end(client)
+    sooner = model.own_wait.left(now)
+
+    assert (later, sooner) == (timedelta(seconds=300), timedelta(seconds=5))
+    assert caplog.messages == [
+        waits_line("watched", 49),
+        waits_line("watched", 300),
+        waits_line("watched", 5),
+    ]
+
+
+def told_at_noon(model: OfferedModel, seconds: float) -> OfferedModel:
+    """`model`, its provider having said at noon to wait `seconds`."""
+    model.own_wait.told(NOON + timedelta(seconds=seconds))
+    return model
+
+
+def own(seconds: float) -> Spent:
+    """What is said of a model whose provider's wait has `seconds` left."""
+    return Spent(timedelta(seconds=seconds), PROVIDERS_WAIT)
+
+
+def test_a_wait_is_said_in_whole_seconds_rounded_up_and_one_at_the_least() -> None:
+    """As the log and a refusal say it. No wait that is kept or looked up is nothing, so
+    the least shows only for one made by hand."""
+    assert [own(seconds).seconds for seconds in (0, 0.2, 1, 48.5, 49, 49.2)] == [
+        1,
+        1,
+        1,
+        49,
+        49,
+        50,
+    ]
+
+
+def test_a_ready_model_whose_provider_said_to_wait_has_no_budget_until_its_moment() -> None:
+    """Whether it has a budget or not, beside what the look said of the others, and
+    for what is left of the wait. A model that isn't ready is never among them."""
+    told, plain = told_at_noon(offered("told"), 49), offered("plain")
+    away = told_at_noon(offered("away", budget={"requests_a_day": 1}), 49)
+    chain = Chain(((told, READY), (plain, READY), (away, AWAY)))
+    looked = {"plain": SPENT}
+
+    found = chain.with_own_waits(looked, NOON)
+
+    assert found == {"plain": SPENT, "told": own(49)}
+    assert looked == {"plain": SPENT}  # what the look said is left as it was
+    assert chain.with_own_waits(NONE_SPENT, NOON + timedelta(seconds=40)) == {"told": own(9)}
+    assert chain.with_own_waits(NONE_SPENT, NOON + timedelta(seconds=49)) == {}
+    assert str(own(49).limit) == "its provider's own wait"
+    assert own(48.2).seconds == 49
+
+
+@pytest.mark.parametrize(
+    ("counted_for", "said"),
+    [(60, "the count's"), (30, "the provider's"), (49, "the provider's")],
+    ids=["the count's longer", "the count's shorter", "the two as long"],
+)
+def test_of_a_wait_by_the_count_and_the_providers_own_the_longer_is_said(
+    counted_for: int, said: str
+) -> None:
+    model = told_at_noon(offered("both", budget={"requests_a_minute": 1}), 49)
+    by_count = Spent(timedelta(seconds=counted_for), model_budget(model).buckets[0])
+
+    found = Chain(((model, READY),)).with_own_waits({"both": by_count}, NOON)
+
+    assert found == {"both": by_count if said == "the count's" else own(49)}
+
+
+async def test_two_models_that_are_one_model_on_one_provider_are_told_to_wait_together() -> None:
+    """A 429 through one name has the other asked last too. The same model's name on
+    another provider has a wait of its own, and so has each other model."""
+    text = (
+        GOOD
+        + AGAIN
+        + """
+[providers.lab2]
+kind = "openai-compatible"
+url = "http://lab2.internal:8000/v1"
+
+[models.elsewhere]
+title = "The other lab's large model"
+provider = "lab2"
+model = "fake-chat"
+context_window = 32768
+max_output_tokens = 4096
+"""
+    )
+
+    async with catalogs.build(parsed(text), ollama_url="http://ollama") as catalog:
+        standard, big, again, elsewhere = (
+            catalog.get(name) for name in ("standard", "big", "again", "elsewhere")
+        )
+
+    assert big.own_wait is again.own_wait
+    assert elsewhere.own_wait is not big.own_wait
+    assert standard.own_wait is not big.own_wait
+    assert standard.own_wait is not elsewhere.own_wait
+    told_at_noon(big, 49)
+    chain = Chain(((again, READY), (elsewhere, READY), (standard, READY)))
+    spent = chain.with_own_waits(NONE_SPENT, NOON)
+    assert spent == {"again": own(49)}
+    assert chain.asked_with(10, spent, NONE_FAILING) == Asked(
+        ((elsewhere, READY), (standard, READY), (again, READY)), (), ((again, own(49)),)
+    )
+
+
+def test_by_the_rule_a_model_told_to_wait_is_asked_last_and_alone_is_refused() -> None:
+    """As a model whose budget the look found spent: `asked_with` is as it was."""
+    told, other = told_at_noon(offered("told"), 49), offered("other")
+    both, alone = Chain(((told, READY), (other, READY))), Chain(((told, READY),))
+
+    assert both.asked_with(1000, both.with_own_waits(NONE_SPENT, NOON), NONE_FAILING) == Asked(
+        ((other, READY), (told, READY)), (), ((told, own(49)),)
+    )
+    assert alone.asked_with(1000, alone.with_own_waits(NONE_SPENT, NOON), NONE_FAILING) == Asked(
+        (), (), ((told, own(49)),), refused=own(49)
+    )
 
 
 # --- How many answers a server writes at once -----------------------------------------

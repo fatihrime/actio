@@ -48,9 +48,10 @@ another's place, never what an error said.
 A model whose provider's plan limits what this installation sends to it has a budget,
 and what each request to it takes is counted there, a second try's too, without ever
 failing the answer (`actio.catalog.counted`, ADR 0030). And each try of a model is
-recorded in its breaker, which says whether it keeps failing: the order the turn asks
-its models in was decided from that when it started (`actio.catalog.asked_through`,
-ADR 0031).
+recorded in its breaker, which says whether it keeps failing, and a wait its provider
+names is noted, which counts as its budget spent until it is over: the order the turn
+asks its models in was decided from those when it started
+(`actio.catalog.asked_through`, ADR 0030, ADR 0031).
 
 Recording a turn also settles what it cost. Credits were held for it before it started
 (`actio.usage.limits`). What it used goes into the usage ledger in the transaction that
@@ -342,9 +343,10 @@ async def answer(
     failed, the turn records the error `actio_llm.Walk` raises.
 
     Each model is asked through a client that records each try of it in its breaker,
-    and, for a model that has a budget, counts in `budgets` what each of its requests
-    takes, from `tokens`, the guess at the prompt that the turn was started with, each
-    by `clock` (`actio.catalog.asked_through`, ADR 0030, ADR 0031).
+    notes a wait its provider names, and, for a model that has a budget, counts in
+    `budgets` what each of its requests takes, from `tokens`, the guess at the prompt
+    that the turn was started with, each by `clock` (`actio.catalog.asked_through`, ADR
+    0030, ADR 0031).
 
     The turn was started before (`turns.ask`), and `reserved` holds the credits it may
     cost. This writes its outcome, and what it used, in a transaction of its own, from

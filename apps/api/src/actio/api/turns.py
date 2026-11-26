@@ -243,27 +243,30 @@ async def start_turn(
     # is held against, and what a request is first counted as in a model's budget.
     tokens = prompt_tokens(messages)
     # What the providers' plans have left for the request, for each ready model that has
-    # a budget (ADR 0030). A look that can't be had refuses nothing, and has nobody asked
-    # last for a budget: the log says so below, with the turn's id.
+    # a budget (ADR 0030). A look that can't be had refuses nothing by itself, and has
+    # nobody asked last for a budget's count: the log says so below, with the turn's id.
     try:
         spent = await chain.look(resources.budgets, tokens, now=now)
         unread = None
     except BudgetsUnavailableError as error:
         spent, unread = {}, type(error.__cause__).__name__
+    # And each ready model whose provider said to wait, until that is over: it has no
+    # budget left meanwhile, whatever the look said, or whether it could be had.
+    spent = chain.with_own_waits(spent, now)
     # Which ready models keep failing, by their breakers, now (ADR 0031): decided here
     # once, and never again while the turn runs.
     failing = chain.failing(now)
     # Who is asked, in which order: a ready model whose room is smaller than the guess is
-    # passed over while another has room, and one whose budget has nothing left for the
-    # request is asked after those that have some. When no model with room has budget,
-    # the turn is refused for now; when none has room, every one is asked: a guess never
-    # refuses a turn. Within each of those, one that keeps failing is asked after those
-    # that don't, which refuses nothing.
+    # passed over while another has room, and one that has no budget left for the
+    # request, by the look or by its provider's word, is asked after those that have
+    # some. When no model with room has budget, the turn is refused for now; when none
+    # has room, every one is asked: a guess never refuses a turn. Within each of those,
+    # one that keeps failing is asked after those that don't, which refuses nothing.
     asked = chain.asked_with(tokens, spent, failing)
     if asked.refused is not None:
         # Before anything is committed or held: nothing of the turn is left behind, and
         # the credits are never touched. By the conversation's id: the turn's row is
-        # rolled back. Names and numbers from the models file alone.
+        # rolled back. Names and numbers alone.
         logger.warning(
             "conversation %s: no model has budget left for the request, which is refused"
             " for about %d s: %s",
@@ -539,10 +542,10 @@ def _too_many_answers(running: int, at_once: int) -> Problem:
 
 def _no_budget(model: str, refused: Spent) -> Problem:
     """The 429 for a turn that is refused for now (`Asked.refused`): some ready models
-    have room for it, and none of those has budget left for it. It says how long until
-    one has, by the look that refused it, and the model asked, as the 503 names it. No
-    `window`: it is no usage limit of the account's, and the provider's limit stays in
-    the log."""
+    have room for it, and none of those has budget left for it, by the look or by its
+    provider's own wait. It says how long until one has, by what refused it, and the
+    model asked, as the 503 names it. No `window`: it is no usage limit of the
+    account's, and the provider's limit stays in the log."""
     seconds = refused.seconds
     return Problem(
         429,
@@ -556,7 +559,8 @@ def _no_budget(model: str, refused: Spent) -> Problem:
 
 def _waits(asked: Asked) -> str:
     """Each model without budget left for the request, in the chain's order, with its
-    wait and its limit in words: names and numbers from the models file alone."""
+    wait and its limit in words, a provider's own wait among them: names and numbers
+    alone."""
     return ", ".join(
         f"{model.name} for about {short.seconds} s ({short.limit})" for model, short in asked.spent
     )

@@ -1990,6 +1990,135 @@ async def test_a_title_asked_while_one_request_tries_its_model_asks_the_stand_in
     ]
 
 
+def asked_after_its_own_wait(conversation_id: uuid.UUID, model: str) -> tuple[int, str]:
+    """The job's line for a model whose provider said to wait 49 s, asked after those
+    that have budget."""
+    return (
+        logging.WARNING,
+        f"conversation {conversation_id}: model {model} has no budget left for the request"
+        " for about 49 s (its provider's own wait): it is asked after those that have",
+    )
+
+
+async def test_a_model_a_turn_found_told_to_wait_is_asked_after_its_stand_in_for_a_title(
+    db: AsyncSession,
+    settings: Settings,
+    migrated: str,
+    clock: Any,
+    lineup: Any,
+    start_app: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A question through the API meets the named model's 429, which names 49 s, and is
+    answered by its stand-in. A title asked of the same catalog then is asked of the
+    stand-in first, and the log says why, by the conversation's id."""
+    assert migrated
+    named_one = lineup.add(
+        "standard", RateLimitedError(f"429: {QUESTION}", retry_after_s=49), then=["second"]
+    )
+    stand_in = lineup.add("second", TextDelta("Fixing a flat tyre"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    message = {"id": str(new_id()), "parts": [{"type": "text", "text": "Hello?"}]}
+    asking = browser.post(f"/api/conversations/{new_id()}/turns", json={"message": message})
+    assert (await asyncio.wait_for(asking, PATIENCE_S)).status_code == 200
+    begun = await started(db)
+    await ended(db, begun)
+
+    async with open_resources(settings) as resources:
+        await writes(resources, catalog, begun, clock)
+
+    assert (len(named_one.requests), len(stand_in.requests)) == (1, 2)
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert said(caplog) == [
+        asked_after_its_own_wait(begun.conversation.id, "standard"),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
+    ]
+    assert "flat tyre on my bike" not in caplog.text
+
+
+async def test_a_title_whose_only_model_was_told_to_wait_asks_nothing_and_is_asked_again(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    queue_books: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No model is asked, `NotWrittenError` carries the line's text, and the job is put
+    back, by its own wait."""
+    named_one = lineup.add("standard", TextDelta("Never"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    catalog.get("standard").own_wait.told(clock.now + timedelta(seconds=49))
+    begun = await started(db)
+    await ended(db, begun)
+
+    async with open_resources(settings) as resources:
+        with pytest.raises(titles.NotWrittenError) as raised:
+            await writes(resources, catalog, begun, clock)
+    await run_the_job(settings, catalog, clock, work_through)
+
+    line = (
+        f"conversation {begun.conversation.id}: no title, no model has budget left for the"
+        " request: standard for about 49 s (its provider's own wait)"
+    )
+    assert str(raised.value) == line
+    assert named_one.requests == []
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert await queue_books.due() == put_back(1, 30)
+    assert said(caplog) == [(logging.WARNING, line)] * 2
+
+
+async def test_a_titles_own_429_is_kept_for_the_turns_of_the_same_catalog(
+    db: AsyncSession,
+    settings: Settings,
+    migrated: str,
+    clock: Any,
+    lineup: Any,
+    start_app: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The title's model answers 429 with 49 s, and its stand-in writes the title. A
+    question through the API right after is asked of the stand-in first."""
+    assert migrated
+    named_one = lineup.add(
+        "standard", RateLimitedError(f"429: {QUESTION}", retry_after_s=49), then=["second"]
+    )
+    stand_in = lineup.add("second", TextDelta("Fixing a flat tyre"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+    async with open_resources(settings) as resources:
+        await writes(resources, catalog, begun, clock)
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    conversation_id = new_id()
+
+    message = {"id": str(new_id()), "parts": [{"type": "text", "text": "Hello?"}]}
+    asking = browser.post(f"/api/conversations/{conversation_id}/turns", json={"message": message})
+    assert (await asyncio.wait_for(asking, PATIENCE_S)).status_code == 200
+
+    assert (len(named_one.requests), len(stand_in.requests)) == (1, 2)
+    read = (await browser.get(f"/api/conversations/{conversation_id}")).json()
+    turn_id = read["messages"][-1]["metadata"]["turn"]["id"]
+    assert [message for message in caplog.messages if message.startswith(f"turn {turn_id}: ")] == [
+        f"turn {turn_id}: model standard has no budget left for the request for about 49 s"
+        " (its provider's own wait): it is asked after those that have",
+        f"turn {turn_id}: model second answered in place of standard",
+    ]
+    assert (
+        "model standard: its provider said to wait 49 s, and until then it counts as having no"
+        " budget left"
+    ) in caplog.messages
+    assert "flat tyre on my bike" not in caplog.text
+
+
 async def no_budget_left(settings: Settings, catalog: Catalog, *names: str) -> None:
     """Leave nothing in the budgets of the models called `names`, at noon, under the
     keys the worker and the API count under."""
@@ -2226,6 +2355,48 @@ async def test_budgets_that_cant_be_read_or_counted_keep_no_title_from_being_wri
         "model standard: what a request to it took of its budget couldn't be counted"
         " (ConnectionError)"
     ) in caplog.messages
+
+
+async def test_with_the_budgets_unreadable_a_providers_own_wait_still_orders_a_title(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Valkey for the budgets is away, and the named model's provider said to wait: each
+    model is taken to have budget left by its count, and that one is asked after its
+    stand-in all the same, which writes the title. The log says both, in that order."""
+    named_one = lineup.add(
+        "standard", TextDelta("Never"), DONE, then=["second"], budget={"requests_a_day": 1000}
+    )
+    lineup.add("second", TextDelta("Fixing a flat tyre"), DONE, budget={"requests_a_day": 1000})
+    catalog = lineup.catalog(titles="standard")
+    catalog.get("standard").own_wait.told(clock.now + timedelta(seconds=49))
+    begun = await started(db)
+    await ended(db, begun)
+
+    async with (
+        open_resources(settings) as resources,
+        Valkey.from_url("valkey://127.0.0.1:1/0") as nowhere,  # nothing listens there
+        asyncio.timeout(PATIENCE_S),
+    ):
+        await writes(replace(resources, budgets=Budgets(nowhere)), catalog, begun, clock)
+
+    assert named_one.requests == []
+    assert (await named(db, begun.conversation.id))[:2] == ("Fixing a flat tyre", "model")
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: the models' budgets couldn't be read"
+            " (ConnectionError), and each is taken to have some left",
+        ),
+        asked_after_its_own_wait(begun.conversation.id, "standard"),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
+    ]
 
 
 async def test_what_a_titles_request_takes_is_dated_by_the_workers_clock_as_it_goes(
