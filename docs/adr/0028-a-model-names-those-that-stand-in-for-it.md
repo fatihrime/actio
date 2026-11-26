@@ -528,3 +528,138 @@ The decision asked every ready model of a chain, in order, and said of the listi
 ### 2026-11-26: a server's longer wait is kept for the turns after
 
 "Known, and left" in the revision "a model is asked once more, and a server says how long it may take to begin" said that a 429 asking for more than 2 s is not waited for. That is still so: the walk moves on to the next model at once, and asks once more only after a wait of `WAITS_AT_MOST_S` or less. What is new is that a longer wait is kept, for that model on its provider, until it is over, a day at the most, and the turns after it count the model as one with no budget left: asked after the others of its chain, or refused for now when none with room has budget ([ADR 0030](0030-the-providers-budgets-are-counted.md), revision "a provider's own wait is kept, and until it is over its model has no budget").
+
+### 2026-11-26: a status that is known isn't waited for
+
+The decision left it under "Known, and left": "a server's health is its status, asked at most every 15 seconds, until a circuit breaker says more. A turn's start, and a warm-up, wait for the status of every model of the chain, asked at the same time: a stand-in whose server doesn't answer the connection holds each of them for the catalog's 2 seconds, once in those 15". [ADR 0031](0031-a-model-that-keeps-failing-is-asked-last.md) built the breaker, and said under its own "Known, and left" that the status check was as it was, the 2 seconds a hung stand-in's server costs a turn's start included: "a later step". This is that step.
+
+What a status costs was measured before it, on the running stack and in process (see Measured). The example's chain, `groq-large`, then `gemini-lite`, then the local `standard`, asks two cloud providers for their lists of models before a turn starts, and waits for both: asked 15 seconds or more after the question before, the response began after 343 to 1,883 ms, and after 42 to 84 ms when asked 3 to 5 seconds after it. The answer's first piece came 150 to 480 ms after the response began. A stand-in whose server never answers the connection held each start that came 20 seconds or more after the question before for about 2.07 s. And requests at once each asked for themselves: five `chain_status` calls started in the same moment each waited the whole 2 seconds at an address nothing routes to; at a server that takes the connection and says nothing, which counted them, five such calls took five connections, and each waited 3.01 s; and one started a second into another's wait waited its own whole time, not what was left.
+
+**How a status is used:**
+
+1. **As it was:** reused for 15 seconds, and asked and waited for after that.
+    - Con: what is measured above, at every pause of a conversation longer than 15 seconds, and 2 seconds at every such start while a stand-in's server hangs.
+2. **Reused longer, a minute.**
+    - Pro: fewer waits.
+    - Con: none of them shorter. And a model pulled, or a server started, shows a minute late, where the page says it notices.
+3. **Every server asked on a timer,** whether or not anyone asks.
+    - Pro: no request ever waits.
+    - Con: an idle installation questions its cloud providers for as long as it runs, and the catalog's "nothing connects until a model is used" goes.
+4. **No status before a turn at all,** left to the walk and the breaker.
+    - Con: a local model that isn't downloaded would fail a turn, where today the 503 and the page say what to do. And whether an Ollama model can reason is its server's to say, which a turn needs before it starts.
+5. **A short wait for the new answer, 50 ms, and then what is known.**
+    - Pro: a local server answers in 4 to 17 ms, so its status would always be new; a cloud server's, or a hung one's, would be waited for 50 ms at the most.
+    - Con: every question to a cloud chain, the ones this step is for, would wait those 50 ms. And a time limit would decide what a test sees.
+6. **An old status used, but an old `ready` that decides alone asked and waited for,** as a chain's only ready model's.
+    - Pro: a lone model whose server went away would be refused with the 503, as before, where now its turn fails once.
+    - Con: a lone cloud model, the commonest way to use one, would wait for its provider's list at every question again: 232 to 949 ms at Groq when it was measured.
+7. **Used while it is asked again behind the request, nothing refused by an old status, and nothing older than five minutes used, by a turn's start alone.** Chosen.
+    - Pro: a conversation whose questions come less than five minutes apart doesn't wait for a status while a model of its chain was last seen ready, and a hung stand-in's server holds no such question.
+    - Pro: a model that isn't ready is never refused by what its server said a while ago: it is asked, as before.
+    - Pro: what a server says now still decides what the list of models says, whether a warm-up loads a model, and whether a title is asked for: nobody waits for those (below).
+    - Con: a `ready` up to five minutes old may be wrong, and costs one turn (below, "Known, and left").
+
+**Who uses an old status: a turn's start alone.** The rule was first built for all four callers of a status. Three of them nobody waits for, and what each says or does rests on what a server says now:
+
+- **the list of models:** the page reads it once when it loads, and again every 5 seconds only while its model can't answer, and shows its notice by it: "… can't be reached. Start Ollama on the machine that runs Actio. This page notices when it answers." By an old `ready`, a page loaded within five minutes of the last ask, after the model's server went away, was told `ready`: no notice, and nothing read the list again until the window had the focus back. Before the step the list said what the server said within 15 seconds. And the page is painted before the list, and a question can be sent without it;
+- **the warm-up:** the page sends it and reads nothing of its answer. Whether a load is started has to rest on what the servers say now: by an old `unreachable` of the asked model, with a stand-in ready, it answered 204 and loaded nothing for a model that was back;
+- **the title job:** a job, which nobody waits for.
+
+Their asks are a turn's too, since one ask about a model is shared: a question sent within 15 seconds of the page reading the list, or of the first letter written into the box (the warm-up), finds every status fresh, and waits for nothing. A turn's start is what a person waits for, and its walk moves on to the next model when an old `ready` was wrong.
+
+**Why five minutes:** long enough for a conversation's pace, an answer read and a question written, so that a conversation under way doesn't wait; as long as Ollama keeps a model loaded after it was last asked ([ADR 0026](0026-models-loaded-ahead-of-the-first-question.md)); and what an old status costs is counted in events, not in time: a status that turns out wrong costs one request, whatever its age, and the ask behind that request puts it right for the requests after.
+
+**The rule, for a turn's start.** Ages are counted by the `now` each caller gives, as before: the catalog reads no clock. A status is dated by the `now` of the request that had it asked, as before, also when its answer comes later. The list of models, the warm-up and the title job follow rules 1, 4, 5 and 6, with every status older than 15 seconds asked and waited for, as before the step.
+
+1. **Younger than `STATUS_LIFETIME`, 15 seconds:** reused, and nobody is asked. As before.
+2. **Older than that, and younger than `STATUS_USED_FOR`, five minutes:** still used by the turn's start, without waiting, and its server is asked again behind the request. The answer replaces what is known when it comes, for the requests after.
+3. **But nothing is refused by an old status.** When, by what is known and what the request waited for anyway, no model of the chain is ready, and one or more of the statuses used were old, those are asked again and waited for, at the same time, and the chain is as their answers say. So a chain's only model that was `unreachable` half a minute ago is asked and waited for, exactly as before; and a model that isn't ready is passed over by an old status only while another model of the chain is ready.
+4. **Nothing known, or five minutes old or older:** asked and waited for. As before.
+5. **One ask at a time for a model.** A request that needs a status whose ask is under way starts none: it uses what is known, or waits for that same ask. So requests at once share one call to the server.
+6. **Every status that isn't fresh is asked for at once,** when the request comes, those waited for and those not, at the same time: a request that turns out to need the old ones too has lost no time.
+
+**What changed** (`actio.catalog`):
+
+- **Two ways, decided in one place** (`_known`, told which):
+    - **`Catalog.chain_status`** is what it was before the step, for its callers: every status of the chain older than 15 seconds asked and waited for, at the same time. So is `Catalog.status`, for a model alone, and **`Catalog.chains`**, every model's chain at the same time, for the list of models, in place of `Catalog.statuses`, which nothing else used: a model several chains need is asked once. The warm-up and the title job call `chain_status`, as before, and so does any new caller unless it says otherwise;
+    - **`Catalog.chain_as_known`** is the rule above, for a turn's start, its one caller (`actio.api.turns.start_turn`). Its name says what sets it apart from `chain_status`, which asks; its description says who may call it: a request that a person waits for, whose models are then asked through the walk.
+- **The asks are shared by the two ways.** The catalog keeps each model's last ask, under way or ended, as it keeps each model's last load, and starts another once it has ended. One that failed in Actio's own code isn't kept: the error a request was raised holds that request's frames, and what they hold of it, and would stay until the model was asked about again.
+- **An ask runs in a task of the catalog's,** `status-<model>`. A request waits for its answer through a shield: a waiter's cancellation never cancels an ask, since others may be waiting for it and its answer is worth having. The title job cuts its wait with its 30 seconds, and the ask goes on.
+- **An ask that nobody waits for ends where it is.** `_ask` turns an `LLMError` into a status, as before. Anything else is a mistake of Actio's own: it is raised to each request that waits for the ask, as before, with the trace it had when the ask caught it, as `Future.result()` raises; with none waiting, the log says it, with its trace, by the model's name, as for a load ahead: `model …: asking its server about it failed`. What was known stays, and the next request starts another ask. The task never ends with an exception. A request that waits for several asks waits for all of them, and is raised the first mistake in its chain's order; the log says each other one, with its trace, so that none is said nowhere.
+- **The list's route,** its description and its `status` member are as they were; `apps/api/openapi.json` didn't change.
+- **At a stop,** the asks under way are cancelled and waited for where loads were: before the providers' clients are closed in `build`, and at the app's shutdown, whoever opened its catalog. One call does both, `Catalog.stop_tasks`, the catalog's own tasks of every kind, so that no place forgets one; `stop_loading` stays, as its part that stops loads ([ADR 0026](0026-models-loaded-ahead-of-the-first-question.md)). A request still waiting for an ask then is cancelled with it.
+- **No new line in the log for a status used old.** The lines a turn and a title write of a model passed over are as they were: a model passed over by an old status is said as one passed over by a fresh one.
+
+**Unchanged:** `STATUS_LIFETIME`, the catalog's `TIMEOUTS`, `_ask` and what it asks the servers; `ModelStatus`, `Chain` and its rules (`asked_with`, `look`, `with_own_waits`, `failing`); the breakers, the providers' waits, the budgets and the gates; `load_ahead`; what the list of models says, and when; the warm-up and the title job, but that they share their asks; the 503 and its `model_status`, the 422 for reasoning, the 204 of a warm-up; what a turn records and streams; the routes' paths, shapes and descriptions; the tables; `actio.core`; `packages/llm`; the page. No migration, no setting, no key of the models file, no dependency.
+
+**Tests:**
+
+- **the catalog's** (`test_catalog.py`), the rule through a turn's start's method:
+    - through `build`, with a server whose answer is held: a `ready` status 15 seconds old given at once to three requests, one ask behind them, kept from the `now` that started it for a quarter of a minute, and asked again behind the first request after, not after a later request's `now`;
+    - in the same moment, `chain_status`, `status` and `chains` waiting for an old `ready`, the servers' answers held, while a turn's start is given it at once: one call to each server for all of them;
+    - two requests at once given an old `ready` of five minutes less a moment at once, and waiting for one of five minutes and for one nothing is known of, the server asked once; a chain whose asked model was last `unreachable` or `missing` and its stand-in ready, given at once to two requests, the asked one passed over, and ready at the request after;
+    - chains whose statuses are of several ages: a fresh `ready` beside an old one that isn't ready, nobody waited for; nothing known of the asked model beside an old stand-in, both asked at once, and the request done once the asked model answers `ready`; a chain of three, a fresh model that isn't ready, an old one and one nothing is known of, the last two asked at once, the request waiting for the last, then for the old one's ask already under way; and an old `ready` whose ask answers `unreachable` while the request waits for another, the chain as it answered; a chain none of whose models is known ready, its two old ones asked again and held at the same time, and the one asked a moment before not asked again;
+    - the asks: a request that needs a status asked behind another, waiting for that same ask; a request cancelled while it waits, alone and beside another, the ask going on and its answer kept; an ask behind a request that fails in Actio's own code, logged with its trace, its task ended with no exception, what was known still used, and asked again at the next request; the same raised to two requests that wait for it, from one ask, and nothing logged; one that fails in the very step in which its one waiter was cancelled, logged; a request waiting for three asks, two of which fail, ended once all three have, raised the first mistake in its chain's order, and the other logged with its trace; two requests raised one mistake, each with the ask's frames and its own in the trace, and never the other's; the error a request was raised gone once the request is over, the catalog keeping nothing of it; `build`'s exit cancelling an ask under way while the client is still open, with no task left; and every chain at once for the list, a model in three chains asked once. The tests of what `statuses` held ask `chains`;
+- **the list's** (`test_catalog_api.py`): a model whose server went away 20 s ago listed `unreachable` by two lists that wait, through one ask, the server's answer held; a lone model last seen `unreachable` or `missing` and back, listed `ready`; a model listed through its chain waiting for its own server and its stand-in's; the list waiting and saying `unreachable` while a question asked in that moment starts its turn on the old `ready`, the two sharing one ask; and the app's shutdown, with a catalog it was handed, cancelling an ask under way while the client is still open;
+- **a turn's** (`test_turns_statuses_api.py`): a question 10 s after a look at the list, or a warm-up, with every status fresh and nobody asked; two questions answered while a stand-in's server holds its answer; a chain's only model last seen `unreachable`, back now, asked and answering; one last seen `ready` whose server has gone, two turns that fail while its answer is held, and the 503 at the next question; and the 503 of a chain none of whose models is ready, by what the servers say now;
+- **the warm-up's** (`test_warm_up_api.py`): a model last seen `unreachable` 20 s ago and back now, with a stand-in ready, asked again and waited for, and loaded; and a lone model last seen not ready asked and waited for, and loaded;
+- **the title job's** (`test_titles.py`): a stand-in's server holding its answer holds the title until its time limit, and no model is asked. The test of a model that isn't ready for a title replaces the catalog's question to the server (`_ask`), where it replaced `status`.
+
+The lineup the API's tests offer their models through can change what a model's server says while a test runs (`Lineup.becomes`), hold its answer (`Lineup.hold`), and name each ask (`Lineup.asked`); `asks_ended` waits for the asks that run behind a request.
+
+**Consequences:**
+
+- **Easier:**
+    - a question asked less than five minutes after the last ask about its chain no longer waits for its models' servers, while one of them was last seen ready;
+    - a stand-in whose server hangs holds no such start;
+    - requests at once share one call to a server, a question's with the list's, the warm-up's or a title's.
+- **Harder:**
+    - **whether a model is ready can be up to five minutes old at a turn's start,** where it was 15 seconds at most;
+    - **the catalog runs tasks of its own behind the requests,** which a stop has to end.
+- **Known, and left** (worked out, not seen, unless it says so):
+    - **a `ready` up to five minutes old may be wrong,** and then one turn tries a server that has gone or lost its model. The walk moves on to a stand-in; a chain's only model fails that turn where a 503 would have refused it, once, and the ask behind it tells the next request. Seen in the tests: such a turn is `failed`, `model_unavailable` for a server that refuses the connection, after its second try, costs nothing and names no model that answered, and the next question is refused with the 503 and `unreachable`. Every question that starts while that ask is under way fails so too: two did in the test. A model that its server lost instead would fail as `model_missing`;
+    - **a model that came back is passed over once more** by a turn while another of its chain answers, and a turn that asks for reasoning is then refused by a stand-in that can't reason, once;
+    - **an ask is dated by the request that started it,** so an answer that took 3 s is reused for 12; and an answer waited for, from a server that answers slowly, can be older than 15 seconds when it is used;
+    - **two models on one provider that speaks OpenAI's API each ask for its list:** one ask for a provider would halve the calls;
+    - **the worker's statuses are its own under `--role worker`;** under `--role all` the title job shares the app's catalog, its statuses and its asks;
+    - **an ask that fails in Actio's own code keeps nothing,** so while the status it would have replaced stays old, every turn's start that finds it so starts another ask, and each logs its trace: as many lines as questions, until the status is five minutes old, or another caller waits, and is told;
+    - **a mistake of Actio's own in an ask can be both logged and raised:** a chain whose asked model nothing is known of, and whose stand-in's status is old and not ready. The stand-in's ask fails while the request waits for the asked model alone, so the log says it; then no model is ready, the request waits for the stand-in's ask, which has ended, and is raised the same mistake;
+    - **an ask can be started after `stop_tasks`,** as a load can, by a request that comes later. The shutdown's order leaves no such request: `stop_tasks` runs after the turns are drained and the worker inside has ended, and `build` calls it again before its clients close. A request still waiting for an ask when the catalog is stopped is cancelled with it; none was seen;
+    - **the 15 seconds and the five minutes are constants,** not settings.
+- **How to reverse it:** `STATUS_USED_FOR` equal to `STATUS_LIFETIME` has a turn's start ask and wait for every status that isn't fresh, as before, and keeps the shared asks. In the code: `chain_as_known` back to `chain_status` in `actio.api.turns.start_turn`; `_known`, `_asked_about`, `_answers`, `_asked`, `_Asking` and `_Mistake` in `actio.catalog`, back to one `status` that asks and waits; `chains` back to `statuses` in `actio.api.catalog.list_models`; `stop_tasks` back to `stop_loading` in `build` and `actio.app`; the lineup's `becomes`, `hold`, `asked` and `asks_ended`.
+
+#### Measured
+
+**Before,** on 2026-11-26, on the tree at `874303f`. On the running stack (`make up`), through its API, as one guest, each question in a conversation of its own. "The response began" is the time from sending `POST /api/conversations/{id}/turns` to its `200` and headers: everything a turn's start waits for is before them.
+
+- **The example's chain** (`config/examples/free-cloud/`, asked `groq-large`, then `gemini-lite`, then the local `standard`): asked 15 s or more after the question before, the response began after 343, 375, 403 and 1,883 ms; asked 3 to 5 s after it, after 42, 49 and 84 ms. The answer's first piece came 150 to 480 ms after the response began. `GET /api/models` took 447 ms and 308 ms.
+- **In process,** `Catalog.chain_status("groq-large")` with nothing reused, six rounds: 221 to 452 ms, median 280 ms; again 5 s later 0.1 to 0.4 ms. Each server's call alone: Groq's list 232 to 949 ms (median 251), the Gemini API's 127 to 1,562 ms (median 146), Ollama's 4 to 17 ms.
+- **A stand-in whose server never answers the connection** (an address nothing routes to; the local model asked): the response began after 2,063, 2,067 and 2,071 ms when asked 20 s or more after the last question, and after 30, 32 and 49 ms when asked sooner. `GET /api/models` 2,026 ms. In process, also a server that takes the connection and says nothing: 3.00 s (the 3 s of `TIMEOUTS.request_s`), and one that refuses the connection: 0.01 to 0.03 s.
+- **Requests at once each asked for themselves:** five `chain_status` calls started in the same moment each waited the full 2.00 s at an address nothing routes to, where connections can't be counted; at a server that takes the connection and says nothing, which counted them, five such calls took five connections, and each waited 3.01 s. And one started a second into another's wait waited 2.00 s of its own (3.00 s at the silent server), not what was left.
+
+**After,** the same day, on the tree as it was committed: the same stack built from it, the same questions, the same scripts.
+
+- **The example's chain:** asked 20 s or more after the question before, the response began after 67, 79, 89 and 95 ms, where it had taken 343 to 1,883 ms; asked 3 s after it, after 36 and 73 ms, and after 48 ms for the first question, right after the list was read. The answer's first piece came 150 to 1,435 ms after the response began: Groq's own pace that hour. `GET /api/models`, which asks and waits as before, took 616 ms and 427 ms.
+- **In process,** a turn's start's way, `Catalog.chain_as_known("groq-large")`, six rounds, each status 16 to 48 s old: 0 ms each time. Each server's call alone, asked and waited for, took 216 to 579 ms at Groq (median 221), 123 to 340 ms at the Gemini API (median 132) and 5 to 8 ms at Ollama that hour.
+- **A stand-in whose server never answers the connection:** the response began after 33, 36, 53 and 63 ms when asked 20 s or more after the last question, where it had taken 2,063 to 2,071 ms, and after 35, 40 and 48 ms when asked sooner. `GET /api/models` took 2,032 ms with nothing known and 2,044 ms when read 20 s after the last ask, as before; read 2 s after a question, 1,525 ms: what was left of the ask under way behind that question, which it shared.
+- **Requests at once, in process:** by a turn's start's way, five started in the same moment, a minute after the last ask, took 0.00 s each. Five started with nothing younger than five minutes known each waited 2.00 s, and 3.01 s at the silent server, for one ask: one connection, where there had been five. One started a second into another's wait waited what was left, 1.00 s, and 2.00 s at the silent server. The whole run took 3 connections at the silent server, where it had taken 15; by `chain_status`, the list's way, it took 6.
+- **A chain's only model whose server goes away,** seen on the stack, with the repository's fake model on the machine as the model asked, stopped and started by hand:
+
+    | | Before the step | After it |
+    |---|---|---|
+    | A question 20 s after the server stopped | Refused with the 503, `unreachable`, after 16 ms | Its turn starts, after 33 ms, and fails, `model_unavailable`, its model asked once more first |
+    | A question 2 s after that one | Refused with the 503, after 11 ms | Refused with the 503, `unreachable`, after 20 ms; the list says `unreachable` |
+    | A question 20 s after the server is back | Asked, and answered | Asked and waited for, and answered |
+    | The list read 20 s after the server stopped, as by a page that loads, and a question 3 s later | Not run then: the list asked and waited, as it does now | The list says `unreachable`, after 49 ms; the question is refused with the 503 after 8 ms |
+
+The looks took 14 short questions of Groq's `openai/gpt-oss-120b`, seven before and seven after, and the two cloud providers' lists of models some dozens of times; nothing was refused.
+
+**Mistakes planted on purpose,** one at a time in a scratch copy of the tree, with the tests that should notice each:
+
+- **On the first build, 27, of which 23 failed a test.** The four that failed nothing:
+    - **an ask that had ended taken for one under way,** and **an ask that never took itself off the list of those under way:** two lines that did one job. One came out: the catalog keeps each model's last ask, and looks whether it has ended;
+    - **a mistake of Actio's own not raised to the request that waits:** the test gathered its requests in a way that gives a returned error and a raised one alike. It reads what each request raised now;
+    - **a waiter that was cancelled still counted as waiting:** it differs only when the ask fails in the very step in which its waiter was cancelled, which no test brought about. One does now.
+- **The review, by reading, found three wrong versions of the rule that every test passed,** since the statuses of each test's chain were of one age: whether a model is ready judged among the old statuses alone, the old ones asked only once the others had answered, and an old status as it was before a wait used after it. Four tests with chains of several ages were written for them, before any of the three was planted.
+- **On the second build, 37, with those three: all failed a test.**
+- **On the tree as committed, 41: all failed a test.** The four more are what the second review brought, each with a test written beside its fix: a request raised an error with another request's frames in its trace, an ask that failed kept as its model's last one, and a second mistake among a request's asks said nowhere, or logged without its trace.

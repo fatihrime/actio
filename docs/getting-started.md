@@ -233,7 +233,7 @@ Everyone behind one router shares an address. With Docker Desktop, every browser
 :   A guest's conversations go with the guest's session, which lasts a day and lives in one browser. The address of a guest's conversation opens nowhere else, and not after that day.
 
 **A model is `missing` or `unreachable`**
-:   The chat says so above the message box, `GET /api/models` says so, and `make smoke` notes it. `missing`: Ollama runs but hasn't got the model; `ollama pull` it, by the name in `config/models.toml`. `unreachable`: Ollama isn't running, or isn't where the API looks. If it runs on another machine, set `ACTIO_OLLAMA_URL` in `.env`. It takes up to 15 seconds for a change to show.
+:   The chat says so above the message box, `GET /api/models` says so, and `make smoke` notes it. `missing`: Ollama runs but hasn't got the model; `ollama pull` it, by the name in `config/models.toml`. `unreachable`: Ollama isn't running, or isn't where the API looks. If it runs on another machine, set `ACTIO_OLLAMA_URL` in `.env`. It takes up to 15 seconds for a change to show. A question asked within five minutes of the last time Actio asked the server about its model, for a question or for the page, may still be sent to a model whose server has stopped since, once: a model that stands in for it answers, or the answer fails, and the question after that is told.
 
 **The API doesn't start, and says `actio: … models.toml: …` or `actio: … plans.toml: …`**
 :   One of the two files in `config/` has a mistake, and the line says which. Fix it and start again. A model that is offered in `models.toml` and has no price in `plans.toml` is such a mistake.
