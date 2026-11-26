@@ -626,6 +626,53 @@ def test_a_mistake_in_the_file_is_named(tmp_path: Path, mistake: str) -> None:
     assert fault in str(failure.value)
 
 
+def test_a_mistake_in_toml_says_where_in_the_file_it_is(tmp_path: Path) -> None:
+    path = written(tmp_path, GOOD.replace('default = "standard"', "default = "))
+    [line] = [
+        number
+        for number, text in enumerate(path.read_text().splitlines(), start=1)
+        if text == "default = "
+    ]
+
+    with pytest.raises(CatalogError) as failure:
+        read_file(path)
+
+    assert f"line {line}, column" in str(failure.value)
+
+
+# What the TOML parser gives up on in a way of its own, and not as a mistake in TOML:
+# each was let out as the parser raised it, and stopped the API with a trace.
+GIVEN_UP_ON = {
+    "bytes that aren't UTF-8": ("# caf\xe9\n".encode("latin-1") + GOOD.encode(), "UTF-8"),
+    "a whole number of 5,000 digits": (
+        GOOD.replace("context_window = 32768", f"context_window = {'9' * 5000}").encode(),
+        "value has 5000 digits",
+    ),
+    "lists nested 3,000 deep": (
+        (GOOD + "\ndeep = " + "[" * 3000 + "]" * 3000 + "\n").encode(),
+        "nested too deep",
+    ),
+}
+
+
+@pytest.mark.parametrize("fault", GIVEN_UP_ON)
+def test_a_file_the_toml_parser_gives_up_on_is_named_in_one_line(
+    tmp_path: Path, fault: str
+) -> None:
+    content, said = GIVEN_UP_ON[fault]
+    path = tmp_path / "models.toml"
+    path.write_bytes(content)
+
+    with pytest.raises(CatalogError) as failure:
+        read_file(path)
+
+    assert str(path) in str(failure.value)
+    assert said in str(failure.value)
+    assert "\n" not in str(failure.value)
+    # Python's own advice for a number too long is no help with a file.
+    assert "sys." not in str(failure.value)
+
+
 def test_a_file_without_models_offers_nothing_and_says_so(tmp_path: Path) -> None:
     path = written(tmp_path, GOOD.split("[models.standard]")[0])
 

@@ -2,7 +2,9 @@
 
 A file there is edited by whoever runs the installation, so a mistake in it has to be
 told in one line that names the file and the fault: `read` turns every way of failing
-into the caller's own error, with such a line as its text.
+into the caller's own error, with such a line as its text. That holds for a file the
+TOML parser gives up on in a way of its own too: bytes that aren't UTF-8, a whole number
+of more digits than Python reads, and tables or lists nested too deep.
 """
 
 import tomllib
@@ -32,8 +34,18 @@ def read[File: BaseModel, Failure: Exception](
         raise failure(f"the {what} file {str(path)!r} doesn't exist. {elsewhere}") from None
     except OSError as error:
         raise failure(f"can't read the {what} file {str(path)!r}: {error}") from error
-    except tomllib.TOMLDecodeError as error:
-        raise failure(f"{path} isn't valid TOML: {error}") from error
+    except UnicodeDecodeError as error:
+        raise failure(
+            f"{path} isn't valid TOML: it isn't UTF-8, from its byte {error.start} on"
+        ) from error
+    except RecursionError:
+        raise failure(f"can't read the {what} file {str(path)!r}: it is nested too deep") from None
+    except ValueError as error:
+        # A mistake in TOML, which the parser raises as a `tomllib.TOMLDecodeError`, one
+        # of these, or a whole number of more digits than Python reads. That one's
+        # message goes on to name a Python setting, which is no help with a file.
+        said = str(error).partition("; use sys.")[0]
+        raise failure(f"{path} isn't valid TOML: {said}") from error
     try:
         return form.model_validate(data)
     except ValidationError as error:
