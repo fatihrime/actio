@@ -949,7 +949,8 @@ export interface components {
          *     `alternatives` (429: the usage limit that is reached, when it starts over, and the
          *     models that cost nothing), `at_once` (429: how many answers the plan allows to be
          *     written at once), `model` and `model_status` (503: the model that can't answer),
-         *     `turn_id` and `turn_status` (409: the turn in the way).
+         *     `model` alone (429: the model asked, when no model that could answer can take the
+         *     message right now), `turn_id` and `turn_status` (409: the turn in the way).
          */
         Problem: {
             /**
@@ -1650,7 +1651,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Too many messages in a short time, or a usage limit is reached. `Retry-After` says how long to wait. For a usage limit, `window` names the one that is full, `resets_at` says when it starts over, and `alternatives` lists the models that cost nothing. Or as many answers are being written as the plan allows at once, which `at_once` says: nobody knows when one ends, so there is no `Retry-After`. */
+            /** @description Too many messages in a short time, or a usage limit is reached. `Retry-After` says how long to wait. For a usage limit, `window` names the one that is full, `resets_at` says when it starts over, and `alternatives` lists the models that cost nothing. Or as many answers are being written as the plan allows at once, which `at_once` says: nobody knows when one ends, so there is no `Retry-After`. Or no model that could answer can take the message right now, the installation having reached the limits of its models' providers: `model` names the model asked, and `Retry-After` says how long to wait. */
             429: {
                 headers: {
                     [name: string]: unknown;

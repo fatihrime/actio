@@ -8,17 +8,19 @@ asks that model for a title of a few words, from the first question alone, and w
 over the first line, unless a person has renamed the conversation meanwhile. When that
 model can't answer, those that stand in for it are asked in its place, as for a turn,
 and as for a turn a model whose failure may be gone in a moment is asked once more
-first, and one whose room or budget is too small for the request is passed over while
-another isn't. What a title's request takes of a model's budget counts as a turn's does.
+first, one whose room is too small for the request is passed over while another's
+isn't, and one whose budget has nothing left for it is asked after those that have
+some. What a title's request takes of a model's budget counts as a turn's does.
 
 Who named a conversation is on its row (`Conversation.title_by`): `question`, `model`,
 or `person`. Only `write` makes a `question` a `model`, and nothing writes over a
 `person`: a title someone chose stays.
 
 A title the model couldn't give for now, because its server didn't answer, failed or was
-too busy, is asked for again later, up to three times more (`NotWrittenError`,
-`ASKED_AGAIN_AFTER`). One it won't give, because it refused the request or wrote nothing
-to make a title of, is not: the conversation keeps its first line.
+too busy, or because no model with room for the request had budget left for it, is
+asked for again later, up to three times more (`NotWrittenError`, `ASKED_AGAIN_AFTER`).
+One it won't give, because it refused the request or wrote nothing to make a title of,
+is not: the conversation keeps its first line.
 
 For a moment after a model was asked, a title is on its way (`on_its_way`). The list of
 conversations says so, and a page that reads it reads it again until it no longer does.
@@ -149,8 +151,10 @@ _NAMED = re.compile(r"^([*_`]*)title\s*(?::\s*\1|\1\s*:)\s*", re.IGNORECASE)
 
 class NotWrittenError(Exception):
     """A title the model couldn't give for now: its server doesn't answer, failed or was
-    too busy, its answer broke off, or the title took longer than `WRITTEN_WITHIN_S`.
-    Worth another try, later: the worker lists the job with it, and `ASKED_AGAIN_AFTER`.
+    too busy, its answer broke off, the title took longer than `WRITTEN_WITHIN_S`, or no
+    model with room for the request had budget left for it. Worth another try, later:
+    the worker lists the job with it, and `ASKED_AGAIN_AFTER`, whose waits are its own
+    and don't follow a budget's.
 
     Its text holds the conversation's id and the kind of trouble, never a word of the
     question, the title or the model's error: the queue writes its trace in the log when
@@ -266,11 +270,12 @@ async def write(
     What goes wrong with the model leaves the first line, and the log says what, with the
     conversation's id. When the model couldn't give a title for now, this then raises
     `NotWrittenError`, and the queue runs the job again later, from its start: its server
-    doesn't answer, failed or was too busy, its answer broke off, or it took longer than
-    `WRITTEN_WITHIN_S`. When it won't give one, the job ends well, since it would be the
-    same the next time: it is missing from its server, the provider refused the request,
-    or it wrote nothing to make a title of. A cancellation is passed on, as ever: it is
-    how a stop cuts the job off, and the queue runs it again.
+    doesn't answer, failed or was too busy, its answer broke off, it took longer than
+    `WRITTEN_WITHIN_S`, or no model with room for the request had budget left for it.
+    When it won't give one, the job ends well, since it would be the same the next time:
+    it is missing from its server, the provider refused the request, or it wrote nothing
+    to make a title of. A cancellation is passed on, as ever: it is how a stop cuts the
+    job off, and the queue runs it again.
     """
     if catalog.titles is None:
         logger.warning(
@@ -350,8 +355,9 @@ async def _ask(
     """What the model wrote for a title: its text, never its reasoning. `None` when it
     won't give one: it is missing from its server, or the provider refused the request.
     Raises `NotWrittenError` when it couldn't for now: its server doesn't answer, it
-    failed in a way that may be gone at a later try (`actio_llm.FOR_NOW`), or it took
-    longer than `WRITTEN_WITHIN_S`. Either way the log says which first.
+    failed in a way that may be gone at a later try (`actio_llm.FOR_NOW`), it took
+    longer than `WRITTEN_WITHIN_S`, or no model with room for the request had budget
+    left for it. Either way the log says which first.
 
     A model's status is `unreachable` whenever its server didn't say whether it has the
     model: when it doesn't answer, and also when it answers that question with an error,
@@ -378,11 +384,13 @@ async def _ask(
     again later if one of them is `unreachable`, and not when all are `missing`. A ready
     model whose room is smaller than the request, by Actio's guess at it, is passed over
     while another of them has room, as for a turn (`Chain.asked_with`): the log says it,
-    with the two numbers. So is one whose budget has nothing left for the request, while
-    another has, by one look at their budgets in `budgets`: the log says it, with the
-    wait and the limit in the way. A look that can't be had passes nobody over for a
-    budget, and the log says that too. What each request takes of a model's budget is
-    counted there, as a turn's is (`actio.catalog.counted`)."""
+    with the two numbers. One whose budget has nothing left for the request, by one look
+    at their budgets in `budgets`, is asked after those that have some: the log says it,
+    with the wait and the limit in the way. When none of those with room has any, none
+    is asked, the log names each with its wait, and the title is asked for again later,
+    by the job's own waits. A look that can't be had refuses nothing, and has nobody
+    asked last, and the log says that too. What each request takes of a model's budget
+    is counted there, as a turn's is (`actio.catalog.counted`)."""
     try:
         async with asyncio.timeout(WRITTEN_WITHIN_S):
             chain = await catalog.chain_status(offered.name, now=now)
@@ -406,9 +414,10 @@ async def _ask(
                 )
             messages = [User(_asking(question))]
             # As for a turn: a ready model whose room is smaller than the guess at the
-            # request is passed over while another has room, and then one whose budget
-            # has nothing left for it while another has; and when none has, every one is
-            # asked.
+            # request is passed over while another has room, and one whose budget has
+            # nothing left for it is asked after those that have some. When no model with
+            # room has budget, none is asked, and the title is asked for again later;
+            # when none has room, every one is asked.
             tokens = prompt_tokens(messages)
             try:
                 spent = await chain.look(budgets, tokens, now=now)
@@ -427,15 +436,25 @@ async def _ask(
                 )
             if unread is not None:
                 logger.warning(
-                    "conversation %s: the models' budgets couldn't be read (%s), and none is"
-                    " passed over for its budget",
+                    "conversation %s: the models' budgets couldn't be read (%s), and each is"
+                    " taken to have some left",
                     conversation_id,
                     unread,
                 )
+            if asked.refused is not None:
+                # Names and numbers from the models file alone. The job's own waits
+                # decide when it is asked for again, not the budget's.
+                waits = ", ".join(
+                    f"{model.name} for about {short.seconds} s ({short.limit})"
+                    for model, short in asked.spent
+                )
+                said = f"no title, no model has budget left for the request: {waits}"
+                logger.warning("conversation %s: %s", conversation_id, said)
+                raise NotWrittenError(f"conversation {conversation_id}: {said}")
             for passed, short in asked.spent:
                 logger.warning(
                     "conversation %s: model %s has no budget left for the request for about"
-                    " %d s (%s): it is passed over",
+                    " %d s (%s): it is asked after those that have",
                     conversation_id,
                     passed.name,
                     short.seconds,

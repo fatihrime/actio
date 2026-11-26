@@ -280,7 +280,7 @@ async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(
     }
     # What each free plan takes in a minute and a day, as Groq's answers and its
     # documentation, and one free account's page of the Gemini API's, said on 2026-11-25:
-    # a model with none left for a request is passed over while another has some.
+    # a model with none left for a request is asked after those that have some.
     groq = {
         "requests_a_minute": 30,
         "requests_a_day": 1000,
@@ -998,31 +998,63 @@ requests_a_day = 20
 
 SPENT = Spent(timedelta(seconds=12), Bucket("tokens", "minute", "cloud", "model-x", 7_200))
 """What a look says of a model whose budget has nothing left for a request."""
+SOONER = Spent(timedelta(seconds=5), Bucket("requests", "minute", "cloud", "model-y", 27))
+"""The same, of a model whose budget has room for the request sooner."""
+LATER = Spent(timedelta(hours=2), Bucket("requests", "day", "cloud", "model-z", 900))
+"""The same, of a model whose budget has room for the request later."""
 
 
-def test_a_model_with_no_budget_left_is_passed_over_while_another_has_some() -> None:
-    """Each with what the look said of it, in the chain's order."""
+def test_a_model_with_no_budget_left_is_asked_after_those_that_have_some() -> None:
+    """Each group in the chain's order: those with budget first, then those without, the
+    asked model among them, each named with what the look said of it."""
+    first, second = offered("first"), offered("second")
+    third, fourth = offered("third"), offered("fourth")
+    chain = Chain(((first, READY), (second, REASONS), (third, READY), (fourth, READY)))
+
+    assert chain.asked_with(1000, {"first": SPENT, "third": LATER}) == Asked(
+        ((second, REASONS), (fourth, READY), (first, READY), (third, READY)),
+        (),
+        ((first, SPENT), (third, LATER)),
+    )
+
+
+def test_when_no_model_with_room_has_budget_nobody_is_asked_and_the_request_is_refused() -> None:
+    """For the shortest wait of theirs, whichever comes first in the chain, and each is
+    named in the chain's order. A model alone is refused by its own wait."""
     first, second, third = offered("first"), offered("second"), offered("third")
     chain = Chain(((first, READY), (second, REASONS), (third, READY)))
 
-    assert chain.asked_with(1000, {"first": SPENT, "third": SPENT}) == Asked(
-        ((second, REASONS),), (), ((first, SPENT), (third, SPENT))
-    )
-
-
-def test_when_no_model_has_budget_left_all_of_those_with_room_are_asked() -> None:
-    """A count never refuses a request: those that have room are asked, in order, and
-    none is passed over for its budget. The one without room still is, for its room."""
-    first, second = offered("first"), offered("second")
-    small = offered("small", tokens_a_minute=500)
-    chain = Chain(((first, READY), (small, READY), (second, REASONS)))
-
-    assert chain.asked_with(1000, {"first": SPENT, "second": SPENT}) == Asked(
-        ((first, READY), (second, REASONS)), (small,)
+    assert chain.asked_with(1000, {"first": LATER, "second": SOONER, "third": SPENT}) == Asked(
+        (), (), ((first, LATER), (second, SOONER), (third, SPENT)), refused=SOONER
     )
     assert Chain(((first, READY),)).asked_with(1000, {"first": SPENT}) == Asked(
-        ((first, READY),), ()
+        (), (), ((first, SPENT),), refused=SPENT
     )
+
+
+def test_of_two_waits_as_short_the_refusal_names_the_first_in_the_chain() -> None:
+    first, second = offered("first"), offered("second")
+    as_soon = Spent(SPENT.wait, SOONER.limit)
+    chain = Chain(((first, READY), (second, READY)))
+
+    asked = chain.asked_with(1000, {"first": SPENT, "second": as_soon})
+
+    assert asked.refused == SPENT
+    assert chain.asked_with(1000, {"first": as_soon, "second": SPENT}).refused == as_soon
+
+
+def test_a_model_without_room_neither_shortens_the_wait_nor_keeps_the_refusal_away() -> None:
+    """Passed over for its room, it is named for its room alone: with budget, it keeps
+    nobody from being refused, and with a shorter wait, it doesn't shorten the one the
+    request is refused for."""
+    small, spent = offered("small", tokens_a_minute=500), offered("spent")
+    chain = Chain(((small, READY), (spent, READY)))
+
+    with_budget = chain.asked_with(1000, {"spent": SPENT})
+    sooner_than_it = chain.asked_with(1000, {"small": SOONER, "spent": SPENT})
+
+    assert with_budget == Asked((), (small,), ((spent, SPENT),), refused=SPENT)
+    assert sooner_than_it == Asked((), (small,), ((spent, SPENT),), refused=SPENT)
 
 
 def test_the_room_comes_first_and_a_model_without_room_is_said_for_its_room_alone() -> None:
@@ -1030,27 +1062,61 @@ def test_the_room_comes_first_and_a_model_without_room_is_said_for_its_room_alon
     chain = Chain(((small, READY), (spent, READY), (fits, READY)))
 
     assert chain.asked_with(1000, {"small": SPENT, "spent": SPENT}) == Asked(
-        ((fits, READY),), (small,), ((spent, SPENT),)
+        ((fits, READY), (spent, READY)), (small,), ((spent, SPENT),)
     )
 
 
-def test_when_no_model_has_room_those_of_all_the_ready_ones_with_budget_are_asked() -> None:
+def test_when_no_model_has_room_nor_budget_every_ready_one_is_asked_and_none_is_named() -> None:
+    """A request too large by the guess is asked all the same, and nothing is refused:
+    the model's own answer about its size is truer than a wait."""
     first, second = offered("first", context_window=500), offered("second", tokens_a_minute=500)
-    chain = Chain(((first, READY), (second, READY)))
+    away = offered("away", context_window=500)
+    chain = Chain(((first, READY), (away, AWAY), (second, REASONS)))
 
-    assert chain.asked_with(1000, {"first": SPENT}) == Asked(
-        ((second, READY),), (), ((first, SPENT),)
+    assert chain.asked_with(1000, {"first": SPENT, "second": SOONER, "away": SOONER}) == Asked(
+        ((first, READY), (second, REASONS)), ()
     )
 
 
-def test_a_model_that_isnt_ready_never_counts_as_one_with_budget() -> None:
+def test_when_no_model_has_room_the_one_with_budget_is_asked_first_and_the_others_after() -> None:
+    first, second = offered("first", context_window=500), offered("second", tokens_a_minute=500)
+    third = offered("third", context_window=500)
+    chain = Chain(((first, READY), (second, READY), (third, READY)))
+
+    assert chain.asked_with(1000, {"first": SPENT, "third": SOONER}) == Asked(
+        ((second, READY), (first, READY), (third, READY)), (), ((first, SPENT), (third, SOONER))
+    )
+
+
+def test_a_model_that_isnt_ready_never_counts_as_one_with_budget_nor_for_its_wait() -> None:
     """With the only budget left, it doesn't keep the ready one that has none from being
-    asked, and it isn't said to be over its budget either."""
-    spent, away = offered("spent"), offered("away")
+    refused, it isn't named, and its shorter wait isn't the refusal's. A chain with no
+    ready model has nobody to ask, and that is no refusal."""
+    spent, away, gone = offered("spent"), offered("away"), offered("gone")
     chain = Chain(((spent, READY), (away, AWAY)))
 
-    assert chain.asked_with(1000, {"spent": SPENT}) == Asked(((spent, READY),), ())
-    assert chain.asked_with(1000, {"spent": SPENT, "away": SPENT}) == Asked(((spent, READY),), ())
+    assert chain.asked_with(1000, {"spent": SPENT}) == Asked(
+        (), (), ((spent, SPENT),), refused=SPENT
+    )
+    assert chain.asked_with(1000, {"spent": SPENT, "away": SOONER}) == Asked(
+        (), (), ((spent, SPENT),), refused=SPENT
+    )
+    assert Chain(((away, AWAY), (gone, GONE))).asked_with(
+        1000, {"away": SPENT, "gone": SOONER}
+    ) == Asked((), ())
+
+
+def test_a_look_that_said_nothing_refuses_nothing() -> None:
+    """As when it couldn't be had: every model is taken to have budget, and is asked as
+    by its room alone."""
+    first = offered("first", budget={"requests_a_day": 1})
+    second = offered("second", budget={"requests_a_minute": 1})
+    chain = Chain(((first, READY), (second, READY)))
+
+    asked = chain.asked_with(1000, NONE_SPENT)
+
+    assert asked == Asked(((first, READY), (second, READY)), ())
+    assert asked.refused is None
 
 
 def model_budget(model: OfferedModel) -> Budget:

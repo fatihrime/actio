@@ -1,0 +1,8 @@
+{
+  "type": "about:blank",
+  "title": "Too Many Requests",
+  "status": 429,
+  "detail": "No model can take this message right now: this installation has reached the limits of its models' providers. Try again in 60 seconds.",
+  "retry_after": 60,
+  "model": "standard"
+}

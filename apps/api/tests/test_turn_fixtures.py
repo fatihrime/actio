@@ -1,8 +1,9 @@
 """Recorded turns: what the API streams, kept as files, for the web app's tests to read.
 
 Each scenario runs a turn with known ids and a fixed clock, and compares the stream,
-byte for byte, with a file in `fixtures/turns/`. Two of the files are not streams: a
-conversation read back, and the refusal of a turn at a usage limit. The web app's test
+byte for byte, with a file in `fixtures/turns/`. Three of the files are not streams: a
+conversation read back, the refusal of a turn at a usage limit, and the refusal of one
+that no model has budget left for. The web app's test
 suite (`apps/web/tests/contract/`) parses the same files with the real `ai` package,
 the library the browser will read them with, and its component tests answer with them.
 So the two sides can't drift apart silently:
@@ -36,6 +37,7 @@ from valkey.asyncio import Valkey
 from actio.api import turns as turn_routes
 from actio.api import ui_stream
 from actio.chat import events
+from actio.core.budget import Budgets
 from actio.core.settings import Settings
 from actio_llm import (
     Finish,
@@ -363,6 +365,32 @@ async def test_a_question_refused_at_a_usage_limit_answers_what_was_recorded(
 
     assert refused.status_code == 429
     as_recorded("limit_reached.json", json.dumps(refused.json(), indent=2) + "\n")
+
+
+async def test_a_question_no_model_has_budget_for_answers_what_was_recorded(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, clock: Any, valkey_url: str
+) -> None:
+    """Not a stream: the refusal a page reads when no model has budget left for a
+    question. Its one model's budget is one request a minute, spent at the test's own
+    moment: a minute to wait. It names the model asked, and no window."""
+    assert migrated
+    lineup.add("standard", TextDelta("Never."), DONE, budget={"requests_a_minute": 1})
+    catalog = lineup.catalog()
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    budget = catalog.get("standard").budget
+    assert budget is not None
+    async with Valkey.from_url(valkey_url) as valkey:
+        budgets = Budgets(valkey, prefix=f"{settings.valkey_prefix}:b")
+        await budgets.add(*((bucket, bucket.size) for bucket in budget.buckets), now=clock.now)
+    message = {"id": str(QUESTION), "parts": [{"type": "text", "text": "Hello?"}]}
+
+    refused = await browser.post(
+        f"/api/conversations/{CONVERSATION}/turns", json={"message": message}
+    )
+
+    assert refused.status_code == 429
+    as_recorded("no_budget.json", json.dumps(refused.json(), indent=2) + "\n")
 
 
 async def test_a_conversation_reads_back_as_it_was_recorded(api: httpx.AsyncClient) -> None:

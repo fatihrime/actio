@@ -1858,7 +1858,7 @@ async def no_budget_left(settings: Settings, catalog: Catalog, *names: str) -> N
             await resources.budgets.add(*((b, b.size) for b in budget.buckets), now=NOON)
 
 
-async def test_a_model_with_no_budget_left_for_the_titles_request_is_passed_over(
+async def test_a_model_with_no_budget_left_for_the_titles_request_is_asked_after_one_that_has(
     db: AsyncSession,
     settings: Settings,
     clock: Any,
@@ -1866,8 +1866,9 @@ async def test_a_model_with_no_budget_left_for_the_titles_request_is_passed_over
     work_through: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """It is never asked, the model that stands in writes the title, and the log says
-    why, with the wait and the limit in the way."""
+    """The model that stands in, which has budget, is asked first and writes the title:
+    the named one is sent nothing. The log says why, with the wait and the limit in the
+    way."""
     named_one = lineup.add(
         "standard", TextDelta("Never"), DONE, then=["second"], budget={"requests_a_day": 1}
     )
@@ -1886,7 +1887,7 @@ async def test_a_model_with_no_budget_left_for_the_titles_request_is_passed_over
         (
             logging.WARNING,
             f"conversation {begun.conversation.id}: model standard has no budget left for the"
-            " request for about 86400 s (requests a day): it is passed over",
+            " request for about 86400 s (requests a day): it is asked after those that have",
         ),
         (
             logging.WARNING,
@@ -1895,14 +1896,18 @@ async def test_a_model_with_no_budget_left_for_the_titles_request_is_passed_over
     ]
 
 
-async def test_when_no_model_has_budget_left_for_the_titles_request_they_are_asked_as_ever(
+async def test_a_named_model_without_budget_writes_the_title_when_the_one_with_budget_fails(
     db: AsyncSession,
     settings: Settings,
     clock: Any,
     lineup: Any,
     work_through: Any,
+    queue_books: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The model that stands in has budget, is asked first, and fails before its first
+    word: the named model is asked after it, and writes the title. Actio's count runs
+    ahead of its provider's."""
     named_one = lineup.add(
         "standard",
         TextDelta("Fixing a flat tyre"),
@@ -1910,7 +1915,119 @@ async def test_when_no_model_has_budget_left_for_the_titles_request_they_are_ask
         then=["second"],
         budget={"requests_a_day": 1},
     )
-    stand_in = lineup.add("second", TextDelta("Never"), DONE, budget={"tokens_a_minute": 10})
+    stand_in = lineup.add("second", ProviderUnavailableError("busy"))
+    catalog = lineup.catalog(titles="standard")
+    await no_budget_left(settings, catalog, "standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert (len(stand_in.requests), len(named_one.requests)) == (1, 1)
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert await queue_books.due() == []  # it succeeded, and was deleted
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model standard has no budget left for the"
+            " request for about 86400 s (requests a day): it is asked after those that have",
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second failed"
+            " (ProviderUnavailableError), and standard is asked next",
+        ),
+    ]
+
+
+async def test_a_title_no_model_has_budget_for_is_asked_for_again_and_written_once_it_has(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    queue_books: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Neither model has budget left for the request: none is asked, nothing is taken
+    from a budget, the log names both, and the job is put back, by its own wait. A
+    minute later by the worker's clock, the named model's minute has come back: at the
+    next try it writes the title, and the stand-in, whose day hasn't, is never asked.
+    The named model's budget has a day's tokens beside its minute's request, with room:
+    a request taken would show there."""
+    named_one = lineup.add(
+        "standard",
+        TextDelta("Fixing a flat tyre"),
+        DONE,
+        then=["second"],
+        budget={"requests_a_minute": 1, "tokens_a_day": 100_000},
+    )
+    stand_in = lineup.add("second", TextDelta("Never"), DONE, budget={"requests_a_day": 1})
+    catalog = lineup.catalog(titles="standard")
+    named_budget = catalog.get("standard").budget
+    assert named_budget is not None
+    minute, day = named_budget.buckets
+    async with open_resources(settings) as resources:
+        await resources.budgets.add((minute, 1), now=NOON)
+    await no_budget_left(settings, catalog, "second")
+    begun = await started(db)
+    await ended(db, begun)
+
+    await run_the_job(settings, catalog, clock, work_through)
+    async with open_resources(settings) as resources:
+        [day_full_in] = await resources.budgets.look((day, day.size), now=NOON)
+    put_back_for_now = await queue_books.due()
+    named_for_now = await named(db, begun.conversation.id)
+    clock.advance(minutes=1)
+    await queue_books.wait_is_over()
+    await run_the_job(settings, catalog, clock, work_through)
+
+    assert put_back_for_now == put_back(1, 30)
+    assert named_for_now == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert day_full_in == timedelta(0)  # nothing was taken of the day's tokens
+    assert (len(named_one.requests), stand_in.requests) == (1, [])
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert await queue_books.due() == []
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: no title, no model has budget left for the"
+            " request: standard for about 60 s (requests a minute), second for about 86400 s"
+            " (requests a day)",
+        ),
+        # At the next try, a minute later.
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second has no budget left for the"
+            " request for about 86340 s (requests a day): it is asked after those that have",
+        ),
+    ]
+
+
+async def test_when_no_model_has_room_nor_budget_for_the_titles_request_they_are_asked_as_ever(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A request too large for every model by the guess is asked all the same, and so is
+    one no model has budget for then: the named model is asked first, nothing is
+    refused, and the log says nothing of rooms or budgets."""
+    named_one = lineup.add(
+        "standard",
+        TextDelta("Fixing a flat tyre"),
+        DONE,
+        then=["second"],
+        tokens_a_minute=40,
+        budget={"requests_a_day": 1},
+    )
+    stand_in = lineup.add(
+        "second", TextDelta("Never"), DONE, tokens_a_minute=40, budget={"requests_a_minute": 1}
+    )
     catalog = lineup.catalog(titles="standard")
     await no_budget_left(settings, catalog, "standard", "second")
     begun = await started(db)
@@ -1918,7 +2035,9 @@ async def test_when_no_model_has_budget_left_for_the_titles_request_they_are_ask
 
     await run_the_job(settings, catalog, clock, work_through)
 
-    assert (len(named_one.requests), stand_in.requests) == (1, [])
+    [request] = named_one.requests
+    assert prompt_tokens(request.messages) > 40  # what the test rests on
+    assert stand_in.requests == []
     title, by, *_ = await named(db, begun.conversation.id)
     assert (title, by) == ("Fixing a flat tyre", "model")
     assert said(caplog) == []
@@ -1931,7 +2050,7 @@ async def test_budgets_that_cant_be_read_or_counted_keep_no_title_from_being_wri
     lineup: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Valkey for the budgets is away: nobody is passed over for a budget, the named
+    """Valkey for the budgets is away: each model is taken to have budget left, the named
     model writes the title, and the log says each, once."""
     lineup.add(
         "standard",
@@ -1958,7 +2077,7 @@ async def test_budgets_that_cant_be_read_or_counted_keep_no_title_from_being_wri
         (
             logging.WARNING,
             f"conversation {begun.conversation.id}: the models' budgets couldn't be read"
-            " (ConnectionError), and none is passed over for its budget",
+            " (ConnectionError), and each is taken to have some left",
         )
     ]
     assert (
@@ -2004,7 +2123,7 @@ async def test_what_a_titles_request_takes_is_dated_by_the_workers_clock_as_it_g
     assert full_in == timedelta(milliseconds=(420 - guess) * 60_000 // 900)
 
 
-async def test_the_log_says_who_is_passed_over_for_its_room_before_who_for_its_budget(
+async def test_the_log_says_who_is_passed_over_for_its_room_before_who_is_asked_last(
     db: AsyncSession,
     settings: Settings,
     clock: Any,
@@ -2013,7 +2132,7 @@ async def test_the_log_says_who_is_passed_over_for_its_room_before_who_for_its_b
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """One chain: the named model without room for the request, the next without budget
-    for it, and the third writes the title."""
+    for it, asked after the third, and the third writes the title."""
     small = lineup.add(
         "standard", TextDelta("Never"), DONE, then=["second", "third"], tokens_a_minute=40
     )
@@ -2038,7 +2157,7 @@ async def test_the_log_says_who_is_passed_over_for_its_room_before_who_for_its_b
         (
             logging.WARNING,
             f"conversation {begun.conversation.id}: model second has no budget left for the"
-            " request for about 86400 s (requests a day): it is passed over",
+            " request for about 86400 s (requests a day): it is asked after those that have",
         ),
         (
             logging.WARNING,
@@ -2057,7 +2176,8 @@ async def test_a_titles_request_is_counted_where_a_turn_finds_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The worker's title takes the one request a minute of the model's budget, and a
-    turn through the API right after finds none left: the model's stand-in answers it."""
+    turn through the API right after finds none left: the model's stand-in, which has
+    budget, is asked first, and answers it."""
     named_one = lineup.add(
         "standard",
         TextDelta("Fixing a flat tyre"),
@@ -2085,7 +2205,7 @@ async def test_a_titles_request_is_counted_where_a_turn_finds_it(
     assert any(
         message.endswith(
             ": model standard has no budget left for the request for about 60 s (requests a"
-            " minute): it is passed over"
+            " minute): it is asked after those that have"
         )
         and message.startswith("turn ")
         for message in caplog.messages

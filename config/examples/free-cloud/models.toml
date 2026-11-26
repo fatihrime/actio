@@ -69,8 +69,10 @@ max_output_tokens = 2048
 # its tokens a minute whole: a request larger than that, by Actio's guess, isn't sent to
 # Groq while another model that may answer it has room for it. Actio counts what it
 # sends to each model, and keeps to nine tenths of each figure: a model that has nothing
-# left of one for a request is passed over while another of its chain has some. `make
-# preflight` prints the headers' figures for your account: raise them on a paid plan.
+# left of one for a request is asked after those of its chain that have some, and when
+# none of those with room has any, the question is refused for now, with how long to
+# wait. `make preflight` prints the headers' figures for your account: raise them on a
+# paid plan.
 #
 # These models always reason, and "low" is the least they can be told: a turn that asks
 # for no reasoning gets that, and one that asks for reasoning gets "medium". Told "high",
@@ -123,7 +125,7 @@ thinking_on = { reasoning_effort = "medium" }
 # https://aistudio.google.com/rate-limit: no answer's headers state them. They are each
 # model's requests_a_minute, tokens_a_minute and requests_a_day below. As for Groq's,
 # Actio keeps to nine tenths of each figure, and a model that has nothing left of one
-# for a request is passed over while another of its chain has some.
+# for a request is asked after those of its chain that have some.
 #
 # context_window is the model's own window, 1,048,576 tokens, and tokens_a_minute the
 # 250,000 that the free tier allowed each model that day, which the Gemini API's

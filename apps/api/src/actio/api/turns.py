@@ -31,6 +31,12 @@ And an account has only so many readers open (`actio.chat.readers`): joining a t
 beyond them is answered 429. The reader of the request that starts a turn is never
 refused, and counts.
 
+The models' providers, too, take only so much from the installation in a minute and a
+day, which Actio counts (`actio.catalog`, ADR 0030). When some ready models
+have room for a turn's request and none of those has budget left for it, the turn is
+answered 429 with how long to wait, before anything is kept or held: the question was
+never asked. When no model has room for it, every one is asked all the same.
+
 The conversation's and the question's ids are chosen by whoever sends them, as a
 browser does before it has heard from the server. The question's id also makes a
 repeated request harmless: the same message is never asked twice.
@@ -72,7 +78,7 @@ from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.api.rate_limits import Limits, in_words
 from actio.api.usage import UNAVAILABLE
-from actio.catalog import OfferedModel, UnknownModelError
+from actio.catalog import Asked, OfferedModel, Spent, UnknownModelError
 from actio.chat import answering, context, tree, turns
 from actio.chat.answering import Ended, Halt
 from actio.chat.events import EventsLostError, EventsUnavailableError, TurnEvents
@@ -174,7 +180,10 @@ class TurnRequest(Body):
             "names the one that is full, `resets_at` says when it starts over, and "
             "`alternatives` lists the models that cost nothing. Or as many answers are "
             "being written as the plan allows at once, which `at_once` says: nobody "
-            "knows when one ends, so there is no `Retry-After`."
+            "knows when one ends, so there is no `Retry-After`. Or no model that could "
+            "answer can take the message right now, the installation having reached the "
+            "limits of its models' providers: `model` names the model asked, and "
+            "`Retry-After` says how long to wait."
         },
         503: {
             "description": "The model can't answer right now, nor can any model asked "
@@ -218,10 +227,10 @@ async def start_turn(
     chain = await catalog.chain_status(offered.name, now=now)
     if not chain.ready:
         raise not_ready(offered.name, chain.status.state)
-    # Whether the turn can ask for reasoning is the first ready one's to say: it is asked
-    # first, unless the request is larger than its room, or its budget has nothing left
-    # for it, while another can take it (below). That a guess or a count passes it over
-    # changes nothing of what the turn may ask.
+    # Whether the turn can ask for reasoning is the first ready one's to say. It is asked
+    # first, unless the request is larger than its room while another has room, when it
+    # is passed over, or its budget has nothing left for the request while another's has,
+    # when it is asked last (below). Neither changes what the turn may ask.
     if body.thinking and not chain.ready[0][1].thinking:
         raise Problem(422, "This model can't reason before it answers.", model=offered.name)
 
@@ -234,13 +243,31 @@ async def start_turn(
     # is held against, and what a request is first counted as in a model's budget.
     tokens = prompt_tokens(messages)
     # What the providers' plans have left for the request, for each ready model that has
-    # a budget (ADR 0030). A look that can't be had passes nobody over for a budget: the
-    # log says so below, with the turn's id.
+    # a budget (ADR 0030). A look that can't be had refuses nothing, and has nobody asked
+    # last for a budget: the log says so below, with the turn's id.
     try:
         spent = await chain.look(resources.budgets, tokens, now=now)
         unread = None
     except BudgetsUnavailableError as error:
         spent, unread = {}, type(error.__cause__).__name__
+    # Who is asked, in which order: a ready model whose room is smaller than the guess is
+    # passed over while another has room, and one whose budget has nothing left for the
+    # request is asked after those that have some. When no model with room has budget,
+    # the turn is refused for now; when none has room, every one is asked: a guess never
+    # refuses a turn.
+    asked = chain.asked_with(tokens, spent)
+    if asked.refused is not None:
+        # Before anything is committed or held: nothing of the turn is left behind, and
+        # the credits are never touched. By the conversation's id: the turn's row is
+        # rolled back. Names and numbers from the models file alone.
+        logger.warning(
+            "conversation %s: no model has budget left for the request, which is refused"
+            " for about %d s: %s",
+            conversation_id,
+            asked.refused.seconds,
+            _waits(asked),
+        )
+        raise _no_budget(offered.name, asked.refused)
     # Before anything is committed: a turn that is refused here leaves nothing behind.
     # The credits are held for the asked model, at its price, whoever answers.
     reserved = await _reserve(usage, db, principal, begun, offered, tokens, now)
@@ -272,11 +299,6 @@ async def start_turn(
         logger.warning(
             "turn %s: model %s is %s, and is passed over", turn.id, passed.name, status.state
         )
-    # A ready model whose room is smaller than the guess is passed over too, while
-    # another has room; and then one whose budget has nothing left for the request,
-    # while another has. When none has, every one is asked: neither a guess nor a count
-    # refuses a turn.
-    asked = chain.asked_with(tokens, spent)
     for passed in asked.too_small:
         # Numbers alone: never a word of the question.
         logger.warning(
@@ -289,15 +311,15 @@ async def start_turn(
         )
     if unread is not None:
         logger.warning(
-            "turn %s: the models' budgets couldn't be read (%s), and none is passed over for"
-            " its budget",
+            "turn %s: the models' budgets couldn't be read (%s), and each is taken to have"
+            " some left",
             turn.id,
             unread,
         )
     for passed, short in asked.spent:
         logger.warning(
             "turn %s: model %s has no budget left for the request for about %d s (%s): it is"
-            " passed over",
+            " asked after those that have",
             turn.id,
             passed.name,
             short.seconds,
@@ -493,6 +515,31 @@ def _too_many_answers(running: int, at_once: int) -> Problem:
             "allows at once. Wait for one to finish, or stop one."
         )
     return Problem(429, said, at_once=at_once)
+
+
+def _no_budget(model: str, refused: Spent) -> Problem:
+    """The 429 for a turn that is refused for now (`Asked.refused`): some ready models
+    have room for it, and none of those has budget left for it. It says how long until
+    one has, by the look that refused it, and the model asked, as the 503 names it. No
+    `window`: it is no usage limit of the account's, and the provider's limit stays in
+    the log."""
+    seconds = refused.seconds
+    return Problem(
+        429,
+        "No model can take this message right now: this installation has reached the limits"
+        f" of its models' providers. Try again in {in_words(seconds)}.",
+        headers={"Retry-After": str(seconds)},
+        retry_after=seconds,
+        model=model,
+    )
+
+
+def _waits(asked: Asked) -> str:
+    """Each model without budget left for the request, in the chain's order, with its
+    wait and its limit in words: names and numbers from the models file alone."""
+    return ", ".join(
+        f"{model.name} for about {short.seconds} s ({short.limit})" for model, short in asked.spent
+    )
 
 
 def _too_many_readers(reading: int, at_once: int) -> str:

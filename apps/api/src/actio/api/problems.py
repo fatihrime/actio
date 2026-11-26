@@ -35,7 +35,8 @@ class ProblemDocument(Described):
     `alternatives` (429: the usage limit that is reached, when it starts over, and the
     models that cost nothing), `at_once` (429: how many answers the plan allows to be
     written at once), `model` and `model_status` (503: the model that can't answer),
-    `turn_id` and `turn_status` (409: the turn in the way)."""
+    `model` alone (429: the model asked, when no model that could answer can take the
+    message right now), `turn_id` and `turn_status` (409: the turn in the way)."""
 
     model_config = ConfigDict(title="Problem", extra="allow")
 

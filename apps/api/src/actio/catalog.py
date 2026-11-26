@@ -12,10 +12,11 @@ what to call it at its provider, its limits, and the client to stream an answer 
 - `Catalog.chain` gives a model and those that stand in for it, which are asked in its
   place when it can't answer before the first word, and `Catalog.chain_status` says
   which of them are ready (ADR 0028). `Chain.asked_with` says which of those are asked
-  for a request of so many tokens: a model whose room is smaller is passed over while
-  another has room (`OfferedModel.room`, ADR 0029), and then a model whose provider's
-  plan has nothing left for the request, by what `Chain.look` read of its budget, while
-  another has (`OfferedModel.budget`, ADR 0030).
+  for a request of so many tokens, and in which order: a model whose room is smaller is
+  passed over while another has room (`OfferedModel.room`, ADR 0029), and then a model
+  whose provider's plan has nothing left for the request, by what `Chain.look` read of
+  its budget, is asked after those that have some (`OfferedModel.budget`, ADR 0030).
+  When none of those with room has any, the request is refused for now.
 - `counted` gives the client a model is asked through, which counts in its budget what
   each request takes of it.
 - `Catalog.load_ahead` has a model's server load it into memory before the first
@@ -218,8 +219,9 @@ class ModelEntry(BaseModel):
     """How many requests the model's server takes from this installation's account in a
     minute, as a cloud provider's plan says: the provider's own figure, for this model.
     Actio counts what it sends to the model, keeps to `KEPT_PERCENT` of the figure, and
-    passes over a ready model that has none left for a request while another of its
-    chain has some (`OfferedModel.budget`, ADR 0030). A whole number of 1 or more, as
+    asks a ready model that has none left for a request after those of its chain that
+    have some, or refuses the request for now when none of those with room for it has
+    any (`OfferedModel.budget`, ADR 0030). A whole number of 1 or more, as
     `tokens_a_minute` is. Left out: the server has no such limit."""
     requests_a_day: int | None = Field(default=None, ge=1, strict=True)
     """The same, of the requests the server takes in a day."""
@@ -447,9 +449,10 @@ class OfferedModel:
     `None`: no such limit."""
     budget: Budget | None = None
     """What its provider's plan lets this installation send to it, as Actio keeps to it:
-    a ready model with nothing left for a request is passed over while another of its
-    chain has budget (`Chain.look`, `Chain.asked_with`), and what each request to it
-    takes is counted there (`counted`). `None`: the models file states none of its
+    a ready model with nothing left for a request is asked after those of its chain
+    that have budget, and when none of those with room for the request has any, the
+    request is refused for now (`Chain.look`, `Chain.asked_with`). What each request to
+    it takes is counted there (`counted`). `None`: the models file states none of its
     limits, and nothing is counted."""
 
     @property
@@ -493,18 +496,28 @@ class Spent:
 
 @dataclass(frozen=True, slots=True)
 class Asked:
-    """The models of a chain that a request is asked of, and those passed over for it
-    (`Chain.asked_with`)."""
+    """The models of a chain that a request is asked of, in which order, and those
+    passed over for it; or that it is refused for now (`Chain.asked_with`)."""
 
     models: tuple[tuple[OfferedModel, ModelStatus], ...]
-    """Those to ask, in the chain's order, each with its status: ready, all of them."""
+    """Those to ask, in this order, each with its status: ready, all of them. Those
+    with budget first, then those without, each in the chain's order. Empty when the
+    request is refused (`refused`), and when no model of the chain is ready."""
     too_small: tuple[OfferedModel, ...]
     """Those that are ready and are passed over, their room smaller than the request,
     in the chain's order."""
     spent: tuple[tuple[OfferedModel, Spent], ...] = ()
-    """Those that are ready, are not passed over for their room, and are passed over for
-    their budget, which has nothing left for the request now, in the chain's order: each
-    with what the look said of it."""
+    """Those that are ready, are not passed over for their room, and whose budget has
+    nothing left for the request now, in the chain's order, each with what the look
+    said of it: asked after those that have budget, or, when the request is refused,
+    the reason it is. Empty when no ready model has room and none has budget: every one
+    is asked then, and none is named."""
+    refused: Spent | None = None
+    """When the request is refused for now: some ready models have room for it, and
+    none of those has budget left for it. The shortest wait among them, with its limit:
+    of two as short, the first in the chain's order. `None` when it is asked, which it
+    is too when no ready model has room for it, and also when no model of the chain is
+    ready, which refuses nothing here."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,8 +570,9 @@ class Chain:
 
     def asked_with(self, tokens: int, spent: Mapping[str, Spent]) -> Asked:
         """Which of the ready models are asked for a request of about `tokens`, a guess
-        at its prompt, and which are passed over for their room (ADR 0029), or for their
-        budget, which `spent` says has nothing left for the request (`look`, ADR 0030).
+        at its prompt, in which order, and which are passed over for their room (ADR
+        0029); or that the request is refused for now, when no model with room for it
+        has budget left for it, which `spent` says (`look`, ADR 0030).
 
         The room first. A model has room when `tokens` is no larger than its `room`.
         While at least one ready model has room, those that haven't are passed over;
@@ -566,23 +580,37 @@ class Chain:
 
         Then the budget, of those left. A model has budget when `spent` doesn't name it:
         it has no budget, or the look said that the request fits it now, or the look
-        couldn't be had and `spent` is empty. While at least one has budget, those are
-        asked, in the chain's order, and the others are passed over for their budget;
-        when none has, all of those left are asked, and none is passed over for its
-        budget. A guess, and a count, choose who is asked, and never refuse a request.
+        couldn't be had and `spent` is empty.
 
-        A model passed over for its room is not also said to be over its budget. A
-        model that isn't ready is passed over whatever its room or its budget, and never
-        counts as one that has either."""
+        - While at least one has budget, those are asked first, in the chain's order,
+          and then those without, in the chain's order: Actio keeps a tenth of each
+          figure back, and a model its count calls spent may answer all the same.
+        - When none has, and at least one ready model has room, nobody is asked: the
+          request is refused for now, with the shortest wait among those left.
+        - When none has, and no ready model has room, every ready model is asked, in
+          the chain's order, and none is said to be without budget: a request too large
+          by the guess is asked all the same, and its model's own answer about its size
+          is truer than a wait. A guess never refuses a request.
+
+        A model passed over for its room is not also said to be without budget, and its
+        wait is never the refusal's. A model that isn't ready is passed over whatever its
+        room or its budget, and never counts as one that has either, nor as one whose
+        wait is the refusal's. A chain with no ready model has none to ask, and is no
+        refusal: its request is nobody's to refuse here."""
         ready = self.ready
         roomy = [(offered, status) for offered, status in ready if tokens <= offered.room]
         left = roomy or ready
         too_small = tuple(offered for offered, _ in ready if tokens > offered.room) if roomy else ()
         budgeted = tuple((offered, status) for offered, status in left if offered.name not in spent)
-        if not budgeted:
-            return Asked(tuple(left), too_small)
-        over = tuple((offered, spent[offered.name]) for offered, _ in left if offered.name in spent)
-        return Asked(budgeted, too_small, over)
+        unbudgeted = tuple((offered, status) for offered, status in left if offered.name in spent)
+        over = tuple((offered, spent[offered.name]) for offered, _ in unbudgeted)
+        if budgeted:
+            return Asked((*budgeted, *unbudgeted), too_small, over)
+        if roomy:
+            # Of two as short, the first in the chain's order: `min` keeps the first.
+            shortest = min((short for _, short in over), key=lambda short: short.wait)
+            return Asked((), too_small, over, refused=shortest)
+        return Asked(tuple(left), too_small)
 
 
 class UnknownModelError(Exception):
