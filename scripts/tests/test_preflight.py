@@ -1,4 +1,5 @@
-"""`make preflight` asks the cloud providers what an account may use, with its keys.
+"""`make preflight` asks the cloud providers what an account may use, with its keys, and
+holds the models file against what they state.
 
 `scripts/preflight.py` runs here against a fake of both providers. Its lists, answers
 and headers are shaped as the providers' documentation shows them, and its refusals of
@@ -11,24 +12,39 @@ Gemini API's 403. So are the bodies that are broken on purpose. A request the fa
 doesn't expect fails the test, and a test that must see no request at all gives it a
 fake that fails at any. What a run prints is read for the facts in its lines, not for
 their wording.
+
+Each run reads a models file that its test wrote under its own tmp_path and named, by
+default one without a table at either provider, as the shipped one is: each provider is
+then checked as itself, with its own variable and its own models, as the script did
+before it read a file. No test reads the repository's `config/` by the directory pytest
+was started in: the tests of the shipped files read them by a path made from this
+file's own, and the test of the default path changes directory to its own folder.
 """
 
 import io
 import json
+import re
 import time
 import unicodedata
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx2
 import pytest
 from scripts import preflight
+
+from actio.catalog import LIMITS, CatalogError, read_file
 
 # Two keys that share no piece as long as the pieces the script hides, so that one
 # sent to the other provider, or hidden in its text, would show.
 GROQ_KEY = "key-for-tests"
 GEMINI_KEY = "made-up-value"
 BOTH = {"GROQ_API_KEY": GROQ_KEY, "GEMINI_API_KEY": GEMINI_KEY}
+# A third, for a variable a table of the models file names, that shares no such piece
+# with either.
+OTHER_KEY = "another-secret"
 
 GROQ_HOST = "api.groq.com"
 GOOGLE_HOST = "generativelanguage.googleapis.com"
@@ -253,10 +269,85 @@ class Providers:
         return [call.split()[-1] for call in self.calls() if call.startswith(f"{provider} ask ")]
 
 
+# A models file without a table at either provider, as the shipped one is.
+NO_CLOUD = """\
+default = "standard"
+
+[providers.ollama]
+kind = "ollama"
+
+[models.standard]
+title = "Local"
+provider = "ollama"
+model = "local-model"
+context_window = 8192
+max_output_tokens = 2048
+"""
+
+GROQ_URL = "https://api.groq.com/openai/v1"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+
+def provider_table(name: str, url: str, key: str | None) -> str:
+    """A `[providers.<name>]` table of a server that speaks OpenAI's API, with the
+    variable of its key, or none."""
+    table = f'[providers.{name}]\nkind = "openai-compatible"\nurl = "{url}"\n'
+    return table + (f'api_key_env = "{key}"\n' if key else "")
+
+
+GROQ_TABLE = provider_table("groq", GROQ_URL, "GROQ_API_KEY")
+GEMINI_TABLE = provider_table("gemini", GEMINI_URL, "GEMINI_API_KEY")
+
+
+def model_table(name: str, table: str, model: str, **figures: int | str) -> str:
+    """A `[models.<name>]` table of `model` on the server `table`, with a window and a
+    longest answer that both fakes' models have room for, unless `figures` say otherwise,
+    and the limits `figures` state. `model` is written into a TOML string as it is, and
+    a figure as JSON writes it."""
+    stated: dict[str, int | str] = {"context_window": 131072, "max_output_tokens": 2048}
+    stated.update(figures)
+    lines = [f"[models.{name}]", f'title = "{name}"', f'provider = "{table}"', f'model = "{model}"']
+    lines += [f"{key} = {json.dumps(figure)}" for key, figure in stated.items()]
+    return "\n".join(lines) + "\n"
+
+
+def models_file(*tables: str) -> str:
+    """A models file of NO_CLOUD's local model, its default, and `tables`."""
+    return "\n".join([NO_CLOUD, *tables])
+
+
+def one_model(table: str, model: str, **figures: int | str) -> str:
+    """A models file with both providers' tables, and one model, `models.big`, of
+    `model` on `table`."""
+    return models_file(GROQ_TABLE, GEMINI_TABLE, model_table("big", table, model, **figures))
+
+
+class Folder:
+    """Where `run` writes a test's models file: the test's own tmp_path, which the
+    fixture `folder` sets before each test."""
+
+    path: Path | None = None
+
+
+@pytest.fixture(autouse=True)
+def folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Folder, "path", tmp_path)
+
+
 def run(
-    *arguments: str, environ: Mapping[str, str] = BOTH, providers: Answer | None = None
+    *arguments: str,
+    environ: Mapping[str, str] = BOTH,
+    providers: Answer | None = None,
+    models: str | None = NO_CLOUD,
 ) -> tuple[int, str]:
-    """The exit status of a run with these arguments and keys, and what it printed."""
+    """The exit status of a run with these arguments and keys, and what it printed. The
+    run reads `models`, written to the test's folder and named on its command line, or,
+    when it is None, the file that its arguments or `environ` name, or the default."""
+    if models is not None:
+        assert Folder.path is not None, "the fixture `folder` sets it"
+        path = Folder.path / "models.toml"
+        path.write_text(models)
+        arguments = ("--models-file", str(path), *arguments)
     out = io.StringIO()
     transport = httpx2.MockTransport(providers or Providers())
     status = preflight.run(arguments, environ, out, transport)
@@ -264,12 +355,36 @@ def run(
 
 
 def under(printed: str, model: str) -> str:
-    """What a run said of `model`: the lines under its heading."""
+    """What a run said of `model`: the lines under its heading, which names it, and its
+    names in the models file after it, when it has any."""
     lines = printed.splitlines()
-    start = end = lines.index(f"  {model}") + 1
+    [start] = [
+        at + 1
+        for at, line in enumerate(lines)
+        if line == f"  {model}" or line.startswith(f"  {model} (")
+    ]
+    end = start
     while end < len(lines) and lines[end].startswith("    "):
         end += 1
     return "\n".join(lines[start:end])
+
+
+def section(printed: str, heading: str) -> str:
+    """What a run said under a check's heading, up to the empty line after it."""
+    lines = printed.splitlines()
+    start = end = lines.index(heading) + 1
+    while end < len(lines) and lines[end]:
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def summary(printed: str, label: str) -> str:
+    """What the last line says of the check named `label`."""
+    parts = printed.splitlines()[-1].removesuffix(".").split("; ")
+    [said] = [
+        part for part in parts if part == f"{label} failed" or part.startswith(f"{label} passed")
+    ]
+    return said
 
 
 def line_of(printed: str, *words: str) -> str:
@@ -826,8 +941,12 @@ def test_a_key_that_cant_be_one_is_one_line_and_nothing_is_asked_with_it(key: st
     assert "GROQ_API_KEY" in failed
     assert GROQ_HOST not in {request.url.host for request in providers.sent}
     assert providers.asked("gemini") == list(preflight.GEMINI.models)
+    # But for the line that names the models file: its path is this machine's, and a
+    # folder's name may share a piece with the key.
+    said = "\n".join(line for line in printed.splitlines() if str(Folder.path) not in line)
+    assert "Gemini" in said
     for start in range(len(key) - preflight.KEY_PIECE + 1):
-        assert key[start : start + preflight.KEY_PIECE] not in printed
+        assert key[start : start + preflight.KEY_PIECE] not in said
 
 
 NINES = "9" * 400
@@ -956,7 +1075,7 @@ def test_a_redirect_to_another_host_is_not_followed(named: str, call: str) -> No
 
 def test_what_a_provider_is_asked_through_doesnt_show_its_key() -> None:
     with httpx2.Client(transport=httpx2.MockTransport(asks_nothing)) as client:
-        asking = preflight.Asking(preflight.GROQ, GROQ_KEY, client)
+        asking = preflight.Asking(preflight.GROQ, GROQ_KEY, client, "GROQ_API_KEY")
 
         assert GROQ_KEY not in repr(asking)
 
@@ -1033,3 +1152,844 @@ def test_every_request_has_five_seconds_to_connect_and_thirty_to_be_answered() -
         limits = request.extensions["timeout"]
         assert limits["connect"] == 5, call_of(request)
         assert limits["read"] == 30, call_of(request)
+
+
+# --- The models file, held against what the providers state ---------------------------
+
+# The figures of the models file that a fake provider states, each with the provider's
+# own: Groq's list and its answers' headers, and the Gemini API's description.
+STATED = [
+    pytest.param("groq", "openai/gpt-oss-120b", "context_window", 131_072, id="groq-window"),
+    pytest.param("groq", "openai/gpt-oss-120b", "max_output_tokens", 65_536, id="groq-longest"),
+    pytest.param("groq", "openai/gpt-oss-120b", "requests_a_day", 14_400, id="groq-a-day"),
+    pytest.param("groq", "openai/gpt-oss-120b", "tokens_a_minute", 18_000, id="groq-a-minute"),
+    pytest.param("gemini", "gemini-3.6-flash", "context_window", 1_048_576, id="gemini-window"),
+    pytest.param("gemini", "gemini-3.6-flash", "max_output_tokens", 65_536, id="gemini-longest"),
+]
+
+
+@pytest.mark.parametrize(("table", "model", "key", "theirs"), STATED)
+def test_a_figure_larger_than_the_providers_fails_the_run(
+    table: str, model: str, key: str, theirs: int
+) -> None:
+    status, printed = run(table, models=one_model(table, model, **{key: theirs + 1}))
+
+    assert status == 1
+    [failed] = failures(printed)
+    for fact in ["models.big", key, f"{theirs + 1:,}", f"{theirs:,}"]:
+        assert fact in failed, failed
+    said = under(printed, model)
+    assert failed in said
+    # The model's other lines are printed all the same.
+    assert "answered in " in said
+    assert "failed" in printed.splitlines()[-1]
+
+
+def test_every_figure_larger_than_the_providers_is_said() -> None:
+    figures = {"context_window": 131_073, "requests_a_day": 14_401}
+
+    status, printed = run("groq", models=one_model("groq", "openai/gpt-oss-120b", **figures))
+
+    assert status == 1
+    window, requests = failures(printed)
+    assert "context_window" in window
+    assert "requests_a_day" in requests
+
+
+@pytest.mark.parametrize(("table", "model", "key", "theirs"), STATED)
+def test_a_figure_as_large_as_the_providers_passes(
+    table: str, model: str, key: str, theirs: int
+) -> None:
+    status, printed = run(table, models=one_model(table, model, **{key: theirs}))
+
+    assert status == 0
+    assert not failures(printed)
+    # It was held against the provider's: a line says so.
+    assert f"{theirs:,}" in line_of(under(printed, model), key)
+
+
+@pytest.mark.parametrize(("table", "model", "key", "theirs"), STATED)
+def test_a_figure_smaller_than_the_providers_passes_with_the_providers_beside_it(
+    table: str, model: str, key: str, theirs: int
+) -> None:
+    status, printed = run(table, models=one_model(table, model, **{key: theirs - 1}))
+
+    assert status == 0
+    assert not failures(printed)
+    held = line_of(under(printed, model), key)
+    assert f"{theirs - 1:,}" in held
+    assert f"{theirs:,}" in held
+
+
+HUGE = 1_000_000_000
+
+
+def test_what_groqs_api_doesnt_state_is_not_checked_however_large() -> None:
+    figures = {"requests_a_minute": HUGE, "tokens_a_day": HUGE}
+
+    status, printed = run("groq", models=one_model("groq", "openai/gpt-oss-120b", **figures))
+
+    assert status == 0
+    assert not failures(printed)
+    unchecked = line_of(under(printed, "openai/gpt-oss-120b"), "requests_a_minute")
+    # Why: its API never states them, which is another reason than an answer without one.
+    for fact in ["not checked", "tokens_a_day", f"{HUGE:,}", "API", preflight.GROQ.limits_at]:
+        assert fact in unchecked, unchecked
+
+
+def test_no_limit_of_a_gemini_model_is_checked_however_large() -> None:
+    figures = dict.fromkeys(LIMITS, HUGE)
+
+    status, printed = run("gemini", models=one_model("gemini", "gemini-3.6-flash", **figures))
+
+    assert status == 0
+    assert not failures(printed)
+    unchecked = line_of(under(printed, "gemini-3.6-flash"), "not checked")
+    for fact in [*LIMITS, f"{HUGE:,}", "API", preflight.GEMINI.limits_at]:
+        assert fact in unchecked, unchecked
+
+
+@pytest.mark.parametrize(
+    ("figures", "too_large"),
+    [
+        ({"requests_a_minute": 20_000, "requests_a_day": 14_000}, None),
+        ({"requests_a_minute": 14_000, "requests_a_day": 20_000}, "requests_a_day"),
+        ({"tokens_a_day": 20_000, "tokens_a_minute": 17_000}, None),
+        ({"tokens_a_day": 17_000, "tokens_a_minute": 20_000}, "tokens_a_minute"),
+    ],
+)
+def test_each_of_groqs_headers_is_held_against_the_key_of_what_it_counts(
+    figures: dict[str, int], too_large: str | None
+) -> None:
+    # Groq's headers state 14,400 requests a day and 18,000 tokens a minute.
+    status, printed = run("groq", models=one_model("groq", "openai/gpt-oss-120b", **figures))
+
+    said = under(printed, "openai/gpt-oss-120b")
+    if too_large is None:
+        assert status == 0
+        assert not failures(printed)
+        # The other key of the two is not checked.
+        assert "20,000" in line_of(said, "not checked")
+    else:
+        assert status == 1
+        [failed] = failures(printed)
+        assert too_large in failed
+        assert "20,000" in failed
+
+
+def test_a_limit_the_provider_states_and_the_file_leaves_out_is_said_and_fails_nothing() -> None:
+    status, printed = run("groq", models=one_model("groq", "openai/gpt-oss-120b"))
+
+    assert status == 0
+    assert not failures(printed)
+    said = under(printed, "openai/gpt-oss-120b")
+    for key, theirs in [("requests_a_day", "14,400"), ("tokens_a_minute", "18,000")]:
+        left_out = line_of(said, key)
+        assert theirs in left_out
+        assert "none" in left_out
+
+
+def answered_with(headers: Mapping[str, str]) -> Answer:
+    """An answer to every question, with these headers."""
+    return lambda request: httpx2.Response(
+        200, json=completion(asked(request), 74, 9), headers=headers
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "model", "figures", "key", "figure", "why", "where"),
+    [
+        pytest.param(
+            answered_with(GROQ_LIMITS | {"x-ratelimit-limit-requests": "lots"}),
+            "openai/gpt-oss-120b",
+            {"requests_a_day": 1000},
+            "requests_a_day",
+            "1,000",
+            "number",
+            preflight.GROQ.limits_at,
+            id="a-header-that-isnt-a-number",
+        ),
+        pytest.param(
+            answered_with(
+                {
+                    name: value
+                    for name, value in GROQ_LIMITS.items()
+                    if name != "x-ratelimit-limit-tokens"
+                }
+            ),
+            "openai/gpt-oss-120b",
+            {"tokens_a_minute": 1000},
+            "tokens_a_minute",
+            "1,000",
+            "answer",
+            preflight.GROQ.limits_at,
+            id="a-header-that-is-missing",
+        ),
+        # Its entry in Groq's list has no `max_completion_tokens`.
+        pytest.param(
+            None,
+            "openai/gpt-oss-20b",
+            {},
+            "max_output_tokens",
+            "2,048",
+            "list",
+            preflight.GROQ.models_at,
+            id="an-entry-without-the-longest-answer",
+        ),
+    ],
+)
+def test_what_the_provider_didnt_state_or_stated_unreadably_is_not_checked_and_fails_nothing(
+    answer: Answer | None,
+    model: str,
+    figures: dict[str, int],
+    key: str,
+    figure: str,
+    why: str,
+    where: str,
+) -> None:
+    providers = Providers()
+    if answer is not None:
+        providers.answers["groq ask"] = answer
+
+    status, printed = run("groq", models=one_model("groq", model, **figures), providers=providers)
+
+    assert status == 0
+    assert not failures(printed)
+    unchecked = line_of(under(printed, model), key)
+    # Why it wasn't checked is said by what was missing: a number, an answer's header, or
+    # the list's entry.
+    for fact in ["not checked", figure, why, where]:
+        assert fact in unchecked, unchecked
+    for other in {"number", "answer", "list"} - {why}:
+        assert other not in unchecked, unchecked
+
+
+def test_a_size_that_isnt_a_number_is_not_checked_and_fails_nothing() -> None:
+    providers = Providers()
+    listed = [GROQ_MODELS[0] | {"max_completion_tokens": "65536"}]
+    providers.answers["groq list"] = lambda _request: httpx2.Response(
+        200, json={"object": "list", "data": listed}
+    )
+
+    status, printed = run(
+        "groq", models=one_model("groq", "openai/gpt-oss-120b"), providers=providers
+    )
+
+    assert status == 0
+    assert not failures(printed)
+    unchecked = line_of(under(printed, "openai/gpt-oss-120b"), "max_output_tokens")
+    for fact in ["not checked", "2,048", "number", preflight.GROQ.models_at]:
+        assert fact in unchecked, unchecked
+
+
+def test_the_limits_of_an_id_two_models_share_are_said_once_for_both() -> None:
+    limits = {"requests_a_minute": 30, "requests_a_day": 1000}
+    models = models_file(
+        GROQ_TABLE,
+        model_table("big", "groq", "openai/gpt-oss-120b", **limits),
+        model_table("again", "groq", "openai/gpt-oss-120b", **limits),
+    )
+
+    status, printed = run("groq", models=models)
+
+    assert status == 0
+    said = under(printed, "openai/gpt-oss-120b")
+    # One line each, for both models: the limit that was held, the one the file leaves
+    # out, and the one that wasn't checked.
+    for fact in ["requests_a_day 1,000", "tokens_a_minute", "requests_a_minute 30"]:
+        line = line_of(said, fact)
+        assert "models.big" in line, line
+        assert "models.again" in line, line
+    # And the one that wasn't checked counts once.
+    assert re.search(r"\b1\b", summary(printed, "Groq (providers.groq)"))
+
+
+def test_the_files_models_are_asked_each_id_once_and_each_figure_is_its_models_own() -> None:
+    providers = Providers()
+    models = models_file(
+        GROQ_TABLE,
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+        model_table("again", "groq", "openai/gpt-oss-120b", max_output_tokens=70_000),
+    )
+
+    status, printed = run("groq", models=models, providers=providers)
+
+    assert status == 1
+    # One question, and not the script's own models.
+    assert providers.asked("groq") == ["openai/gpt-oss-120b"]
+    assert line_of(printed, "(models.big, models.again)") == (
+        "  openai/gpt-oss-120b (models.big, models.again)"
+    )
+    [failed] = failures(printed)
+    assert "models.again" in failed
+    assert "models.big" not in failed
+    assert "70,000" in failed
+
+
+def test_a_provider_the_file_has_no_table_of_is_asked_its_own_models_and_compares_nothing() -> None:
+    providers = Providers()
+    models = models_file(GROQ_TABLE, model_table("big", "groq", "openai/gpt-oss-120b"))
+
+    status, printed = run(models=models, providers=providers)
+
+    assert status == 0
+    assert providers.asked("gemini") == list(preflight.GEMINI.models)
+    gemini = section(printed, "Gemini")
+    assert "Gemini" in line_of(gemini, "models file", "none")
+    assert "not checked" not in gemini
+    assert summary(printed, "Gemini") == "Gemini passed"
+    # The file's own table was held against Groq's figures.
+    assert "131,072" in line_of(under(printed, "openai/gpt-oss-120b"), "context_window")
+
+
+def test_the_models_file_is_the_arguments_or_else_the_environments_or_else_the_apis_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each file puts another of Groq's models on its table, so that its question shows
+    # which file was read. The default is seen from the directory the script runs in.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir()
+    for path, model in [
+        ("argument.toml", "llama-3.1-8b-instant"),
+        ("environment.toml", "openai/gpt-oss-20b"),
+        ("config/models.toml", "openai/gpt-oss-120b"),
+    ]:
+        (tmp_path / path).write_text(models_file(GROQ_TABLE, model_table("big", "groq", model)))
+    argument, environment = str(tmp_path / "argument.toml"), str(tmp_path / "environment.toml")
+    keys = {"GROQ_API_KEY": GROQ_KEY}
+
+    for arguments, environ, read, model in [
+        (
+            ["--models-file", argument],
+            keys | {"ACTIO_MODELS_FILE": environment},
+            argument,
+            "llama-3.1-8b-instant",
+        ),
+        ([], keys | {"ACTIO_MODELS_FILE": environment}, environment, "openai/gpt-oss-20b"),
+        ([], keys, "config/models.toml", "openai/gpt-oss-120b"),
+    ]:
+        providers = Providers()
+
+        status, printed = run("groq", *arguments, environ=environ, models=None, providers=providers)
+
+        assert status == 0, printed
+        assert providers.asked("groq") == [model]
+        lines = printed.splitlines()
+        # Said before anything about a provider.
+        named = lines.index(line_of(printed, read))
+        assert named < min(at for at, line in enumerate(lines) if "Groq" in line)
+
+
+@pytest.mark.parametrize("value", ["", " "])
+def test_a_variable_that_is_set_and_names_no_file_is_taken_as_the_api_takes_it(
+    value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The API takes an ACTIO_MODELS_FILE that is set and empty for the directory it runs
+    # in, and doesn't start. So the default isn't read in its place, though it is there.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.toml").write_text(NO_CLOUD)
+
+    status, printed = run(
+        environ=BOTH | {"ACTIO_MODELS_FILE": value}, models=None, providers=asks_nothing
+    )
+
+    assert status == 1
+    [line] = printed.splitlines()
+    assert "FAILED" in line
+    assert "models file" in line
+
+
+def test_the_models_file_may_be_named_between_providers(tmp_path: Path) -> None:
+    path = tmp_path / "models.toml"
+    path.write_text(NO_CLOUD)
+    providers = Providers()
+
+    status, _ = run("groq", "--models-file", str(path), "gemini", models=None, providers=providers)
+
+    assert status == 0
+    assert providers.asked("groq") == list(preflight.GROQ.models)
+    assert providers.asked("gemini") == list(preflight.GEMINI.models)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param(b"default = \n", id="not-toml"),
+        pytest.param(
+            one_model("groq", "openai/gpt-oss-120b", requests_a_day="1000").encode(),
+            id="a-mistake",
+        ),
+        # What the TOML parser gives up on in a way of its own.
+        pytest.param(b'default = "\xff"\n', id="not-utf-8"),
+        pytest.param(b"a = " + b"9" * 5000 + b"\n", id="a-number-too-long"),
+        pytest.param(b"a = " + b"[" * 10_000 + b"]" * 10_000 + b"\n", id="too-deep"),
+    ],
+)
+def test_a_models_file_that_cant_be_read_is_one_line_in_the_readers_words_and_asks_nothing(
+    content: bytes | None, tmp_path: Path
+) -> None:
+    # In a folder whose name alone is longer than a provider's text may be printed.
+    path = tmp_path / ("a-folder-of-its-own-" * 10) / "models.toml"
+    path.parent.mkdir()
+    if content is not None:
+        path.write_bytes(content)
+    with pytest.raises(CatalogError) as refused:
+        read_file(path)
+
+    status, printed = run("--models-file", str(path), models=None, providers=asks_nothing)
+
+    assert status == 1
+    [line] = printed.splitlines()
+    assert "FAILED" in line
+    # Whole: not cut as a provider's text is.
+    assert len(str(refused.value)) > preflight.SHOWN_AT_MOST
+    assert str(refused.value) in line
+    assert str(path) in line
+
+
+def bearer_of(request: httpx2.Request) -> str:
+    return request.headers.get("authorization", "")
+
+
+def test_a_tables_key_is_read_from_the_variable_it_names() -> None:
+    providers = Providers()
+    models = models_file(
+        provider_table("groq", GROQ_URL, "OTHER_KEY"),
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+    )
+
+    status, printed = run(
+        "groq",
+        environ={"OTHER_KEY": OTHER_KEY, "GROQ_API_KEY": GROQ_KEY},
+        models=models,
+        providers=providers,
+    )
+
+    assert status == 0
+    assert providers.calls() == ["groq list", "groq ask openai/gpt-oss-120b"]
+    for request in providers.sent:
+        assert bearer_of(request) == f"Bearer {OTHER_KEY}"
+        assert not [name for name, value in request.headers.items() if GROQ_KEY in value]
+        assert GROQ_KEY not in str(request.url)
+        assert GROQ_KEY.encode() not in request.content
+    assert OTHER_KEY not in printed
+
+
+def test_a_table_whose_variable_holds_no_key_is_skipped_by_a_line_that_names_it() -> None:
+    models = models_file(
+        provider_table("groq", GROQ_URL, "OTHER_KEY"),
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+    )
+
+    status, printed = run(
+        "groq", environ={"GROQ_API_KEY": GROQ_KEY}, models=models, providers=asks_nothing
+    )
+
+    assert status == 1
+    assert "https://console.groq.com/keys" in line_of(printed, "OTHER_KEY")
+    assert "GROQ_API_KEY" not in printed
+
+
+@pytest.mark.parametrize(
+    ("key", "refusal"),
+    [
+        pytest.param(OTHER_KEY, httpx2.Response(401, json=GROQ_REFUSES_THE_KEY), id="refused"),
+        pytest.param("another secret", None, id="cant-be-a-key"),
+    ],
+)
+def test_what_is_said_of_a_tables_key_names_the_tables_variable(
+    key: str, refusal: httpx2.Response | None
+) -> None:
+    providers = Providers()
+    if refusal is not None:
+        providers.answers["groq list"] = lambda _request: refusal
+    models = models_file(
+        provider_table("groq", GROQ_URL, "OTHER_KEY"),
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+    )
+
+    status, printed = run(
+        "groq",
+        environ={"OTHER_KEY": key, "GROQ_API_KEY": GROQ_KEY},
+        models=models,
+        providers=providers,
+    )
+
+    assert status == 1
+    [failed] = failures(printed)
+    assert "OTHER_KEY" in failed
+    assert "GROQ_API_KEY" not in printed
+
+
+def test_a_table_that_names_no_variable_for_its_key_fails_and_nothing_is_asked() -> None:
+    models = models_file(
+        provider_table("groq", GROQ_URL, None),
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+    )
+
+    status, printed = run("groq", models=models, providers=asks_nothing)
+
+    assert status == 1
+    [failed] = failures(printed)
+    assert "providers.groq" in failed
+    assert "api_key_env" in failed
+    assert "failed" in summary(printed, "Groq (providers.groq)")
+
+
+def test_two_tables_of_one_provider_are_two_checks_each_with_its_own_key() -> None:
+    providers = Providers()
+    models = models_file(
+        GROQ_TABLE,
+        provider_table("spare", GROQ_URL, "SPARE_GROQ_KEY"),
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+        model_table("small", "spare", "openai/gpt-oss-20b"),
+    )
+
+    status, printed = run(
+        "groq",
+        environ={"GROQ_API_KEY": GROQ_KEY, "SPARE_GROQ_KEY": OTHER_KEY},
+        models=models,
+        providers=providers,
+    )
+
+    assert status == 0
+    assert [(call_of(request), bearer_of(request)) for request in providers.sent] == [
+        ("groq list", f"Bearer {GROQ_KEY}"),
+        ("groq ask openai/gpt-oss-120b", f"Bearer {GROQ_KEY}"),
+        ("groq list", f"Bearer {OTHER_KEY}"),
+        ("groq ask openai/gpt-oss-20b", f"Bearer {OTHER_KEY}"),
+    ]
+    assert summary(printed, "Groq (providers.groq)").startswith("Groq (providers.groq) passed")
+    assert summary(printed, "Groq (providers.spare)").startswith("Groq (providers.spare) passed")
+
+
+def test_a_table_with_no_model_on_it_has_its_key_checked_and_says_so() -> None:
+    providers = Providers()
+
+    status, printed = run("groq", models=models_file(GROQ_TABLE), providers=providers)
+
+    assert status == 0
+    assert providers.calls() == ["groq list"]
+    assert "providers.groq" in line_of(section(printed, "Groq (providers.groq)"), "no model")
+
+
+def test_a_model_on_another_server_is_asked_nothing_and_its_limits_are_not_checked() -> None:
+    providers = Providers()
+    models = models_file(
+        provider_table("other", "https://api.example.org/v1", "OTHER_KEY"),
+        model_table("far", "other", "far-model", requests_a_day=10, tokens_a_minute=500),
+        model_table("near", "other", "near-model"),
+        # A local server too: Ollama.
+        model_table("counted", "ollama", "other-local-model", requests_a_minute=3),
+    )
+
+    status, printed = run(
+        environ=BOTH | {"OTHER_KEY": OTHER_KEY}, models=models, providers=providers
+    )
+
+    assert status == 0
+    assert {request.url.host for request in providers.sent} == {GROQ_HOST, GOOGLE_HOST}
+    for request in providers.sent:
+        assert not [name for name, value in request.headers.items() if OTHER_KEY in value]
+    far = line_of(printed, "models.far")
+    for fact in ["providers.other", "requests_a_day 10", "tokens_a_minute 500"]:
+        assert fact in far, far
+    assert "requests_a_minute 3" in line_of(printed, "models.counted")
+    # Models that state no limit get no line.
+    assert "models.near" not in printed
+    assert "models.standard" not in printed
+
+    # When the command line names providers, nothing is said of other servers.
+    status, printed = run("groq", "gemini", environ=BOTH, models=models)
+
+    assert status == 0
+    assert "models.far" not in printed
+    assert "models.counted" not in printed
+
+
+@pytest.mark.parametrize(
+    ("url", "is_groqs"),
+    [
+        ("https://API.GROQ.COM/openai/v1", True),
+        ("https://api.groq.com.example.org/v1", False),
+        ("https://notapi.groq.com/openai/v1", False),
+        # An address the url parser can't take apart.
+        ("https://[api.groq.com/openai/v1", False),
+    ],
+)
+def test_a_table_is_groqs_by_its_whole_host(url: str, is_groqs: bool) -> None:
+    providers = Providers()
+    models = models_file(
+        provider_table("near", url, "GROQ_API_KEY"),
+        model_table("big", "near", "llama-3.1-8b-instant", requests_a_day=10),
+    )
+
+    status, printed = run(models=models, providers=providers)
+
+    assert status == 0
+    last = printed.splitlines()[-1]
+    if is_groqs:
+        assert "Groq (providers.near) passed" in last
+        assert providers.asked("groq") == ["llama-3.1-8b-instant"]
+    else:
+        assert "providers.near" not in last
+        # Groq is checked as itself, and the model's limit isn't checked.
+        assert providers.asked("groq") == list(preflight.GROQ.models)
+        assert "requests_a_day 10" in line_of(printed, "models.big", "providers.near")
+
+
+def test_models_named_on_the_command_line_replace_the_files() -> None:
+    providers = Providers()
+    models = models_file(
+        GROQ_TABLE,
+        model_table("small", "groq", "openai/gpt-oss-20b"),
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+    )
+
+    status, printed = run(
+        "groq=openai/gpt-oss-120b,llama-3.1-8b-instant", models=models, providers=providers
+    )
+
+    assert status == 0
+    assert providers.asked("groq") == ["openai/gpt-oss-120b", "llama-3.1-8b-instant"]
+    # The one the file has on the table is compared, and the other says it isn't.
+    assert "131,072" in line_of(under(printed, "openai/gpt-oss-120b"), "context_window")
+    not_in_file = under(printed, "llama-3.1-8b-instant")
+    assert "providers.groq" in line_of(not_in_file, "models file")
+    assert "context_window" not in not_in_file
+
+
+@pytest.mark.parametrize(
+    ("first", "call", "answer", "fact", "second"),
+    [
+        pytest.param(
+            "llama-9-made-up",
+            None,
+            None,
+            "llama-9-made-up",
+            "openai/gpt-oss-120b",
+            id="not-offered",
+        ),
+        pytest.param(
+            "openai/gpt-oss-120b",
+            "groq ask openai/gpt-oss-120b",
+            lambda _request: httpx2.Response(429, json={"error": {"message": "Rate limit"}}),
+            "429",
+            "openai/gpt-oss-20b",
+            id="refused",
+        ),
+    ],
+)
+def test_a_model_that_fails_before_its_answer_compares_nothing_and_the_next_one_is_compared(
+    first: str, call: str | None, answer: Answer | None, fact: str, second: str
+) -> None:
+    providers = Providers()
+    if call is not None and answer is not None:
+        providers.answers[call] = answer
+    # Larger than the provider's: compared, it would fail.
+    models = models_file(
+        GROQ_TABLE,
+        model_table("first", "groq", first, max_output_tokens=70_000),
+        model_table("second", "groq", second),
+    )
+
+    status, printed = run("groq", models=models, providers=providers)
+
+    assert status == 1
+    [failed] = failures(printed)
+    assert fact in failed
+    assert "max_output_tokens" not in under(printed, first)
+    assert "131,072" in line_of(under(printed, second), "context_window")
+
+
+def test_the_last_line_counts_what_a_check_didnt_check_and_fails_one_with_a_figure_too_large() -> (
+    None
+):
+    models = models_file(
+        GROQ_TABLE,
+        GEMINI_TABLE,
+        model_table(
+            "big", "groq", "openai/gpt-oss-120b", requests_a_minute=30, tokens_a_day=200_000
+        ),
+        # Too large, and with a limit that isn't checked: a check that failed says that
+        # it failed, and not how many figures it didn't check.
+        model_table(
+            "flash", "gemini", "gemini-3.6-flash", max_output_tokens=70_000, requests_a_day=20
+        ),
+    )
+
+    status, printed = run(models=models)
+
+    assert status == 1
+    [failed] = failures(printed)
+    assert "models.flash" in failed
+    assert "requests_a_day 20" in line_of(under(printed, "gemini-3.6-flash"), "not checked")
+    groq = summary(printed, "Groq (providers.groq)")
+    assert "passed" in groq
+    assert re.search(r"\b2\b", groq), groq
+    assert summary(printed, "Gemini (providers.gemini)") == "Gemini (providers.gemini) failed"
+
+
+ROOT = Path(__file__).resolve().parents[2]
+EXAMPLE = ROOT / "config" / "examples" / "free-cloud" / "models.toml"
+SHIPPED = ROOT / "config" / "models.toml"
+
+
+def as_seen_on_2026_11_26(providers: Providers) -> None:
+    """Groq as one run with free keys saw it: both models with a window of 131,072 and
+    answers up to 65,536 tokens, and 1,000 requests a day and 8,000 tokens a minute in
+    the headers. The fake's Gemini API states what it saw."""
+    listed = [
+        entry | {"context_window": 131072, "max_completion_tokens": 65536}
+        for entry in GROQ_MODELS[:2]
+    ]
+    headers = GROQ_LIMITS | {
+        "x-ratelimit-limit-requests": "1000",
+        "x-ratelimit-limit-tokens": "8000",
+        "x-ratelimit-remaining-requests": "999",
+        "x-ratelimit-remaining-tokens": "7666",
+    }
+    providers.answers["groq list"] = lambda _request: httpx2.Response(
+        200, json={"object": "list", "data": listed}
+    )
+    providers.answers["groq ask"] = answered_with(headers)
+
+
+def test_the_example_holds_against_what_the_providers_were_seen_to_state() -> None:
+    providers = Providers()
+    as_seen_on_2026_11_26(providers)
+
+    status, printed = run("--models-file", str(EXAMPLE), models=None, providers=providers)
+
+    assert status == 0, printed
+    assert not failures(printed)
+    assert providers.asked("groq") == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+    assert providers.asked("gemini") == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+    # Groq's requests a minute and tokens a day of both models, and the three limits
+    # each of the Gemini API's two states.
+    groq = summary(printed, "Groq (providers.groq)")
+    assert re.search(r"\b4\b", groq), groq
+    gemini = summary(printed, "Gemini (providers.gemini)")
+    assert re.search(r"\b6\b", gemini), gemini
+    # Its cloud models are on tables the script knows: none is said to be on a server it
+    # can't ask, and its local model states no limit.
+    assert " on providers." not in printed
+
+
+def test_the_shipped_file_has_the_scripts_own_models_asked() -> None:
+    providers = Providers()
+
+    status, _ = run("--models-file", str(SHIPPED), models=None, providers=providers)
+
+    assert status == 0
+    assert providers.asked("groq") == list(preflight.GROQ.models)
+    assert providers.asked("gemini") == list(preflight.GEMINI.models)
+
+
+def test_the_scripts_own_models_are_the_examples_cloud_models() -> None:
+    example = read_file(EXAMPLE)
+
+    def on(host: str) -> list[str]:
+        return [
+            model.model
+            for model in example.models.values()
+            if urlsplit(example.providers[model.provider].url or "").hostname == host
+        ]
+
+    assert on(GROQ_HOST) == list(preflight.GROQ.models)
+    assert on(GOOGLE_HOST) == list(preflight.GEMINI.models)
+
+
+@pytest.mark.parametrize(
+    ("url", "said"),
+    [
+        ("http://api.groq.com/other", True),
+        # Another scheme alone, with which Actio would send the key unencrypted.
+        ("http://api.groq.com/openai/v1", True),
+        # Another path alone.
+        ("https://api.groq.com/other", True),
+        ("https://api.groq.com/openai/v1/", False),
+        ("https://api.groq.com/openai/v1", False),
+        # A host in capitals is the same host.
+        ("https://API.GROQ.COM/openai/v1", False),
+    ],
+)
+def test_questions_go_to_the_scripts_own_address_whatever_the_tables_url(
+    url: str, said: bool
+) -> None:
+    providers = Providers()
+    models = models_file(
+        provider_table("groq", url, "GROQ_API_KEY"),
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+    )
+
+    status, printed = run("groq", models=models, providers=providers)
+
+    assert status == 0
+    assert providers.calls() == ["groq list", "groq ask openai/gpt-oss-120b"]
+    for request in providers.sent:
+        assert str(request.url).startswith(f"{GROQ_URL}/"), request.url
+    if said:
+        assert GROQ_URL in line_of(printed, url)
+    else:
+        # The script's own address is said nowhere else.
+        assert GROQ_URL not in printed
+
+
+def test_a_tables_url_is_printed_without_its_key_and_without_escape_sequences() -> None:
+    # A url may carry a key, as the Gemini API's own surface takes one in an address.
+    # The escape sequence is written as TOML writes a control character in a string.
+    url = f"https://api.groq.com/openai/v1?key={GROQ_KEY}&more=\\u001b[2Jodd"
+    models = models_file(
+        provider_table("groq", url, "GROQ_API_KEY"),
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+    )
+
+    status, printed = run("groq", models=models)
+
+    assert status == 0
+    said = line_of(printed, "api.groq.com/openai/v1?key=")
+    assert preflight.HIDDEN in said
+    assert "more=odd" in said
+    for start in range(len(GROQ_KEY) - preflight.KEY_PIECE + 1):
+        assert GROQ_KEY[start : start + preflight.KEY_PIECE] not in printed
+    assert all(char == "\n" or unicodedata.category(char) not in {"Cc", "Cf"} for char in printed)
+
+
+def test_the_files_path_is_printed_without_escape_sequences(tmp_path: Path) -> None:
+    path = tmp_path / "mo\x1b[2Jdels.toml"
+    path.write_text(NO_CLOUD)
+
+    status, printed = run("--models-file", str(path), models=None)
+
+    assert status == 0
+    assert str(tmp_path / "models.toml") in printed.splitlines()[1]
+    assert all(char == "\n" or unicodedata.category(char) not in {"Cc", "Cf"} for char in printed)
+
+
+def test_a_models_id_from_the_file_is_printed_without_escape_sequences() -> None:
+    odd = "\x1b[2Jodd\x1b]0;title\x07-model"
+    providers = Providers()
+    listed = [*GROQ_MODELS, {"id": odd, "context_window": 131072, "max_completion_tokens": 65536}]
+    providers.answers["groq list"] = lambda _request: httpx2.Response(
+        200, json={"object": "list", "data": listed}
+    )
+    # As TOML writes the control characters in a string.
+    escaped = odd.replace("\x1b", "\\u001b").replace("\x07", "\\u0007")
+
+    status, printed = run("groq", models=one_model("groq", escaped), providers=providers)
+
+    assert status == 0
+    assert providers.asked("groq") == [odd]
+    assert line_of(printed, "(models.big)") == "  odd-model (models.big)"
+    assert "[2J" not in printed
+    assert all(char == "\n" or unicodedata.category(char) not in {"Cc", "Cf"} for char in printed)
+
+
+def test_what_a_providers_headers_count_is_a_key_of_the_models_file() -> None:
+    for provider in preflight.PROVIDERS:
+        for kind, window in provider.counts.items():
+            key = preflight.counted_by(kind, window)
+            assert LIMITS[key] == (kind, window.removeprefix("a "))

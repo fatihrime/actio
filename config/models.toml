@@ -127,7 +127,9 @@ kind = "ollama"
 #                    is the provider's own figure, a whole number of 1 or more, and may
 #                    be there without the others. Two models of this file that are the
 #                    same model on the same provider share one budget, and state the same
-#                    figures. Left out, the server has no such limit.
+#                    figures. Left out, the server has no such limit. `make preflight`
+#                    holds the four against what the provider's API states, where it
+#                    states them, and fails where this file states more.
 #                    See docs/adr/0030-the-providers-budgets-are-counted.md:
 #
 #   requests_a_minute = 30

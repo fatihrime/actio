@@ -71,8 +71,11 @@ max_output_tokens = 2048
 # sends to each model, and keeps to nine tenths of each figure: a model that has nothing
 # left of one for a request is asked after those of its chain that have some, and when
 # none of those with room has any, the question is refused for now, with how long to
-# wait. `make preflight` prints the headers' figures for your account: raise them on a
-# paid plan.
+# wait. `make preflight` holds requests_a_day and tokens_a_minute to the headers'
+# figures for your account, and context_window and max_output_tokens to Groq's list of
+# models, and fails where this file states more. requests_a_minute and tokens_a_day,
+# which no answer states, it can't check: read them at
+# https://console.groq.com/settings/limits. Raise them on a paid plan.
 #
 # These models always reason, and "low" is the least they can be told: a turn that asks
 # for no reasoning gets that, and one that asks for reasoning gets "medium". Told "high",
@@ -132,9 +135,10 @@ thinking_on = { reasoning_effort = "medium" }
 # documentation counts as input tokens. A request larger than that, by Actio's guess,
 # isn't sent there while another model that may answer it has room for it. Groq was
 # seen to refuse such a request whole; with the Gemini API it wasn't tried. Raise it on
-# a paid plan, to what the page above says. For max_output_tokens, `make preflight`
-# prints the longest answer the API states for each model: this file's must be no
-# larger.
+# a paid plan, to what the page above says. `make preflight` holds context_window and
+# max_output_tokens to what the API states of each model, and fails where this file
+# states more. None of the three limits can it check, since the API states none: read
+# them on the page above.
 
 # The API sends this model's thoughts only when it is asked to, which `thinking_on`
 # does. A turn that asks for no reasoning is told Actio's own "none", which it takes.

@@ -94,7 +94,7 @@ And how long it is given for a whole answer, `answers_within_seconds`, counted f
 Groq and the Gemini API have free tiers, and speak OpenAI's API too. `config/examples/free-cloud/` is a pair of files that offer four of their models beside the one above, which stays the default:
 
 1. Make a key for each, at <https://console.groq.com/keys> and <https://aistudio.google.com/apikey>, and put them in `.env` as `GROQ_API_KEY` and `GEMINI_API_KEY`.
-2. Run `make preflight`: it says whether each key works, whether the models are offered to it, and what its account may use.
+2. Run `make preflight args="--models-file config/examples/free-cloud/models.toml"`: it says whether each key works, whether the example's models are offered to it, and what its account may use. It fails where the example states more than the provider's API states for your account, and names the figures no API states, which you read on the provider's page. Once the copies below are in place, `make preflight` alone reads the file Actio reads.
 3. Have Actio read them, and run `make dev` or `make up` again:
     - under `make dev`, copy the two to a folder of your own, `config/local/`, which git leaves alone, and point `ACTIO_MODELS_FILE=config/local/models.toml` and `ACTIO_PLANS_FILE=config/local/plans.toml` at the copies in `.env`. Nothing tracked changes;
     - under `make up`, the containers read `config/models.toml` and `config/plans.toml`, so copy the two over those. That changes two tracked files, and the repository's own tests read `config/` as it is shipped: run them with the shipped pair back.

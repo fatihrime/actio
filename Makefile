@@ -118,12 +118,14 @@ demo-record: ## Record the README's hero GIF from the running stack, into docs/a
 
 # Not part of `make check`: it asks the cloud providers, with your own keys, and each
 # model it checks answers one short question, which counts against your account's
-# limits. The keys come from the shell, and from .env when there is one, for what the
-# shell doesn't export: `export -p` writes the shell's own variables in a form it reads
-# back, so they are put back over .env's once it is loaded. A variable the shell exports
-# empty wins too. Arguments go in `args`, such as args="groq=openai/gpt-oss-20b":
-# args=--help lists them. See docs/development.md.
-preflight: ## Check the cloud providers' keys, the models offered to them and the limits they state
+# limits. It holds the models file the API reads, ACTIO_MODELS_FILE's or else
+# config/models.toml, against what they state; args="--models-file PATH" names another.
+# The keys, and ACTIO_MODELS_FILE, come from the shell, and from .env when there is one,
+# for what the shell doesn't export: `export -p` writes the shell's own variables in a
+# form it reads back, so they are put back over .env's once it is loaded. A variable the
+# shell exports empty wins too. Arguments go in `args`, such as
+# args="groq=openai/gpt-oss-20b": args=--help lists them. See docs/development.md.
+preflight: ## Check the cloud providers' keys and models, and hold the models file against the limits they state
 	@if [ -f .env ]; then mine="$$(export -p)"; set -a; . ./.env; set +a; eval "$$mine"; fi; uv run python scripts/preflight.py $(args)
 
 # Created once and never overwritten: Postgres keeps the password it started with.
