@@ -546,6 +546,27 @@ def test_the_api_does_not_start_without_its_plans_file(
     assert said.count("\n") == 1
 
 
+@pytest.mark.parametrize(
+    ("variable", "what"), [("ACTIO_MODELS_FILE", "models"), ("ACTIO_PLANS_FILE", "plans")]
+)
+def test_the_api_does_not_start_with_a_files_variable_set_and_empty(
+    variable: str, what: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Set and empty, the variable names the directory the API runs in, which is no file:
+    # the line says which variable to set.
+    monkeypatch.setenv(variable, "")
+    monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: pytest.fail("it started"))
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--role", "api"])
+
+    assert stopped.value.code == 2
+    said = capsys.readouterr().err
+    assert said.startswith(f"actio: the {what} file '.' is a directory, not a file.")
+    assert variable in said
+    assert said.count("\n") == 1
+
+
 @pytest.mark.parametrize("role", ["api", "all"])
 def test_a_mistake_in_the_plans_file_is_said_in_one_line(
     role: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path

@@ -32,6 +32,12 @@ def read[File: BaseModel, Failure: Exception](
             data = tomllib.load(file)
     except FileNotFoundError:
         raise failure(f"the {what} file {str(path)!r} doesn't exist. {elsewhere}") from None
+    except IsADirectoryError:
+        # A variable that is set and empty names the directory the process runs in, `.`:
+        # what to do is the same as for a file that isn't there.
+        raise failure(
+            f"the {what} file {str(path)!r} is a directory, not a file. {elsewhere}"
+        ) from None
     except OSError as error:
         raise failure(f"can't read the {what} file {str(path)!r}: {error}") from error
     except UnicodeDecodeError as error:

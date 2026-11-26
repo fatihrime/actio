@@ -144,6 +144,14 @@ def test_a_missing_file_says_where_it_looked_and_how_to_point_elsewhere(tmp_path
     assert "ACTIO_PLANS_FILE" in str(failure.value)
 
 
+def test_a_directory_in_the_files_place_says_so_and_how_to_point_elsewhere(tmp_path: Path) -> None:
+    with pytest.raises(PlansError) as failure:
+        read_file(tmp_path)
+
+    assert str(failure.value).startswith(f"the plans file '{tmp_path}' is a directory, not a file.")
+    assert "ACTIO_PLANS_FILE" in str(failure.value)
+
+
 # Each mistake is the good file with one piece replaced, and what the error must mention.
 MISTAKES = {
     "a plan for guests that isn't there": (

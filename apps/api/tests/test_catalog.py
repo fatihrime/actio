@@ -389,6 +389,36 @@ def test_a_missing_file_says_where_it_looked_and_how_to_point_elsewhere(tmp_path
     assert "ACTIO_MODELS_FILE" in str(failure.value)
 
 
+def test_a_directory_in_the_files_place_says_so_and_how_to_point_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(CatalogError) as failure:
+        read_file(tmp_path)
+
+    assert str(failure.value).startswith(f"the models file '{tmp_path}' is a directory")
+    assert "ACTIO_MODELS_FILE" in str(failure.value)
+
+    # A variable that is set and empty names the directory the process runs in.
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(CatalogError) as failure:
+        read_file(Path())
+
+    assert str(failure.value).startswith("the models file '.' is a directory")
+    assert "ACTIO_MODELS_FILE" in str(failure.value)
+
+
+def test_a_path_that_cant_be_looked_at_is_one_line_too(tmp_path: Path) -> None:
+    # A name longer than a file's may be: asking whether it is a directory fails as
+    # opening it does.
+    unreadable = tmp_path / ("a" * 300)
+
+    with pytest.raises(CatalogError) as failure:
+        read_file(unreadable)
+
+    assert str(failure.value).startswith(f"can't read the models file '{unreadable}'")
+    assert "\n" not in str(failure.value)
+
+
 # Each mistake is the good file with one piece replaced, and what the error must mention.
 MISTAKES = {
     "a default that isn't a model": (
