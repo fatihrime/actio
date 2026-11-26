@@ -150,3 +150,15 @@ Beside `tokens_a_minute`, a model's table may have three more keys of its provid
 ### 2026-11-26: a model without budget is asked last, and a request no model has budget for is refused for now
 
 "Passes over a ready model that has nothing left", and "when none has, each is asked all the same", in the revision above, are no longer what happens. A ready model without budget for a request is asked after those of its chain that have some. And when some ready models have room for the request and none of those has budget left for it, the question is refused for now, with how long to wait; a title is asked for again later. The file's keys and what is kept of each figure are as they were ([ADR 0030](0030-the-providers-budgets-are-counted.md), revision of 2026-11-26).
+
+### 2026-11-26: a file the TOML parser gives up on is one line too
+
+"A mistake stops it, with one line that names the file and the fault" didn't hold for three files. The reader (`actio.core.config_file.read`, which reads the plans file too) caught the parser's error for a mistake in TOML, and nothing else the parser raises:
+
+- **bytes that aren't UTF-8,** as an editor that saves in another encoding leaves them, an `é` in a comment being enough;
+- **a whole number of more than 4,300 digits,** which Python refuses to read;
+- **lists or tables nested thousands deep:** 3,000 were tried.
+
+Seen on 2026-11-26, with a file of each kind: the API's start ended with a trace of 22, 35 and 2,509 lines, and status 1. Now each is one line, and status 2, as every other mistake is: "… isn't valid TOML: it isn't UTF-8, from its byte 26 on", "… isn't valid TOML: Exceeds the limit (4300 digits) for integer string conversion: value has 5000 digits", "can't read the models file '…': it is nested too deep". A test reads each (`test_catalog.py`).
+
+**Why it surfaced only now:** the reader's tests wrote their files as text, so none was ever in another encoding, and the two others take a file nobody writes by hand. `make preflight` began to read the models file with this reader ([ADR 0030](0030-the-providers-budgets-are-counted.md), revision "`make preflight` holds the models file against what the providers state"), and its build tried files that can't be read.
