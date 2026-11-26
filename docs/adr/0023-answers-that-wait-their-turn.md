@@ -350,3 +350,161 @@ On the tree as it was committed, 36, one more among them, for what an answer han
 **The review,** by a reviewer that had not seen the build, once: nothing that had to be fixed, and four smaller points, all taken. That no test of the gate by itself had an answer cancelled in the step in which a place is given back, which the planting showed too; that the test of an answer handed a place and cancelled didn't show what counting it as given does, for which that account's next answer now stands in line; a time limit around the ways in that two tests take by hand; and, under "Known, and left", what the gate remembers while somebody always waits.
 
 **Not measured:** a server that writes several answers at once, whose part of the rule the tests hold alone; more than three accounts, and an hour of people asking, on a real server: the table of made-up traffic is worked out; the developer gateway's requests, which don't exist yet; and the page, whose source did not change. The end-to-end tests were not run for this step: nothing of the chat, a route, a stream, the containers or the fake model changed, and that stack's models have no gate.
+
+### 2026-11-26: a turn says that it waits, and behind how many answers
+
+The decision's "Not done yet" said: "**telling the reader that an answer waits,** and at which place. It comes with the router, which will know more about the servers". The revision before this one said, under "Known, and left": "**a reader isn't told that its answer waits, nor at which place:** the next step". Until now a turn that comes while its model's server is full waits at the gate with a stream of `start`, `start-step`, and then nothing but the line that keeps a silent connection open, and the page says "Waiting for the model…", as it does for a model that is slow to start.
+
+What a reader wants to know is how long, and nobody knows that. What the gate does know is the order. So the number is **how many answers have to end before this one starts:** the answer's place in the order in which the waiting answers would pass, by the gate's own rule played forward from its state now. The places held come back in the order they were given, since nothing better is known of when each ends; each that comes back goes to the waiting answer the rule chooses, with the places held and the last places as they would then be, and that answer then holds the newest place; an answer that was cancelled while it waited, and hasn't left its line yet, counts for nobody. The answer that is the third to pass is told 3: three answers have to end, whichever they are. At a server that writes one answer at a time, that is the one being written and the two that go before it.
+
+**It is exact at one answer at a time, while nobody comes and nobody leaves. At more than one it is a guess,** since the rule counts the places each account holds, and that depends on which answer ends first. **And it can go up:** by the rule, an account that has had less goes first, so somebody who comes later can go before an answer that waits already.
+
+**Worked out** over made-up traffic, by a throwaway script outside the repository, and not seen on a real server:
+
+- **Nobody comes or leaves after the first moment:** 2,000 made-up lines for each case, of up to eight more answers than the server takes, of five accounts. With the places coming back in the order they were given, the answers passed in the order told in 2,000 of 2,000, at one, two and four at once. With answers of 20 to 60 s, so that the places come back in any order: 2,000 of 2,000 at one at once, 1,930 at two, 1,409 at four.
+- **People share one server for an hour, 200 runs:** each asks one question, and the next 20 to 90 s after its answer ended, and one of them keeps two at the gate; answers of 20 to 60 s. At each change every waiting answer is told its number anew.
+
+| | The number first told was how many ended before it passed | Within one of it | An answer whose number went up at least once | The most that ended beyond what was first told |
+|---|---|---|---|---|
+| One at a time, 4 people | 70.9 % | 76.3 % | 29.1 % | 5 |
+| One at a time, 8 people | 80.8 % | 88.0 % | 19.2 % | 10 |
+| Two at once, 8 people | 62.6 % | 82.3 % | 37.4 % | 11 |
+| Two at once, 12 people | 64.6 % | 85.6 % | 35.4 % | 14 |
+| Four at once, 16 people | 46.2 % | 68.3 % | 53.8 % | 22 |
+| Four at once, 24 people | 47.6 % | 69.5 % | 52.4 % | 30 |
+
+In every one of them the last number told before an answer passed was 1.
+
+- **Whose numbers went up, in that traffic.** At one at a time, nearly all were the answers of the account that keeps two at the gate, which everyone who has had less goes before, as the revision before this one says under "Known, and left": the number went up for 97.6 % and 98.4 % of its answers that waited (4 and 8 people), and for 6.4 % and 8.3 % of the others'; two or more answers ended beyond what was first told for 95.2 % and 97.3 % of its answers, and for 5 and 35 of the others' 13,515 and 15,805. At more than one at once the others' went up too: for 28.8 % and 29.7 % of them at two at once, and 50.8 % and 50.4 % at four, where two or more ended beyond the first number for 6.4 % and 6.9 %, and for 27.3 % and 27.6 %.
+- **The number never overstated in that traffic; in the made-up lines of the first case it did,** at more than one at once. The rule counts the places an account holds, so where an account holds a place while another of its answers waits, which answer ends first changes who goes next. In a second drawing of such lines, with the places coming back in any order, 50 of 2,000 at two at once passed in another order than told, 42 of them with an account that held a place and had an answer waiting at the first moment; at four at once, 584 of 2,000, and 583 of them. The others weren't looked into: an account whose first answer passes while its second waits comes to hold and wait later.
+
+So the page says the number as it stands, and not a promise.
+
+**What is told:**
+
+1. **That the answer waits, and no number.**
+    - Con: it says less than the gate knows.
+2. **Its number in the order the answers came.**
+    - Con: since the revision before this one, that is not the order they pass in.
+3. **The waiting answers sorted by the rule as the gate stands now,** without playing it forward.
+    - Con: wrong even at one at a time, since the places held and the last places change with every place that is given.
+4. **The rule played forward.** Chosen.
+
+**When it is told:**
+
+1. **With the turn's beat,** every 15 s.
+    - Con: a reader would see the number up to 15 s late, and all the changes in between as one.
+2. **At each change of the line,** by the gate. Chosen.
+
+**How it reaches a reader:**
+
+1. **A member of the turn's record** (`TurnOut`).
+    - Con: a reader would have to ask again and again, and a turn's record is of what was recorded.
+2. **A chunk the library hands to the page once and forgets,** `transient`, as `data-usage-warning` is.
+    - Con: the page would keep the number in a state of its own beside the message, to be cleared on every way a reading ends.
+3. **A chunk the library keeps in the message, and replaces in place.** Chosen: the number lives and goes with the message the page shows, and someone who joins later reads the stream from its start and ends with the newest.
+
+**A screen reader:** the line is a `role="status"` already. Its words change when the number does, which is when an answer ends, or somebody comes or leaves, never by the clock: news each time, so it is left to say them. A time that counts down is a `role="timer"` in this app, never inside a status; this is no countdown.
+
+**Decision: a gate tells each answer that waits there, and asked to be told, how many answers have to end before it starts, by its own rule played forward with the places held coming back in the order they were given: when it comes to wait, and whenever that number changes, in the step in which it does. A turn hands that on to its readers through its stream of events, as a chunk of Actio's own, `data-waits`, which the chat library keeps in the message and replaces in place, and says the same way that its turn has come. The page says "Waiting behind 2 other answers…" in the place of "Waiting for the model…". A turn that didn't wait streams what it streamed before.**
+
+**The gate** (`actio.catalog.Gate`):
+
+- **`gate.passing(account, placed=None)`:** `placed` is a function of one whole number. The gate calls it, in a step that awaits nothing, when the answer comes to wait, before it waits, with its number, and whenever its number is another than the one it was last told, in the step in which that came about: a place was given back and went on, an answer came that goes before it, one before it gave up waiting. Never for an answer that passes at once, never with a number it was just told, never with 0, and never once the answer has passed or left its line: that its turn has come, the caller sees by being let in.
+- **The forward play is written beside the rule, and by the same ranking:** the function that chooses who a place goes to (`_chosen`) is what `Gate._next` asks for the place given back, and what `Gate._order` asks for each place as it plays the rule forward, on copies of the places held, the last places and the lines. So the two can't drift apart. The gate now keeps the places held by their numbers, in the order they were given (`Gate._places`, of which `full` counts), and a place is given back by its number: the future of an answer handed a place carries it.
+- **The gate's books are complete before anybody is told:** all that the gate changes for one thing that happened, an answer that came, one that gave up, a place given back and handed on, first, and then the telling. Two such things in one step of the event loop are told one after the other, each as the gate stood then: a turn that gives its place back at its model's gate and comes to wait at a stand-in's, where both are on one server, is such a step. A `placed` that raises is logged with its trace, "an answer that waits at a gate couldn't be told its number", with nothing of whose answer it is, and the others are told all the same: a place is never lost over it, and nothing reaches the task whose place was given back.
+- **Nothing is played forward while no waiting answer asked to be told:** a title's answers, alone at a gate, cost what they cost before.
+
+**The turn** (`actio.chat.answering`):
+
+- **A step of its own, `Waits(behind)`,** handed on through `emit` like the steps of the answer's text: so nothing of a turn emits beside the one way, and `actio.chat` still knows nothing of the stream's format. `Answer` makes only the text's steps (`Written`).
+- **`_through` passes the gate a `placed`, which notes the newest number and awaits nothing** (`_Told`). A task of the turn's own, `waits-<the turn's id>`, started by the first number, hands them on one at a time, each the newest noted by then: one that a newer number overtook before it could be handed on is skipped.
+- **Once the turn has passed,** that task is told that it is over: a number noted and not handed on is dropped, the step under way is waited for, never cut off, and only then, if a number was handed on, `Waits(0)` is: before the model is asked, shielded as the answer's steps are. A turn that passed at once starts no task, and hands on nothing.
+- **A turn stopped, or ended by a shutdown, while it waits** waits for that task the same way, under a shield, and hands on no 0: its stream goes on to `finish` as before, and its record is as before.
+- **Each gate a turn waits at says its own:** a turn that waited at its model's gate, passed, failed before its first word, and waits at a stand-in's gate hands on its numbers there, and a 0 again. A second try of one model keeps its place, and says nothing new.
+- **The log is as it was:** `turn …: waited 12.3 s for the model's server`, and `…, and didn't get its turn`, at the same moments. No new line.
+
+**The chunk** (`actio.api.ui_stream`):
+
+```text
+data: {"type":"data-waits","id":"waits","data":{"behind":2}}
+```
+
+- **Not `transient`, and the same `id` for every such chunk of a turn,** so that the library keeps one part of the message for them, and replaces its `data` with each (read in the installed `ai` package, 7.0.166). `behind` 1 or more: so many answers have to end before this one starts. 0: its turn has come.
+- **The library takes the first one for the answer's beginning:** the chat's `status` becomes `streaming` there, where before it did at the first piece of the answer. The page reads it in two places: whether an answer is being asked for or read, which is unchanged, and whether one arrives, which reads the list of conversations again. So a first question whose answer waits its turn is in the list while it waits.
+- **A recording,** `apps/api/tests/fixtures/turns/waited.sse`: `start`, `start-step`, `data-waits` 2, 1 and 0, a short answer, `finish`, `[DONE]`, from a server that writes one answer at a time, whose place the test holds, with another account's answer before the turn's. The other recordings didn't change by a byte.
+
+**The page** (`lib/chat/waits.ts`, `components/chat/message.tsx`):
+
+- **How many answers an answer waits behind** is read from its message alone, from its `data-waits` part (`waitsBehind`): a whole number from 1 up, and 0, which says nothing, for anything else: no such part, 0, a fraction, a negative number, a string, `null`, a member missing. The page keeps nothing of it beside the message.
+- **The words:** "Waiting behind 1 other answer…", "Waiting behind 2 other answers…" (`waitingBehind`).
+- **`Waiting` says them when it is given a number above 0,** and "Waiting for the model…" otherwise: one `<p role="status">`, the same classes, one element whose words change. `Answer` gives it the number only where it draws that line because nothing of the answer is drawn yet: never while the line stands in for the renderer, never for an answer that isn't being written, never once a thought or a word is drawn. `Message` has no new property: it is memoized, and `Answer` reads the number from the message.
+- **Nothing else of the page changed:** the line under a question that has no answer yet (`chat.tsx`) says what it said, the article is the model's words and nothing else once they are there, no element comes or goes, sending is not blocked, and Stop is where it is. Nothing here is an action, so the keyboard stays where it is.
+
+**The end-to-end stack:** the decision's sentence "The end-to-end stack's fake model has no gate" is still true of the names it had. The fake is offered once more, as `queued`, on a provider of its own at the fake's address with `answers_at_once = 1`, and priced like `standard`, so that it isn't offered at a limit (`deploy/e2e/config/`): on the fake's own provider, every test's answers would wait for each other's. `e2e/waits.spec.ts` gives each of its requests for a turn that model's name on their way out. A guest asks a question whose answer the fake writes slowly, and in a new conversation a second: the page says "Waiting behind … other answer…" under it, and again after a reload, which joins the turn's stream in Valkey from its start; once the first answer has ended, the second is written. The number is matched by a pattern, and the waits are long enough for another run of the same test at that gate. The model that names conversations is on the provider without a gate: a title waits for nothing there.
+
+**Unchanged:** the rule, `full`, `waiting` and `accounts`, what is remembered and forgotten, and every case of a cancellation above; `passing(account)` without `placed`, as a title waits; the title job's code; the beat, Stop and the shutdown; the log's lines; the routes and `apps/api/openapi.json`; the tables, with no migration; the settings; the containers; `packages/llm` and `packages/fakellm`; and what a turn that didn't wait streams, byte for byte, which every other recorded stream holds.
+
+**Tests:**
+
+- **the gate's** (`test_catalog.py`): an answer that passes at once told nothing, and one that comes told its number in the step in which it comes; the gate's books complete when it tells; at one at a time, three accounts' answers told 1, 2 and 3 in the order the rule has them pass, A's second behind B's and C's first, and one less each as each place goes on, nobody the same number twice; a number that goes up, when another account's first comes; an answer that gives up waiting, those behind it told, those before it not; an answer cancelled in the step in which a place is given back, which counts for nobody's number and is told nothing more; an answer cancelled before its account's next one, not yet out of its line when another comes, which isn't played forward in the next one's place; an answer handed a place and cancelled in that step, after which the others' numbers are right; two at once, where the numbers are those of the places coming back in the order they were given; a `placed` that raises, logged, the others told, the place not lost; a title's answer among those that are told, counted in their numbers; nothing played forward while none asked, and again once those that asked have gone; and a property test beside the one against the plain gate: after any history of answers that come, end, are cancelled and give up, at a gate of one to four places, with nobody coming or leaving and the places given back in the order they were given, each waiting answer that asked passes as the one whose number it was last told, with an example of its own for the place a forward play gives being counted as held;
+- **a turn's** (`test_turns_running_api.py`): a turn that waits behind two, then one, then passes, whose stream has `data-waits` 2, 1, 0 between `start-step` and the answer's first chunk and nothing else new, with the log as before, beside a turn that passed at once and says nothing, and one that waited behind one; a number that goes up reaching the stream; a number noted while the one before it is handed on slowly, dropped once the turn passes, with never a number after the 0; whoever joins a turn that waits reading the numbers from the first one on; a turn stopped while it waits, which hands on no 0, ends as before and leaves no task; a turn stopped while its number is being handed on slowly, whose stop waits for the number, with nothing of the turn after it but its end; a turn stopped once it has passed, while its number is still being handed on, which says the number and then that its turn came before anything else, its model not asked meanwhile; and a shutdown, after which the turn that waited, and had said behind how many, hands on no 0 and leaves no task;
+- **a stand-in's** (`test_turns_stand_ins_api.py`): a turn that waits at its stand-in's gate says so there, and one that waited at both gates says both;
+- **the stream's** (`test_turn_fixtures.py`, `tests/contract/turn-stream.test.ts`): `waited.sse` recorded, and read by the real `ai` package into a message with one `data-waits` part, whose `data` ends as `{ behind: 0 }`, and the answer's words;
+- **the page's** (`lib/chat/waits.test.ts`, `components/chat/waits.test.tsx`): the number from every shape of `data`, and the two forms of the words; the answer's line, one and the same element, saying "Waiting for the model…", behind two, behind one, "Waiting for the model…" again, and then the model's words alone; a conversation opened while its answer waits, ending with the newest number, also in StrictMode; Stop while it waits, after which nothing is said of a number; a stream that breaks off while it waits, after which no number is left; and a first question whose answer waits, in the list of conversations while it waits;
+- **the end-to-end stack's** (`e2e/waits.spec.ts`, and `test_catalog.py` for its models file): above.
+
+**Known, and left,** each worked out, and not seen, unless it says so:
+
+- **the number is a guess at more than one answer at a time,** as the table above shows, and exact only at one at a time while nobody comes or leaves;
+- **it can go up,** when somebody who has had less comes;
+- **it is not a time:** a short answer and a long one count alike, as a place does;
+- **a number that a newer one overtook before the turn could hand it on is never said:** a reader may read 3 and then 1. And a number that was true when one place had gone on, and no longer when the next had, in the same round of the event loop, may be said before the newer one;
+- **a 0 follows a number, and never stands alone,** by the code: `Waits(0)` only once a number was handed on. As asyncio runs what is ready in the order it was made ready, the task that hands on is at its first number before the turn can pass, so a turn that came to wait says a number: reasoned from that order, and held by no test, since no test can have a turn pass sooner;
+- **a turn stopped once it has passed, while its number is still being handed on, says the number and then that its turn came,** before it stops: its model is asked, and the request ends at its first wait. As before the step, for a turn stopped in the step in which it is handed its place;
+- **cancelled from outside, without a `Halt`,** as when the process goes down faster than it could say so, a turn doesn't wait for the number under way: that one is handed on by itself, and its task ends then, read by nobody;
+- **an answer the page doesn't read along with, but only looks for** ("An answer to this is still being written…"), says no number: a turn's record has none;
+- **a title has no reader,** and is told nothing; its answer counts in the turns' numbers at the same gate, as any answer does;
+- **two API processes have two gates, as before,** and each says the order of its own; under `make up` a title's request at the worker's own gate is in no number of the API's;
+- **each change of the line plays the rule forward once, for all who wait:** for each answer that waits, a look at every account that has one waiting, so the work grows with the answers waiting times the accounts they belong to, on every place given and every answer that comes or leaves, while any of them asked, as every turn does. Not measured: an account has two or three answers at once at the most, and the line is as long as the people asking.
+
+**How to reverse it:** in the code, `placed`, `_order`, `_tell`, `_to_tell` and `_places` in `actio.catalog.Gate`, with `_chosen` back inside `_next` and the places held counted again; `Waits`, `Written` and `_Told` in `actio.chat.answering`, and the `emit` that `_through` takes; `waits` in `actio.api.ui_stream`; `lib/chat/waits.ts` and `Waiting`'s `behind`; `waited.sse` and its test. On the end-to-end stack, `queued`, its provider and its price in `deploy/e2e/config/`, its spec, and what `test_catalog.py` holds of it. The page then says "Waiting for the model…" again, and a stream with the chunk would be read as before: the library keeps a part the page doesn't draw.
+
+**Measured**
+
+On 2026-11-26, on a MacBook Pro (M1 Pro, 16 GB), the machine of the measurements above. No cloud provider was asked anything for this step.
+
+**On the running stack** (`make up` from the tree as it was committed, the shipped config, the local model `qwen3.5:4b-q4_K_M` on Ollama, which writes one answer at a time), in Chromium, by a script outside the repository that notes every change of what a page's status lines say, with the time. Guest A asked for about 350 words. Once that answer had its first words, A asked a short question in a second window, guest B one 1.8 s later, and guest C one 1.8 s after that; C's page was loaded again while its answer waited. One run; the times are seconds from the script's start.
+
+| | Asked at | What the answer's line said, and from when | First words at |
+|---|---|---|---|
+| A's first | 0.8 | "Waiting for the model…" | 4.6; its place went on at 19.0, after 457 words |
+| A's second | 4.9 | behind 1 at 4.9, behind 2 at 6.7, behind 3 at 8.6, behind 2 at 19.0, behind 1 at 19.6, "Waiting for the model…" at 20.3 | 20.7 |
+| B's | 6.7 | behind 1 at 6.7, "Waiting for the model…" at 19.0 | 19.2 |
+| C's | 8.5 | behind 2 at 8.6; the page loaded again at 10.2, and behind 2 at 10.3; behind 1 at 19.0, "Waiting for the model…" at 19.6 | 20.1 |
+
+- **A's second answer's number went up twice,** as B's question came and as C's did: each had had nothing at the gate, and went before it. They were answered A's first, B's, C's, A's second.
+- **Each page had two status lines, one after the other:** the line under a question that has no answer yet, for about a tenth of a second, as before the step, and then the answer's own, which was one and the same element from its first number to "Waiting for the model…".
+- **B's question, its conversation's first, was in B's list of conversations while its answer waited,** in a picture of the page taken then.
+- **The API's log, as before the step:** `turn …: waited 12.3 s for the model's server` (B's), `… waited 11.0 s …` (C's), `… waited 15.3 s …` (A's second).
+- **In Firefox and WebKit,** a shorter look, a long question of A's and a short one of B's: B's line said "Waiting behind 1 other answer…" from the moment it was asked, for 16.4 s and 12.7 s, then "Waiting for the model…" for 0.2 s and 0.3 s, and then B's words.
+
+**The end-to-end tests,** on a stack of their own: 81 of 81 passed. The new one eight times over, two at a time, so that two runs of it meet at the gate: 8 of 8, in about 24 s each, where it takes 12 s alone.
+
+**Mistakes planted on purpose,** each alone in a scratch copy of the tree, with the tests that should notice run until the first one failed.
+
+On the step's first build, while the review read it, 31 in the gate, the turn and the chunk. 23 failed a test. One, the task that hands on never clearing its note, has that task spin without ever giving the loop back, so no test could end: the runner's own time limit ended it. Seven failed nothing:
+
+- **three were gaps, and each got a test:** the forward play counting an answer that was cancelled and hasn't left its line, which shows only where the cancelled one stands before another of its own account in its line; a turn stopped while it waits not waiting, shielded, for the number under way; and the same for a turn that has passed;
+- **two were lines nothing can reach, and came out of the source:** a guard against a number said after a turn's wait is over, which the gate never says, and the note emptied when the wait is over, which the task that hands on never reads again;
+- **two were no mistakes:** a 0 said for a wait in which a task was started and no number handed on, and the place at which that task notes that it handed one on. By the order in which asyncio runs what is ready, that task is at its first number before the turn can pass, and the note is read only once the task has ended ("Known, and left", above).
+
+And 10 in the page, with the recorded stream among them: 8 failed a test. The two that failed none: the number said also where the line stands in for the renderer, which no stream the server writes can show, since a 0 comes before an answer's first word, and the guard stays; and the page taking any data part of a message for the number, where a message has no other.
+
+On the tree as it was committed, 30 in the gate, the turn and the chunk: without the two whose lines came out and the one that never gives the loop back, and with two more, a turn that gave up waiting saying that its turn came, and a 0 said before the number under way. 28 failed a test, and the two that are no mistakes failed none. The page's source did not change after its run.
+
+The new end-to-end test, against a stack built from the scratch copy with a mistake planted: with the page never saying a number, and with the turn not asking its gate to be told, it failed each time, at the line it looks for.
+
+**The review,** by a reviewer that had not seen the build, once: nothing that had to be fixed, and seven smaller points, all taken. A test's account of why the order of the places matters, which was wrong; the stop's shielded wait and the forward play's skipping of a cancelled answer, untested, which the planting showed too; a shutdown's test that would have passed with no number said; what the forward play costs, said too lightly here; two sentences about the made-up traffic that went beyond its figures, which a second run of the throwaway then settled as they stand above; that the books are complete for each change, not for each step of the loop; and a version of the chat library in a docstring, which had been 7.0.169 since that file was written, where 7.0.166 is the one installed and pinned.
+
+**Not measured:** a server that writes several answers at once, on a real stack: its numbers are the made-up traffic's, and the tests'; the forward play with very many answers waiting; what a screen reader says: that the line is a status, and one element whose words change, the tests hold and the look saw, and nobody listened to one; and the new end-to-end test on CI's machines, where the first answer's ten seconds have to cover a question, a look, a reload and a second look, which took about two seconds here.

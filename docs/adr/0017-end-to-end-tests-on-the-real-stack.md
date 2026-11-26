@@ -225,3 +225,9 @@ A model writes a conversation's title now, after its first answer, and the page 
 - **The stack names a model for titles now:** `namer`, the quiet model, priced like `standard`, since a model that costs nothing is offered at a usage limit. Its conversations keep their first line, as the tests need, unless a question says otherwise. The worker waits for the fake to be healthy, as the API does, and a test of the containers' rules holds the overlay to that.
 - **One test more,** in `sidebar.spec.ts`: a question that carries `[[say: Flat tyres]]` is listed by its first line while its answer is written, then by `Flat tyres` with nothing touched, and after a reload still.
 - **That makes 34 tests.** The other 33 didn't change.
+
+### 2026-11-26: the gate in front of a model's server is tested here too
+
+The revision of 2026-11-18 said: "**Not tested here: the gate in front of a model's server.** The page can't choose a model, and the stack's model, the fake, has to stay without a gate: the tests run side by side, and would otherwise wait for each other's answers."
+
+The names the fake had are still without a gate, for that reason. It is offered once more, as `queued`, on a provider of its own behind a gate that lets one answer through at a time, and `waits.spec.ts` gives each of its requests for a turn that name on their way out, as the tests of the stack's other models of one purpose do. An answer asked there while another is written waits its turn, and the page says behind how many, also after a reload. Another run of the same test may be at that gate, so the test counts on no number the page says, and waits long enough for the other run's answers. The reasons and the rest are in [ADR 0023](0023-answers-that-wait-their-turn.md), revision "a turn says that it waits, and behind how many answers".
