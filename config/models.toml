@@ -96,7 +96,11 @@ kind = "ollama"
 #                    the model it is, on its server, with its window and its limits,
 #                    and their own `then` isn't followed. The question costs what it
 #                    costs with this model, and no answer is longer than this model's
-#                    may be. Left out, none. See
+#                    may be. A model of the chain that failed half or more of its last
+#                    tries, five at the least in half an hour, is asked after those that
+#                    aren't failing, for 30 seconds to five minutes, and is never refused
+#                    for it: see docs/adr/0031-a-model-that-keeps-failing-is-asked-last.md.
+#                    Left out, none. See
 #                    docs/adr/0028-a-model-names-those-that-stand-in-for-it.md:
 #
 #   then = ["standard"]

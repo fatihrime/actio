@@ -41,5 +41,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0028](0028-a-model-names-those-that-stand-in-for-it.md) | A model names the models that stand in for it, asked in its place before the first word or thought of an answer; the turn stays the asked model's, at its price | Accepted |
 | [0029](0029-a-model-is-passed-over-for-a-request-too-large.md) | A model is passed over when a request is larger than its room, its window or what its server takes in a minute, while another model has room; a guess never refuses a turn | Accepted |
 | [0030](0030-the-providers-budgets-are-counted.md) | The providers' budgets are counted in Valkey, and a model with nothing left for a request is asked after those that have budget; when no model with room for it has any, the turn is refused for now, with how long to wait | Accepted |
+| [0031](0031-a-model-that-keeps-failing-is-asked-last.md) | A model that failed half or more of its recent tries is asked after the others of its chain for a while, by a circuit breaker each process keeps; then one request tries it in its place; nothing is refused for it | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.

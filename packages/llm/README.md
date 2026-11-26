@@ -6,6 +6,7 @@ Actio's model clients: one neutral chat format, and two adapters that speak it.
 - **The Ollama adapter** (`Ollama`) uses [Ollama](https://ollama.com)'s native API so that a model never answers from a quietly shortened prompt, and no answer runs without a limit.
 - **The OpenAI-compatible adapter** (`OpenAICompatible`) serves every server that speaks OpenAI's Chat Completions API: [fakellm](https://fatihrime.github.io/actio/reference/fakellm/) in tests, Groq and the Gemini API, and vLLM or any other.
 - **The walk down a chain of models** (`Walk`) asks one model, and when it can't answer before its first word, the next, in order.
+- **A circuit breaker** (`Breaker`) says, from the tries of a model that ended, whether it keeps failing, so that its caller asks it after the others for a while.
 - **A command-line tool** (`actio-llm`) to try the Ollama adapter from a terminal.
 
 The design and its trade-offs are in [ADR 0007](https://fatihrime.github.io/actio/adr/0007-local-models-through-ollamas-native-api/).
@@ -194,7 +195,30 @@ print(walk.answered.name)  # the link whose request the answer was written for
 - **When every link failed,** the first error in `FOR_NOW` is raised, and without one the last link's: the object itself.
 - **`on_failed` is told of each link that failed,** once, after its last try, with that try's error and the link asked next, as it happens. **`on_again` is told of each link asked once more,** with its first error and the pause, before the pause. `answered` says which link answered.
 
-With one link, the walk is that provider, asked once more by the same rule. How Actio uses it, and why a thought counts: [ADR 0028](https://fatihrime.github.io/actio/adr/0028-a-model-names-those-that-stand-in-for-it/).
+With one link, the walk is that provider, asked once more by the same rule. How Actio uses it, and why a thought counts: [ADR 0028](https://fatihrime.github.io/actio/adr/0028-a-model-names-those-that-stand-in-for-it/). `hands_on(event)` is its rule for what is handed on, for whoever watches a stream by the same rule.
+
+## Whether a model keeps failing
+
+A `Breaker` is one model's. It is told of each try of the model, one stream of its client, when it begins and how it ended: answered, failed, or with nothing to say. It reads no clock, and logs nothing: every moment is given to it.
+
+```python
+from datetime import UTC, datetime
+
+from actio_llm import Breaker
+
+breaker = Breaker()
+now = datetime.now(UTC)
+call = breaker.begins(now)
+change = call.ends("failed", now)  # what that changed: None, or Opened, OpenedAgain, Closed
+said = breaker.failing(now)  # None, or Failing: the wait left, or None while one try is under way
+```
+
+- **It opens** when a try ends failed and, with it, half or more of its last tries failed: the last 20 at the most, none older than 30 minutes, five at the least. An answer never opens it.
+- **Open,** the model is failing for 30 seconds. A try that answers meanwhile closes it, and one that fails changes nothing.
+- **Once the wait is over,** the next try is asked of the model in its place, and while it is under way the model is failing for everyone else, with no wait. If it fails, the breaker is open again, for a minute, then two, four, and five minutes from then on; if it answers, it is closed. A try that ends with nothing to say lets the next one try.
+- **Tries end in any order:** one that began as the try of the model, and ends after the breaker closed or opened again, no longer counts as trying it by then, and takes no other try off the count. Each try ends once.
+
+What a try ends as is its caller's to say, and so is what a model that is failing gets: Actio asks it after the others of its chain, and never refuses anything for it. [ADR 0031](https://fatihrime.github.io/actio/adr/0031-a-model-that-keeps-failing-is-asked-last/).
 
 ## A guess at token counts
 
@@ -223,7 +247,7 @@ prompt_tokens(prompt)  # 31, with what a chat template writes around the two mes
 - **Images and structured output** (a JSON schema for the answer). They arrive with the features that use them.
 - **Unloading and pulling models.** They arrive with the model manager.
 - **A guess that learns.** The estimate uses the same rules for every model. Correcting it per model, from the counts providers report, comes with the rest of the router.
-- **The rest of the router:** a limit on how long a whole answer may take, and a provider's health beyond its last answer. The walk above is its first part.
+- **The rest of the router:** a breaker that heeds the wait a provider names. The walk and the breaker above are its first parts.
 
 ## Tests
 
@@ -246,3 +270,4 @@ make test-cloud                 # those of Groq and the Gemini API, sent to the 
 - **Hand-written responses** cover what a healthy server won't produce on demand: dropped connections, stalls, malformed lines, old versions.
 - **The OpenAI-compatible adapter runs against fakellm,** in process. fakellm is a separate implementation of the format, itself checked with OpenAI's official SDK, so neither is only tested against itself. Directives in the prompt script its reasoning, tool calls and failures.
 - **The walk runs against providers and holds scripted in its test,** which note in one log, in order, when each is asked, closed, held and given back, and when a link is said to be asked again. A test that names a server's wait gives the walk a pause that waits nothing, or waits a twentieth of a second, or names two seconds and cancels the walk in them: none waits longer than that twentieth.
+- **The breaker runs by moments its tests give it,** each rule by example and each number by its value, and a property test plays made-up sequences of tries that begin and end in any order against a breaker written the plain way in the test.
