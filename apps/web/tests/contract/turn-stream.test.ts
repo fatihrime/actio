@@ -303,6 +303,44 @@ describe("a recorded turn, read by the ai package", () => {
     ]);
   });
 
+  it("keeps what an answer that waited its turn was told as one part of the message, whose number is replaced in place", async () => {
+    // Recorded behind two answers at its model's gate, then one, then its turn came.
+    const { states, errors } = await replay("waited.sse");
+    const chunks = await chunksOf("waited.sse");
+
+    expect(errors).toEqual([]);
+    expect(chunks.filter((chunk) => chunk.type.startsWith("data-"))).toEqual([
+      { type: "data-waits", id: "waits", data: { behind: 2 } },
+      { type: "data-waits", id: "waits", data: { behind: 1 } },
+      { type: "data-waits", id: "waits", data: { behind: 0 } },
+    ]);
+    // Never more than one such part, whose number goes as the stream said it.
+    const told = states.map((state) =>
+      state.parts.flatMap((part) =>
+        part.type === "data-waits" ? [part.data] : [],
+      ),
+    );
+    expect(told.every((parts) => parts.length <= 1)).toBe(true);
+    expect(
+      told
+        .flat()
+        .filter(
+          (data, index, all) =>
+            index === 0 ||
+            JSON.stringify(data) !== JSON.stringify(all[index - 1]),
+        ),
+    ).toEqual([{ behind: 2 }, { behind: 1 }, { behind: 0 }]);
+    expect(last(states).parts).toEqual([
+      { type: "step-start" },
+      { type: "data-waits", id: "waits", data: { behind: 0 } },
+      { type: "text", text: "Your turn came.", state: "done" },
+    ]);
+    expect(last(states).metadata?.turn).toMatchObject({
+      status: "completed",
+      answered_by: "standard",
+    });
+  });
+
   it("reads an answer that was stopped as an answer that ended, and says so in the metadata", async () => {
     const { states, errors } = await replay("stopped.sse");
 

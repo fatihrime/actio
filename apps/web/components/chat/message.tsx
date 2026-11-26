@@ -12,6 +12,7 @@ import type { Model, Turn } from "@/lib/api/client";
 import { figuresOf } from "@/lib/chat/figures";
 import { isBlank, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
+import { waitingBehind, waitsBehind } from "@/lib/chat/waits";
 
 // Its type alone: the code comes apart from the page, below.
 import type Markdown from "./markdown";
@@ -203,6 +204,10 @@ export const Message = memo(function Message({
 
 /** A model's answer: what it thought, its words, and what it took.
  *
+ * Until something of it is drawn, it says that it waits for the model, or, while its
+ * stream says so, behind how many other answers it waits at its model's gate
+ * (`waitsBehind`, read from the message itself).
+ *
  * None of them is on the page while the renderer is on its way, whether the answer is
  * still arriving or already complete, until the page's wait for it is over
  * (`useWaitsForRenderer`). Meanwhile the answer says what it says before its first
@@ -240,6 +245,10 @@ function Answer({
   // moment before, with nothing yet in its place.
   const last = parts.map(drawn).lastIndexOf(true);
   const waits = useWaitsForRenderer(shown.length > 0);
+  // Nothing of the answer is drawn yet: it may wait at its model's gate, and says so
+  // when its stream said behind how many. Never while its words wait for the renderer,
+  // nor once a thought or a word is drawn.
+  const beginning = writing && shown.length === 0;
   if (!writing && isBlank(message)) {
     // An answer that is over and has nothing in it to read: nothing arrived, because
     // its turn failed before a word or completed with none, or nothing but blank
@@ -269,7 +278,9 @@ function Answer({
               <Words key={index} text={part.text} writing={arriving} />
             );
           })}
-        {(waits || (writing && shown.length === 0)) && <Waiting />}
+        {(beginning || waits) && (
+          <Waiting behind={beginning ? waitsBehind(message) : 0} />
+        )}
       </article>
       <Took turn={turnOf(message)} writing={writing} waits={waits} />
     </>
@@ -453,14 +464,19 @@ function Reasoning({ text, writing }: { text: string; writing: boolean }) {
 }
 
 /** Stands in for an answer that hasn't begun: a model may first have to load. And for
- * one whose words wait for the renderer. */
-export function Waiting() {
+ * one whose words wait for the renderer.
+ *
+ * Given `behind`, 1 or more, it says how many other answers this one waits behind at its
+ * model's gate, in its place (`waitingBehind`). One element whose words change: a
+ * screen reader is told of each change, which comes when an answer ends, or somebody
+ * comes or leaves, and never by the clock. */
+export function Waiting({ behind = 0 }: { behind?: number }) {
   return (
     <p
       role="status"
       className="animate-pulse text-sm text-muted-foreground motion-reduce:animate-none"
     >
-      Waiting for the model…
+      {behind > 0 ? waitingBehind(behind) : "Waiting for the model…"}
     </p>
   );
 }

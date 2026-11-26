@@ -3,12 +3,18 @@ import type { UIMessage } from "ai";
 
 import type { MessageMetadata, StoredMessage, Turn } from "@/lib/api/client";
 
-/** What an answer's stream carries beside the answer: said once to the page, and never
- * part of a message. The API writes these chunks in `actio.api.ui_stream`. */
+/** What an answer's stream carries beside the answer's own words. The API writes these
+ * chunks in `actio.api.ui_stream`. */
 export interface ChatData extends Record<string, unknown> {
-  /** A share of a usage limit was passed by this turn. What it says is checked when
-   * it arrives (`passedIn` in `lib/usage.ts`). */
+  /** A share of a usage limit was passed by this turn: said once to the page, and
+   * never part of a message. What it says is checked when it arrives (`passedIn` in
+   * `lib/usage.ts`). */
   "usage-warning": unknown;
+  /** How many answers have to end before this one starts, while it waits at its
+   * model's gate, and 0 once its turn has come: one part of the message, which each
+   * newer number replaces. What it says is checked where it is read (`waitsBehind` in
+   * `lib/chat/waits.ts`). */
+  waits: unknown;
 }
 
 /** A message as the `ai` library holds it. Everything of Actio's own is under
