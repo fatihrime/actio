@@ -6,11 +6,15 @@ and an OpenAI-compatible server by fakellm.
 """
 
 import asyncio
+import gc
 import json
+import logging
 import math
 import sys
 import tomllib
+import traceback
 import uuid
+import weakref
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing, suppress
 from datetime import UTC, datetime, timedelta
@@ -32,6 +36,7 @@ from actio.catalog import (
     PROVIDERS_WAIT,
     Asked,
     Budget,
+    Catalog,
     CatalogError,
     CatalogFile,
     Chain,
@@ -3133,13 +3138,18 @@ async def test_ollama_says_whether_it_has_a_model_and_whether_the_model_can_reas
     assert ollama.asked == ["qwen3.5:4b-q4_K_M"]
 
 
+def each_own(chains: dict[str, Chain]) -> dict[str, ModelStatus]:
+    """Each model's own status, as every model's chain says it (`Catalog.chains`)."""
+    return {name: chain.status for name, chain in chains.items()}
+
+
 async def test_a_server_that_does_not_answer_is_unreachable_not_an_error() -> None:
     transports = {"ollama": unreachable(), "lab": unreachable()}
 
     async with catalogs.build(
         parsed(GOOD), ollama_url="http://ollama", transports=transports
     ) as catalog:
-        statuses = await catalog.statuses(now=NOON)
+        statuses = each_own(await catalog.chains(now=NOON))
 
     assert statuses == {
         "standard": ModelStatus("unreachable", False),
@@ -3167,7 +3177,7 @@ async def test_a_server_whose_answers_cant_be_unpacked_is_unreachable_not_an_err
     async with catalogs.build(
         parsed(GOOD), ollama_url="http://ollama", transports=transports
     ) as catalog:
-        statuses = await catalog.statuses(now=NOON)
+        statuses = each_own(await catalog.chains(now=NOON))
 
     assert statuses == {
         "standard": ModelStatus("unreachable", False),
@@ -3308,7 +3318,7 @@ async def test_a_load_under_way_is_given_up_on_before_its_servers_client_is_clos
     assert [task for task in asyncio.all_tasks() if task.get_name().startswith("load-")] == []
 
 
-async def test_every_model_is_asked_about_at_once() -> None:
+async def test_every_models_chain_is_given_with_what_its_server_says() -> None:
     ollama = FakeOllama({"qwen3.5:4b-q4_K_M": ["completion", "thinking"]})
     transports: dict[str, Any] = {
         "ollama": ollama.transport,
@@ -3318,9 +3328,697 @@ async def test_every_model_is_asked_about_at_once() -> None:
     async with catalogs.build(
         parsed(GOOD), ollama_url="http://ollama", transports=transports
     ) as catalog:
-        statuses = await catalog.statuses(now=NOON)
+        chains = await catalog.chains(now=NOON)
 
-    assert statuses == {
+    assert list(chains) == ["standard", "big"]  # the file's order
+    assert [[model.name for model, _ in chain.models] for chain in chains.values()] == [
+        ["standard"],
+        ["big"],
+    ]
+    assert each_own(chains) == {
         "standard": ModelStatus("ready", True),
         "big": ModelStatus("ready", True),
+    }
+
+
+# --- What is known of a model, while its server is asked again ------------------------
+
+PATIENCE_S = 5.0
+"""How long a test waits for the catalog to get somewhere. It takes milliseconds; this
+only keeps a catalog that waits for an answer held for ever from hanging the run."""
+AGED = timedelta(seconds=20)
+"""How old what is known is, in most tests below: older than a quarter of a minute, and
+far from five minutes."""
+
+
+class ListsWhenLetGo(httpx2.AsyncBaseTransport):
+    """A server that speaks OpenAI's API, and lists `fake-chat`: at once, until a test
+    holds its answers (`held`), and then each once that event is set. Counts how often it
+    was asked, and says whether its client had been closed by the time an answer it held
+    was given up on."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+        self.held: asyncio.Event | None = None
+        self.holding = asyncio.Event()
+        """Set once an answer is held."""
+        self.given_up = 0
+        self.closed = False
+        self.closed_before_given_up: bool | None = None
+        """`None` while no answer it held has been given up on."""
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/v1/models"
+        self.asked += 1
+        if self.held is not None:
+            self.holding.set()
+            try:
+                await self.held.wait()
+            except asyncio.CancelledError:
+                self.given_up += 1
+                self.closed_before_given_up = self.closed
+                raise
+        return httpx2.Response(200, json={"object": "list", "data": [{"id": "fake-chat"}]})
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_a_turns_start_is_given_a_ready_older_than_a_quarter_of_a_minute_at_once(
+    asks_ended: Any,
+) -> None:
+    """Through the catalog `build` makes, its server's answer held: none of three
+    requests of a turn's start waits for it, and its server is asked once. The answer
+    is dated by the `now` of the request that had it asked, not by a later one's: it is
+    reused for a quarter of a minute from that `now`, and asked again behind the first
+    request after. The time limit fails a catalog that waits."""
+    lab = ListsWhenLetGo()
+    held = asyncio.Event()
+    ready = ModelStatus("ready", thinking=True)  # `thinking = true` in the file
+
+    async with (
+        asyncio.timeout(PATIENCE_S),
+        catalogs.build(
+            parsed(GOOD), ollama_url="http://ollama", transports={"lab": lab}
+        ) as catalog,
+    ):
+        first = await catalog.status("big", now=NOON)
+        lab.held = held
+        old = await catalog.chain_as_known("big", now=NOON + timedelta(seconds=15))
+        await lab.holding.wait()
+        meanwhile = await asyncio.gather(
+            catalog.chain_as_known("big", now=NOON + AGED),
+            catalog.chain_as_known("big", now=NOON + AGED),
+        )
+        asked_while_held = lab.asked
+        held.set()
+        await asks_ended()
+        within = await catalog.chain_as_known("big", now=NOON + timedelta(seconds=29.9))
+        asked_within = lab.asked
+        lab.held = None
+        after = await catalog.chain_as_known("big", now=NOON + timedelta(seconds=30))
+        await asks_ended()
+
+    assert first == ready
+    assert [chain.status for chain in (old, *meanwhile, within, after)] == [ready] * 5
+    assert (asked_while_held, asked_within, lab.asked) == (2, 2, 3)
+
+
+async def test_everything_but_a_turns_start_waits_for_an_old_ready_and_shares_its_ask(
+    lineup: Any,
+) -> None:
+    """In the same moment, the servers' answers held: `chain_status`, `status` and
+    `chains` wait for them, as the list, the warm-up and a title do, while a turn's start
+    is given the old `ready` at once. One call to each server serves them all."""
+    lineup.add("standard", then=["second"])
+    lineup.add("second")
+    catalog = lineup.catalog()
+    await catalog.chain_status("standard", now=NOON)
+    held = [lineup.hold("standard"), lineup.hold("second")]
+    later = NOON + AGED
+
+    async with asyncio.timeout(PATIENCE_S):
+        waiting = [
+            asyncio.create_task(catalog.chain_status("standard", now=later)),
+            asyncio.create_task(catalog.status("standard", now=later)),
+            asyncio.create_task(catalog.chains(now=later)),
+        ]
+        turn = await catalog.chain_as_known("standard", now=later)
+        for each in held:
+            await each.asked.wait()
+        await settled()
+        done_while_held = [each.done() for each in waiting]
+        for each in held:
+            each.answers.set()
+        chain, status, chains = await asyncio.gather(*waiting)
+
+    assert done_while_held == [False, False, False]
+    assert [model.name for model, _ in turn.ready] == ["standard", "second"]
+    assert chain.status == status == chains["standard"].status == READY
+    assert lineup.asked == ["standard", "second", "standard", "second"]
+
+
+@pytest.mark.parametrize(
+    ("known_for", "waits"),
+    [
+        (None, True),
+        (timedelta(minutes=5) - timedelta(microseconds=1), False),
+        (timedelta(minutes=5), True),
+    ],
+    ids=["nothing known", "five minutes less a moment", "five minutes"],
+)
+async def test_a_turns_start_uses_an_old_ready_for_five_minutes_less_a_moment_and_waits_after(
+    known_for: timedelta | None, waits: bool, lineup: Any, asks_ended: Any
+) -> None:
+    """Two requests of a turn's start at once, the server's answer held: both wait for
+    it, or neither does, and its server is asked once."""
+    lineup.add("standard")
+    catalog = lineup.catalog()
+    now = NOON
+    if known_for is not None:
+        await catalog.status("standard", now=NOON)
+        now = NOON + known_for
+    held = lineup.hold("standard")
+
+    async with asyncio.timeout(PATIENCE_S):
+        asking = [
+            asyncio.create_task(catalog.chain_as_known("standard", now=now)) for _ in range(2)
+        ]
+        await held.asked.wait()
+        await settled()
+        waited = [not each.done() for each in asking]
+        held.answers.set()
+        said = await asyncio.gather(*asking)
+        await asks_ended()
+
+    assert waited == [waits, waits]
+    assert [chain.status for chain in said] == [READY, READY]
+    assert lineup.asked == ["standard"] * (1 if known_for is None else 2)
+
+
+@pytest.mark.parametrize("state", ["unreachable", "missing"])
+async def test_a_model_last_seen_not_ready_is_passed_over_at_once_while_a_stand_in_is_known_ready(
+    state: Any, lineup: Any, asks_ended: Any
+) -> None:
+    """By a turn's start: its server is asked again behind two requests at once, neither
+    of which waits for it, and the request after them has its answer: it is back, and
+    asked first."""
+    lineup.add("standard", state=state, then=["second"])
+    lineup.add("second")
+    catalog = lineup.catalog()
+    await catalog.chain_status("standard", now=NOON)
+    lineup.becomes("standard", "ready")
+    held = lineup.hold("standard")
+
+    async with asyncio.timeout(PATIENCE_S):
+        at_once = await asyncio.gather(
+            catalog.chain_as_known("standard", now=NOON + AGED),
+            catalog.chain_as_known("standard", now=NOON + AGED + timedelta(seconds=1)),
+        )
+        await held.asked.wait()
+        held.answers.set()
+        await asks_ended()
+        after = await catalog.chain_as_known("standard", now=NOON + AGED + timedelta(seconds=2))
+
+    for chain in at_once:
+        assert chain.status.state == state
+        assert [model.name for model, _ in chain.ready] == ["second"]
+        assert [model.name for model, _ in chain.passed_over] == ["standard"]
+    assert [model.name for model, _ in after.ready] == ["standard", "second"]
+    # Each asked at first, and once more behind the two requests: not after them.
+    assert lineup.asked == ["standard", "second", "standard", "second"]
+
+
+async def test_a_chain_none_of_whose_models_is_known_ready_waits_for_its_old_statuses_at_once(
+    lineup: Any,
+) -> None:
+    """Nothing is refused by an old status, at a turn's start. The two old ones are asked
+    again and waited for together, both servers holding their answers at the same time,
+    and the chain is as they answer. The one asked a moment ago is not asked again, and
+    stays as it is."""
+    lineup.add("standard", state="unreachable", then=["second", "third"])
+    lineup.add("second", state="missing")
+    lineup.add("third", state="unreachable")
+    catalog = lineup.catalog()
+    await catalog.chain_status("standard", now=NOON)
+    # Old by then, and not ready: asked again, and waited for.
+    await catalog.status("third", now=NOON + timedelta(seconds=15))
+    lineup.becomes("standard", "ready")
+    lineup.becomes("second", "ready")
+    held = [lineup.hold("standard"), lineup.hold("second")]
+
+    async with asyncio.timeout(PATIENCE_S):
+        asking = asyncio.create_task(catalog.chain_as_known("standard", now=NOON + AGED))
+        for each in held:
+            await each.asked.wait()
+        await settled()
+        waited = not asking.done()
+        for each in held:
+            each.answers.set()
+        chain = await asking
+
+    assert waited
+    assert states(chain) == [
+        ("standard", "ready"),
+        ("second", "ready"),
+        ("third", "unreachable"),
+    ]
+    assert lineup.asked == ["standard", "second", "third", "third", "standard", "second"]
+
+
+def states(chain: Chain) -> list[tuple[str, str]]:
+    """Each model of a chain, by its name, with its state."""
+    return [(model.name, status.state) for model, status in chain.models]
+
+
+async def test_a_turns_start_waits_for_no_old_status_while_a_fresh_one_is_ready(
+    lineup: Any, asks_ended: Any
+) -> None:
+    """The asked model was asked a moment ago, and is ready; its stand-in was last seen
+    unreachable 20 s ago, and its server holds its answer. Whether a model is ready is
+    judged among them all, the fresh one too: the request doesn't wait, and the
+    stand-in is passed over by its old status, its server asked behind."""
+    lineup.add("standard", then=["second"])
+    lineup.add("second", state="unreachable")
+    catalog = lineup.catalog()
+    await catalog.chain_status("standard", now=NOON)
+    await catalog.status("standard", now=NOON + timedelta(seconds=15))  # fresh by then
+    held = lineup.hold("second")
+
+    async with asyncio.timeout(PATIENCE_S):
+        chain = await catalog.chain_as_known("standard", now=NOON + AGED)
+        await held.asked.wait()
+        held.answers.set()
+        await asks_ended()
+
+    assert states(chain) == [("standard", "ready"), ("second", "unreachable")]
+    assert lineup.asked == ["standard", "second", "standard", "second"]
+
+
+async def test_a_turns_start_asks_old_and_unknown_at_once_and_waits_for_the_unknown_alone(
+    lineup: Any, asks_ended: Any
+) -> None:
+    """Nothing is known of the asked model, and its stand-in was last seen unreachable
+    20 s ago. Both servers are asked at once, and hold their answers at the same moment
+    before either is let go. The asked model answers that it is ready: the request has
+    what it needs, and doesn't wait for the stand-in's server, which still holds its
+    answer."""
+    lineup.add("standard", then=["second"])
+    lineup.add("second", state="unreachable")
+    catalog = lineup.catalog()
+    await catalog.status("second", now=NOON)
+    held = {name: lineup.hold(name) for name in ("standard", "second")}
+
+    async with asyncio.timeout(PATIENCE_S):
+        asking = asyncio.create_task(catalog.chain_as_known("standard", now=NOON + AGED))
+        for each in held.values():
+            await each.asked.wait()
+        await settled()
+        waited = not asking.done()
+        held["standard"].answers.set()
+        chain = await asking
+        held["second"].answers.set()
+        await asks_ended()
+
+    assert waited
+    assert states(chain) == [("standard", "ready"), ("second", "unreachable")]
+    assert lineup.asked == ["second", "standard", "second"]
+
+
+async def test_a_turns_start_waits_for_the_unknown_then_for_the_old_ask_already_under_way(
+    lineup: Any,
+) -> None:
+    """A chain of three: the asked model asked a moment ago and unreachable, the first
+    stand-in last seen unreachable 20 s ago, and nothing known of the second. The two
+    stand-ins' servers are asked at once. The second answers that it is unreachable too:
+    no model is ready, so the request waits for the first stand-in's ask, the one under
+    way already, and no other; it answers that it is back."""
+    lineup.add("standard", state="unreachable", then=["second", "third"])
+    lineup.add("second", state="unreachable")
+    lineup.add("third", state="unreachable")
+    catalog = lineup.catalog()
+    await catalog.status("second", now=NOON)
+    await catalog.status("standard", now=NOON + timedelta(seconds=15))
+    lineup.becomes("second", "ready")
+    held = {name: lineup.hold(name) for name in ("second", "third")}
+
+    async with asyncio.timeout(PATIENCE_S):
+        asking = asyncio.create_task(catalog.chain_as_known("standard", now=NOON + AGED))
+        for each in held.values():
+            await each.asked.wait()
+        held["third"].answers.set()
+        await settled()
+        waited_for_the_old_one = not asking.done()
+        held["second"].answers.set()
+        chain = await asking
+
+    assert waited_for_the_old_one
+    assert states(chain) == [
+        ("standard", "unreachable"),
+        ("second", "ready"),
+        ("third", "unreachable"),
+    ]
+    assert lineup.asked == ["second", "standard", "second", "third"]
+
+
+async def test_a_turns_start_reads_an_old_status_again_once_it_has_waited(
+    lineup: Any,
+) -> None:
+    """Nothing is known of the asked model, and its stand-in was last seen ready 20 s
+    ago, whose server says now that it is unreachable, and answers first. The asked
+    model's server answers that it is unreachable too: the chain is as both answered,
+    and no model of it is ready. The `ready` known when the request came is not used
+    after the wait."""
+    lineup.add("standard", state="unreachable", then=["second"])
+    lineup.add("second")
+    catalog = lineup.catalog()
+    await catalog.status("second", now=NOON)
+    lineup.becomes("second", "unreachable")
+    held = {name: lineup.hold(name) for name in ("standard", "second")}
+
+    async with asyncio.timeout(PATIENCE_S):
+        asking = asyncio.create_task(catalog.chain_as_known("standard", now=NOON + AGED))
+        for each in held.values():
+            await each.asked.wait()
+        [stand_ins] = [task for task in asyncio.all_tasks() if task.get_name() == "status-second"]
+        held["second"].answers.set()
+        await asyncio.wait({stand_ins})
+        held["standard"].answers.set()
+        chain = await asking
+
+    assert states(chain) == [("standard", "unreachable"), ("second", "unreachable")]
+    assert chain.ready == []
+
+
+async def test_a_request_waits_for_every_ask_and_is_raised_the_first_mistake_in_its_chain(
+    lineup: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Three asks, waited for together: the third fails first, then the second, and
+    the first answers last. The request ends only then, and is raised the second's
+    mistake, the first of its chain's order. A request is raised one error, so the
+    catalog's log says the third's, with its trace: no mistake is said nowhere."""
+    lineup.add("standard", then=["second", "third"])
+    lineup.add("second")
+    lineup.add("third")
+    catalog: Catalog = lineup.catalog()
+    let_go = {name: asyncio.Event() for name in ("standard", "second", "third")}
+
+    async def answers_when_let_go(offered: OfferedModel) -> ModelStatus:
+        await let_go[offered.name].wait()
+        if offered.name != "standard":
+            raise RuntimeError(f"a mistake of Actio's own about {offered.name}")
+        return READY
+
+    monkeypatch.setattr(catalog, "_ask", answers_when_let_go)
+    async with asyncio.timeout(PATIENCE_S):
+        asking = asyncio.create_task(catalog.chain_status("standard", now=NOON))
+        ended: list[bool] = []
+        for name in ("third", "second", "standard"):
+            await settled()
+            ended.append(asking.done())
+            let_go[name].set()
+        await asyncio.wait({asking})
+
+    assert ended == [False, False, False]
+    raised = asking.exception()
+    assert isinstance(raised, RuntimeError)
+    assert str(raised) == "a mistake of Actio's own about second"
+    assert said_by_the_catalog(caplog) == [
+        (logging.ERROR, "model third: asking its server about it failed")
+    ]
+    [logged] = [record for record in caplog.records if record.name == "actio.catalog"]
+    assert logged.exc_info is not None
+    assert str(logged.exc_info[1]) == "a mistake of Actio's own about third"
+    assert logged.exc_info[2] is not None  # its trace, as the ask left it
+
+
+class SlipError(Exception):
+    """A mistake of Actio's own, of a kind a test can watch go: a weak reference can't
+    be made to an error of Python's own kinds."""
+
+
+async def test_each_request_that_waits_is_raised_the_mistake_with_the_asks_trace_and_its_own(
+    lineup: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two requests wait for one ask that fails, and are raised the same error one after
+    the other. Each finds in its trace the ask's frames and its own, and never the
+    frames of the request that was raised it before."""
+    lineup.add("standard")
+    catalog: Catalog = lineup.catalog()
+    let_go = asyncio.Event()
+
+    async def breaks(offered: OfferedModel) -> ModelStatus:
+        await let_go.wait()
+        raise SlipError(offered.name)
+
+    async def first_waiter() -> list[str]:
+        try:
+            await catalog.status("standard", now=NOON)
+        except SlipError as error:
+            return [frame.name for frame in traceback.extract_tb(error.__traceback__)]
+        return []
+
+    async def second_waiter() -> list[str]:
+        try:
+            await catalog.chain_as_known("standard", now=NOON)
+        except SlipError as error:
+            return [frame.name for frame in traceback.extract_tb(error.__traceback__)]
+        return []
+
+    monkeypatch.setattr(catalog, "_ask", breaks)
+    async with asyncio.timeout(PATIENCE_S):
+        waiting = [asyncio.create_task(first_waiter()), asyncio.create_task(second_waiter())]
+        await settled()
+        let_go.set()
+        first, second = await asyncio.gather(*waiting)
+
+    assert [name for name in first if name.endswith("_waiter")] == ["first_waiter"]
+    assert [name for name in second if name.endswith("_waiter")] == ["second_waiter"]
+    # Where it went wrong is in both: the ask's own frames, last.
+    assert first[-1] == second[-1] == "breaks"
+
+
+async def test_a_mistake_raised_to_a_request_is_not_kept_with_the_models_last_ask(
+    lineup: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error a request was raised holds that request's frames, and what they hold of
+    it. Once the request is over, the catalog holds nothing of the error: it is gone
+    when the test lets go of it, before the model is asked about again."""
+    lineup.add("standard")
+    catalog: Catalog = lineup.catalog()
+
+    async def breaks(offered: OfferedModel) -> ModelStatus:
+        raise SlipError(offered.name)
+
+    monkeypatch.setattr(catalog, "_ask", breaks)
+    async with asyncio.timeout(PATIENCE_S):
+        asking = asyncio.create_task(catalog.status("standard", now=NOON))
+        await asyncio.wait({asking})
+    raised = asking.exception()
+    assert isinstance(raised, SlipError)
+    gone = weakref.ref(raised)
+    del raised, asking
+    await settled()
+    gc.collect()
+
+    assert gone() is None
+
+
+async def test_a_request_that_needs_a_status_asked_behind_another_waits_for_that_ask(
+    lineup: Any,
+) -> None:
+    """`standard` stands in for `first`, and was last seen unreachable: a turn's start
+    for `first` has it asked behind it. A request for `standard` alone, by `status`,
+    asks and waits, and waits for that same ask: its server is asked once."""
+    lineup.add("first", then=["standard"])
+    lineup.add("standard", state="unreachable")
+    catalog = lineup.catalog()
+    await catalog.chain_status("first", now=NOON)
+    lineup.becomes("standard", "ready")
+    held = lineup.hold("standard")
+
+    async with asyncio.timeout(PATIENCE_S):
+        behind = await catalog.chain_as_known("first", now=NOON + AGED)
+        await held.asked.wait()
+        alone = asyncio.create_task(
+            catalog.status("standard", now=NOON + AGED + timedelta(seconds=1))
+        )
+        await settled()
+        waited = not alone.done()
+        held.answers.set()
+        status = await alone
+
+    assert [model.name for model, _ in behind.ready] == ["first"]
+    assert waited
+    assert status == READY
+    assert lineup.asked == ["first", "standard", "first", "standard"]
+
+
+@pytest.mark.parametrize("others", [0, 1], ids=["alone", "beside another"])
+async def test_a_request_that_stops_waiting_leaves_the_ask_to_go_on_and_its_answer_kept(
+    others: int, lineup: Any, asks_ended: Any
+) -> None:
+    """As a title's time limit cuts its wait short: a request that waits beside it still
+    gets the answer, and the request after them asks nobody."""
+    lineup.add("standard")
+    catalog = lineup.catalog()
+    held = lineup.hold("standard")
+
+    async with asyncio.timeout(PATIENCE_S):
+        cut = asyncio.create_task(catalog.status("standard", now=NOON))
+        beside = [asyncio.create_task(catalog.status("standard", now=NOON)) for _ in range(others)]
+        await held.asked.wait()
+        cut.cancel()
+        await asyncio.wait({cut})
+        held.answers.set()
+        answers = await asyncio.gather(*beside)
+        await asks_ended()
+        after = await catalog.status("standard", now=NOON + timedelta(seconds=1))
+
+    assert cut.cancelled()
+    assert answers == [READY] * others
+    assert after == READY
+    assert lineup.asked == ["standard"]
+
+
+def said_by_the_catalog(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    return [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == "actio.catalog"
+    ]
+
+
+async def test_an_ask_behind_a_request_that_fails_in_actios_own_code_is_logged_and_asked_again(
+    lineup: Any,
+    asks_ended: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nobody waits for it, behind a turn's start, so the log says it, by the model's
+    name, with its trace, and the error ends there: the task itself ends well. What was
+    known is still used, and the next request asks again: no ask is left as if under
+    way."""
+    lineup.add("standard")
+    catalog = lineup.catalog()
+    await catalog.status("standard", now=NOON)
+    tries = 0
+
+    async def breaks(offered: OfferedModel) -> ModelStatus:
+        nonlocal tries
+        tries += 1
+        raise RuntimeError(f"a mistake of Actio's own about {offered.name}")
+
+    monkeypatch.setattr(catalog, "_ask", breaks)
+    async with asyncio.timeout(PATIENCE_S):
+        later = await catalog.chain_as_known("standard", now=NOON + AGED)
+        [behind] = [task for task in asyncio.all_tasks() if task.get_name() == "status-standard"]
+        await asyncio.wait({behind})
+        again = await catalog.chain_as_known("standard", now=NOON + AGED + timedelta(seconds=1))
+        await asks_ended()
+
+    assert later.status == again.status == READY
+    assert behind.exception() is None
+    assert tries == 2
+    assert (
+        said_by_the_catalog(caplog)
+        == [(logging.ERROR, "model standard: asking its server about it failed")] * 2
+    )
+    logged = [record for record in caplog.records if record.name == "actio.catalog"]
+    assert all(record.exc_info and record.exc_info[0] is RuntimeError for record in logged)
+
+
+async def test_an_ask_that_fails_as_its_only_waiter_is_cancelled_is_logged(
+    lineup: Any,
+    asks_ended: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The ask fails in the very step in which its one waiter was cancelled, before the
+    waiter has gone on: nobody is told the mistake, so the log says it."""
+    lineup.add("standard")
+    catalog = lineup.catalog()
+    asked, let_go = asyncio.Event(), asyncio.Event()
+
+    async def breaks(offered: OfferedModel) -> ModelStatus:
+        asked.set()
+        await let_go.wait()
+        raise RuntimeError(f"a mistake of Actio's own about {offered.name}")
+
+    monkeypatch.setattr(catalog, "_ask", breaks)
+    async with asyncio.timeout(PATIENCE_S):
+        waiter = asyncio.create_task(catalog.status("standard", now=NOON))
+        await asked.wait()
+        # Nothing awaited between the two: the ask's step comes first, the waiter's after.
+        let_go.set()
+        waiter.cancel()
+        await asyncio.wait({waiter})
+        await asks_ended()
+
+    assert waiter.cancelled()
+    assert said_by_the_catalog(caplog) == [
+        (logging.ERROR, "model standard: asking its server about it failed")
+    ]
+
+
+async def test_an_ask_that_fails_in_actios_own_code_is_raised_to_each_request_that_waits(
+    lineup: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two requests at once, for a model nothing is known of: both are told, by the
+    error itself, from one ask, and the catalog's log says nothing of it: whoever is told
+    says it. Nothing was kept, so the next request asks again, and has its answer."""
+    lineup.add("standard")
+    catalog: Catalog = lineup.catalog()
+    asks = catalog._ask
+    let_go = asyncio.Event()
+    tries = 0
+
+    async def breaks_once(offered: OfferedModel) -> ModelStatus:
+        nonlocal tries
+        tries += 1
+        if tries == 1:
+            await let_go.wait()
+            raise RuntimeError("a mistake of Actio's own")
+        return await asks(offered)
+
+    monkeypatch.setattr(catalog, "_ask", breaks_once)
+    async with asyncio.timeout(PATIENCE_S):
+        asking = [asyncio.create_task(catalog.status("standard", now=NOON)) for _ in range(2)]
+        await settled()
+        let_go.set()
+        await asyncio.wait(asking)
+        after = await catalog.status("standard", now=NOON)
+
+    assert [type(each.exception()) for each in asking] == [RuntimeError, RuntimeError]
+    assert after == READY
+    assert tries == 2
+    assert said_by_the_catalog(caplog) == []
+
+
+async def test_an_ask_under_way_is_given_up_on_before_its_servers_client_is_closed() -> None:
+    """One behind a turn's start, whose server never answers: `build`'s exit cancels it
+    and waits for it, while the client is still open, and none is left pending."""
+    lab = ListsWhenLetGo()
+
+    async with (
+        asyncio.timeout(PATIENCE_S),
+        catalogs.build(
+            parsed(GOOD), ollama_url="http://ollama", transports={"lab": lab}
+        ) as catalog,
+    ):
+        await catalog.status("big", now=NOON)
+        lab.held = asyncio.Event()  # nothing sets it: only a cancellation ends the ask
+        behind = await catalog.chain_as_known("big", now=NOON + AGED)
+        await lab.holding.wait()
+
+    assert behind.status == ModelStatus("ready", thinking=True)
+    assert lab.closed
+    assert (lab.given_up, lab.closed_before_given_up) == (1, False)
+    assert [task for task in asyncio.all_tasks() if task.get_name().startswith("status-")] == []
+
+
+async def test_every_models_chain_is_found_at_once_and_a_model_in_several_is_asked_once(
+    lineup: Any,
+) -> None:
+    """As the list of models asks: the three servers hold their answers at the same
+    time, and `second`, in all three chains, is asked once."""
+    lineup.add("standard", then=["second"])
+    lineup.add("second")
+    lineup.add("third", then=["second"])
+    held = [lineup.hold(name) for name in ("standard", "second", "third")]
+    catalog = lineup.catalog()
+
+    async with asyncio.timeout(PATIENCE_S):
+        listing = asyncio.create_task(catalog.chains(now=NOON))
+        for each in held:
+            await each.asked.wait()
+        for each in held:
+            each.answers.set()
+        chains = await listing
+
+    assert lineup.asked == ["standard", "second", "third"]
+    assert {name: [model.name for model, _ in chain.ready] for name, chain in chains.items()} == {
+        "standard": ["standard", "second"],
+        "second": ["second"],
+        "third": ["third", "second"],
     }

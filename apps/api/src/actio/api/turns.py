@@ -223,8 +223,10 @@ async def start_turn(
     except UnknownModelError:
         raise Problem(422, f"No model is called {body.model!r}. See GET /api/models.") from None
     await limits.turn(principal.user_id)
-    # The model, and those that stand in for it: one that isn't ready is passed over.
-    chain = await catalog.chain_status(offered.name, now=now)
+    # The model, and those that stand in for it: one that isn't ready is passed over. By
+    # what is known, without waiting while a model of the chain is ready by it: a person
+    # waits for this, and the walk moves on when a `ready` that was old is wrong.
+    chain = await catalog.chain_as_known(offered.name, now=now)
     if not chain.ready:
         raise not_ready(offered.name, chain.status.state)
     # Whether the turn can ask for reasoning is the first ready one's to say. It is asked

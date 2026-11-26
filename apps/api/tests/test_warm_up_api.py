@@ -557,6 +557,65 @@ async def test_a_model_none_of_whose_stand_ins_can_answer_is_refused_as_a_questi
     assert (warm.json()["model"], warm.json()["model_status"]) == ("standard", "missing")
 
 
+async def test_a_model_last_seen_unreachable_and_back_is_asked_again_and_loaded(
+    start_app: Any, settings: Settings, migrated: str, offer: Any, lineup: Any, clock: Any
+) -> None:
+    """20 s after it was last seen unreachable, with a stand-in ready: whether a load is
+    started rests on what the servers say now, not on the old status, which answered
+    204. The warm-up waits for its server, held here, which says that it is back, and
+    the model itself is loaded; the stand-in never is."""
+    assert migrated
+    answers, _ = offer()
+    itself, stand_in = Loads(answers), Loads(answers)
+    lineup.offer("standard", itself, state="unreachable", then=["second"])
+    lineup.offer("second", stand_in)
+    browser = await guest_on(start_app, settings, lineup.catalog())
+    before = await warm_up(browser)
+    lineup.becomes("standard", "ready")
+    clock.advance(seconds=20)
+    held = lineup.hold("standard")
+
+    warming = asyncio.create_task(warm_up(browser))
+    await asyncio.wait_for(held.asked.wait(), PATIENCE_S)
+    waited = not warming.done()
+    held.answers.set()
+    later = await warming
+    await until(lambda: itself.ended == 1)
+
+    assert before.status_code == 204
+    assert waited
+    assert later.status_code == 202
+    assert (itself.loads, stand_in.loads) == ([("scripted-standard", 4096)], [])
+
+
+async def test_a_lone_model_last_seen_not_ready_is_asked_again_and_waited_for(
+    start_app: Any, settings: Settings, migrated: str, offer: Any, lineup: Any, clock: Any
+) -> None:
+    """It isn't refused by its old status: the warm-up waits for its server, held here,
+    and has the model loaded once its server says it is back."""
+    assert migrated
+    answers, _ = offer()
+    model = Loads(answers)
+    lineup.offer("standard", model, state="unreachable")
+    browser = await guest_on(start_app, settings, lineup.catalog())
+    before = await warm_up(browser)
+    lineup.becomes("standard", "ready")
+    clock.advance(seconds=20)
+    held = lineup.hold("standard")
+
+    warming = asyncio.create_task(warm_up(browser))
+    await asyncio.wait_for(held.asked.wait(), PATIENCE_S)
+    waited = not warming.done()
+    held.answers.set()
+    later = await warming
+    await until(lambda: model.ended == 1)
+
+    assert before.status_code == 503
+    assert waited
+    assert later.status_code == 202
+    assert model.loads == [("scripted-standard", 4096)]
+
+
 async def test_loads_are_limited_per_account(
     start_app: Any, settings: Settings, migrated: str, clock: Any
 ) -> None:

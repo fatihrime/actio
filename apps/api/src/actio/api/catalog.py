@@ -21,7 +21,7 @@ from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Models, Now
 from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.api.rate_limits import Limits
-from actio.catalog import Chain, UnknownModelError
+from actio.catalog import UnknownModelError
 
 router = APIRouter(tags=["models"], responses=NO_SESSION)
 
@@ -81,10 +81,10 @@ async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelLi
 
     Each provider is asked at most every 15 seconds, so this can be fetched often.
     """
-    statuses = await catalog.statuses(now=now)
+    chains = await catalog.chains(now=now)
     listed = []
     for offered in catalog:
-        chain = Chain(tuple((model, statuses[model.name]) for model in catalog.chain(offered.name)))
+        chain = chains[offered.name]
         first = chain.ready[0][1] if chain.ready else None
         listed.append(
             ModelOut(

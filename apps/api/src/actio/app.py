@@ -72,10 +72,11 @@ def create_app(
             offered = catalog
             if offered is None:
                 offered = await stack.enter_async_context(open_catalog(settings))
-            # No load of a model the app started is left pending once it has shut down,
-            # whoever opened the catalog: one the app was handed, as tests hand it one,
-            # is closed by whoever opened it, and maybe only after the app.
-            stack.push_async_callback(offered.stop_loading)
+            # No load of a model the app started, and no ask about a model's status, is
+            # left pending once it has shut down, whoever opened the catalog: one the app
+            # was handed, as tests hand it one, is closed by whoever opened it, and maybe
+            # only after the app.
+            stack.push_async_callback(offered.stop_tasks)
             # Every model on offer must have a price, wherever the plans come from.
             names = [model.name for model in offered]
             if plans is None:

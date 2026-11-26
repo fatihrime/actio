@@ -8,7 +8,7 @@ what to call it at its provider, its limits, and the client to stream an answer 
   where the file is and what is wrong in it.
 - `open_catalog` builds the clients for the providers it names, and closes them again.
   Nothing connects until a model is used.
-- `Catalog.status` asks a provider whether it has a model, and what the model can do.
+- `Catalog.status` says whether a model's provider has it, and what the model can do.
 - `Catalog.chain` gives a model and those that stand in for it, which are asked in its
   place when it can't answer before the first word, and `Catalog.chain_status` says
   which of them are ready (ADR 0028). `Chain.asked_with` says which of those are asked
@@ -22,6 +22,15 @@ what to call it at its provider, its limits, and the client to stream an answer 
   refused for now. Within each of those two groups, a model that keeps failing, by what
   `Chain.failing` read of its breaker, is asked after those that don't
   (`OfferedModel.breaker`, ADR 0031): that never refuses anything.
+- What a model's provider said of it is reused for `STATUS_LIFETIME`, and asked again
+  and waited for after that: `Catalog.chain_status` for a chain, `Catalog.status` for a
+  model alone, and `Catalog.chains` for every model's chain at once, as the list of
+  models needs. A turn's start alone goes by what is known (`Catalog.chain_as_known`):
+  an answer younger than `STATUS_USED_FOR` is used without waiting while a model of
+  its chain is ready by what is known, and the provider is asked again behind it, for
+  the requests after. Nothing is refused by an old answer. One ask about a model is
+  under way at a time, which every request that needs it shares, either way.
+  `Catalog.stop_tasks` ends the asks under way, and the loads.
 - `asked_through` gives the client a model is asked through: one that records each try
   in the model's breaker, and notes the wait its provider names (`OwnWait`), around
   the one `counted` gives, which counts in its budget what each request takes of it.
@@ -45,6 +54,7 @@ from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import TracebackType
 from typing import Annotated, Literal, Self
 
 import anyio
@@ -95,6 +105,15 @@ STATUS_LIFETIME = timedelta(seconds=15)
 """How long an answer about a model's status is reused before its provider is asked
 again. Long enough that a page which shows the models doesn't question the provider on
 every look; short enough that a model pulled a moment ago shows up."""
+
+STATUS_USED_FOR = timedelta(minutes=5)
+"""How long an answer about a model's status, once it is older than `STATUS_LIFETIME`,
+is still used by a turn's start without waiting, while its provider is asked again
+behind the request (`Catalog.chain_as_known`): only while a model of the chain is ready
+by what is known, since nothing is refused by such an answer. Long enough for a
+conversation's pace, an answer read and a question written; as long as Ollama keeps a
+model loaded after it was last asked (ADR 0026). Older than this, an answer is asked
+again and waited for, as one nothing is known of. Nothing else uses an old answer."""
 
 TIMEOUTS = Timeouts(connect_s=2.0, request_s=3.0)
 """Asking for a status is a small call: a provider that takes longer than this counts as
@@ -813,6 +832,35 @@ class UnknownModelError(Exception):
     """No model on offer has this name."""
 
 
+@dataclass(frozen=True, slots=True)
+class _Mistake:
+    """A mistake of Actio's own that an ask about a model's status raised, with its trace
+    as it was when the ask caught it: each request that waits for the ask is raised the
+    error with that trace, as `Future.result()` raises, and never with the frames of
+    another request that was raised it before."""
+
+    error: Exception
+    trace: TracebackType | None
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _Asking:
+    """An ask about one model's status, in a task of its own: its server's answer, or the
+    mistake of Actio's own that it raised, which the task returns and never raises.
+    Those that need its answer wait for it (`Catalog._answers`), each through a future of
+    its own, kept in `waiting` while it waits; those that don't need it don't wait, and
+    its answer is kept for the requests after."""
+
+    task: asyncio.Task[ModelStatus | _Mistake]
+    waiting: set[asyncio.Future[ModelStatus | _Mistake]] = field(default_factory=set)
+
+    @property
+    def waited_for(self) -> bool:
+        """Whether a request waits for its answer now. A waiter that was cancelled has
+        stopped waiting at once, whenever it goes on."""
+        return any(not each.done() for each in self.waiting)
+
+
 class Catalog:
     """The models on offer. Iterating gives them in the file's order."""
 
@@ -827,6 +875,12 @@ class Catalog:
         self._models = dict(models)
         self._declared_thinking = dict(thinking)
         self._statuses: dict[str, tuple[datetime, ModelStatus]] = {}
+        """What each model's server last said of it, by the model's name, dated by the
+        `now` of the request that had it asked, also when the answer came later."""
+        self._asking: dict[str, _Asking] = {}
+        """Each model's last ask about its status, by its name: under way, or ended. One
+        at a time for a model: the next is started only once the last has ended. One
+        that failed in Actio's own code takes itself off (`_asked`)."""
         self._loads: dict[str, asyncio.Task[None]] = {}
         """Each model's last load, by its name: under way, or ended."""
         self.default = default
@@ -844,22 +898,11 @@ class Catalog:
             raise UnknownModelError(name) from None
 
     async def status(self, name: str, *, now: datetime) -> ModelStatus:
-        """Whether the model's provider has it, and what the model can do.
-
-        An answer is reused for `STATUS_LIFETIME`, so asking often is cheap.
-        """
-        known = self._statuses.get(name)
-        if known is not None and now - known[0] < STATUS_LIFETIME:
-            return known[1]
-        status = await self._ask(self.get(name))
-        self._statuses[name] = (now, status)
+        """Whether the model's provider has it, and what the model can do: as
+        `chain_status` says it, for the model by itself. An answer is reused for
+        `STATUS_LIFETIME`, so asking often is cheap. Raises `UnknownModelError`."""
+        [status] = await self._known([self.get(name)], now, uses_old=False)
         return status
-
-    async def statuses(self, *, now: datetime) -> dict[str, ModelStatus]:
-        """The status of every model, asked for at the same time."""
-        names = list(self._models)
-        found = await asyncio.gather(*(self.status(name, now=now) for name in names))
-        return dict(zip(names, found, strict=True))
 
     def chain(self, name: str | None = None) -> list[OfferedModel]:
         """The model called `name`, or the default one, then the models its `then` names,
@@ -869,11 +912,169 @@ class Catalog:
         return [offered, *(self.get(stand_in) for stand_in in offered.then)]
 
     async def chain_status(self, name: str | None = None, *, now: datetime) -> Chain:
-        """The model's chain, each with its status, asked for at the same time as
-        `statuses` asks them: each answer is reused for `STATUS_LIFETIME`."""
+        """The model's chain, each with what its provider says of it now: an answer
+        younger than `STATUS_LIFETIME` at `now` is reused, by the `now` of the request
+        that had it asked, and every other one is asked and waited for, all at the same
+        time. For whoever says or does something by what a server says now: the list of
+        models, the warm-up, the title job, and any new caller, unless it is a turn's
+        start (`chain_as_known`).
+
+        One ask about a model is under way at a time: a request that needs a status
+        whose ask is under way starts none, and waits for that same ask. A request that
+        stops waiting, by being cancelled, leaves the ask to go on, for whoever else
+        waits and for the requests after. An ask that fails in Actio's own code, by
+        raising something that isn't an `LLMError`, raises it to each request that
+        waits for it; with none waiting, the log says it, with its trace, and what was
+        known stays.
+
+        Raises `UnknownModelError`."""
         chain = self.chain(name)
-        found = await asyncio.gather(*(self.status(offered.name, now=now) for offered in chain))
-        return Chain(tuple(zip(chain, found, strict=True)))
+        statuses = await self._known(chain, now, uses_old=False)
+        return Chain(tuple(zip(chain, statuses, strict=True)))
+
+    async def chain_as_known(self, name: str | None = None, *, now: datetime) -> Chain:
+        """The model's chain, each with its status, by what is known of it where that
+        will do: only for a request that a person waits for, whose models are then asked
+        through the walk, which moves on to the next model when an old `ready` was
+        wrong. Today a turn's start, its one caller. The name says what sets it apart
+        from `chain_status`, which asks.
+
+        By the age of what each model's provider said at `now`, by the `now` of the
+        request that had it asked:
+
+        1. **Younger than `STATUS_LIFETIME`:** reused, and nobody is asked.
+        2. **Older, and younger than `STATUS_USED_FOR`:** used without waiting, and its
+           provider is asked again behind the request. The answer replaces what is
+           known when it comes, for the requests after.
+        3. **But nothing is refused by an old status:** when, by what is known and what
+           the request waited for anyway, no model of the chain is ready, those whose
+           status was old are waited for, at the same time, and the chain is as their
+           answers say.
+        4. **Nothing known, or `STATUS_USED_FOR` old or older:** asked and waited for.
+
+        Every status that isn't fresh is asked for at once, when the request comes,
+        those waited for and those not. The asks are those of `chain_status`, shared
+        with it, and so is what they do when they fail.
+
+        Raises `UnknownModelError`."""
+        chain = self.chain(name)
+        statuses = await self._known(chain, now, uses_old=True)
+        return Chain(tuple(zip(chain, statuses, strict=True)))
+
+    async def chains(self, *, now: datetime) -> dict[str, Chain]:
+        """Every model's chain, by the model's name, in the file's order: each as
+        `chain_status` gives it, all at the same time, so that a model in several chains
+        is asked about once."""
+        names = list(self._models)
+        found = await asyncio.gather(*(self.chain_status(name, now=now) for name in names))
+        return dict(zip(names, found, strict=True))
+
+    async def _known(
+        self, chain: Sequence[OfferedModel], now: datetime, *, uses_old: bool
+    ) -> list[ModelStatus]:
+        """The status of each model of `chain`, in its order: the one place where it is
+        decided, for both ways. `uses_old` is a turn's start's (`chain_as_known`): an old
+        status is used while a model of the chain is ready by what is known. Otherwise
+        every status that isn't fresh is waited for (`chain_status`)."""
+        old: dict[str, _Asking] = {}
+        needed: dict[str, _Asking] = {}
+        for offered in chain:
+            said = self._statuses.get(offered.name)
+            age = None if said is None else now - said[0]
+            if age is not None and age < STATUS_LIFETIME:
+                continue  # reused, and nobody is asked
+            # Every status that isn't fresh is asked for now, whether or not it is waited
+            # for: a request that turns out to need the old ones too has lost no time.
+            asking = self._asked_about(offered, now)
+            if uses_old and age is not None and age < STATUS_USED_FOR:
+                old[offered.name] = asking
+            else:
+                needed[offered.name] = asking
+        answers = await self._answers(needed)
+
+        def known() -> list[ModelStatus]:
+            # The answers waited for, and what is known of the others: an old status
+            # whose ask has answered meanwhile is that answer by now.
+            return [
+                answers[offered.name]
+                if offered.name in answers
+                else self._statuses[offered.name][1]
+                for offered in chain
+            ]
+
+        found = known()
+        if old and not any(status.state == "ready" for status in found):
+            # Nothing is refused by an old status: those are waited for.
+            answers |= await self._answers(old)
+            found = known()
+        return found
+
+    def _asked_about(self, offered: OfferedModel, now: datetime) -> _Asking:
+        """The ask about `offered` that is under way, or one started now, its answer
+        dated `now`: one at a time for a model, and once the last has ended, however it
+        ended, the next request that needs one starts another."""
+        asking = self._asking.get(offered.name)
+        if asking is None or asking.task.done():
+            task = asyncio.create_task(self._asked(offered, now), name=f"status-{offered.name}")
+            asking = self._asking[offered.name] = _Asking(task)
+        return asking
+
+    async def _answers(self, asking: Mapping[str, _Asking]) -> dict[str, ModelStatus]:
+        """The answer of each ask, by the model's name, all waited for at the same time.
+
+        A waiter's cancellation ends its own wait, never an ask: others may wait for it,
+        and its answer is worth having (awaiting a task would pass the cancellation into
+        it, so each is waited for through a shield). Once every ask has ended, raises the
+        first mistake of Actio's own that one of them raised, in the order given, with
+        the trace it had then. A request is raised one error: the log says each other
+        mistake, with its trace, as it says one that nobody waited for."""
+        if not asking:
+            return {}
+        waits = {name: asyncio.shield(each.task) for name, each in asking.items()}
+        for name, wait in waits.items():
+            asking[name].waiting.add(wait)
+        try:
+            said = await asyncio.gather(*waits.values())
+        finally:
+            for name, wait in waits.items():
+                asking[name].waiting.discard(wait)
+        answers: dict[str, ModelStatus] = {}
+        mistakes: list[tuple[str, _Mistake]] = []
+        for name, answer in zip(waits, said, strict=True):
+            if isinstance(answer, _Mistake):
+                mistakes.append((name, answer))
+            else:
+                answers[name] = answer
+        if mistakes:
+            (_, first), *others = mistakes
+            for name, other in others:
+                logger.error(
+                    "model %s: asking its server about it failed",
+                    name,
+                    exc_info=(type(other.error), other.error, other.trace),
+                )
+            raise first.error.with_traceback(first.trace)
+        return answers
+
+    async def _asked(self, offered: OfferedModel, dated: datetime) -> ModelStatus | _Mistake:
+        """Ask `offered`'s server about it, and keep its answer, dated `dated`. Nobody may
+        be waiting: what goes wrong ends here, and never escapes the task. A mistake of
+        Actio's own is returned, with its trace, for whoever waits to raise; with none
+        waiting, the log says it, and what was known stays. A cancellation gets out as
+        it came, and keeps nothing either."""
+        try:
+            status = await self._ask(offered)
+        except Exception as error:
+            # An ask that failed so isn't kept as the model's last one: each request
+            # that is raised the error adds its own frames to it, and those would stay,
+            # with what they hold of that request, until the model's next ask.
+            failed = self._asking.pop(offered.name)
+            if not failed.waited_for:
+                # Something of Actio's own, with its trace. An ask carries nobody's words.
+                logger.exception("model %s: asking its server about it failed", offered.name)
+            return _Mistake(error, error.__traceback__)
+        self._statuses[offered.name] = (dated, status)
+        return status
 
     def load_ahead(self, name: str) -> bool:
         """Start having the model called `name` loaded into its server's memory, ahead of
@@ -904,9 +1105,21 @@ class Catalog:
         )
         return True
 
+    async def stop_tasks(self) -> None:
+        """Cancel every task the catalog has under way by itself, apart from the
+        requests, and wait until each has ended: the loads ahead (`stop_loading`), and
+        the asks about a model's status. For whoever closes the providers' clients, or
+        stops using the catalog: nothing is left pending, and nothing is left to a
+        closed client. One call for every kind, so that no place forgets one. A request
+        that still waits for an ask is cancelled with it."""
+        asking = [each.task for each in self._asking.values() if not each.task.done()]
+        for task in asking:
+            task.cancel()
+        await asyncio.gather(self.stop_loading(), *asking, return_exceptions=True)
+
     async def stop_loading(self) -> None:
-        """Cancel the loads under way, and wait until each has ended. For whoever closes
-        the providers' clients, or stops using the catalog: no load is left pending."""
+        """Cancel the loads under way, and wait until each has ended: the part of
+        `stop_tasks` that stops loads."""
         loading = [task for task in self._loads.values() if not task.done()]
         for task in loading:
             task.cancel()
@@ -1215,8 +1428,9 @@ async def build(
     ollama_url: str,
     transports: Mapping[str, httpx2.AsyncBaseTransport] | None = None,
 ) -> AsyncIterator[Catalog]:
-    """The catalog a checked file describes. On the way out, the loads under way are
-    cancelled, and then its providers' clients are closed.
+    """The catalog a checked file describes. On the way out, the loads and the asks about
+    a status under way are cancelled (`Catalog.stop_tasks`), and then its providers'
+    clients are closed.
 
     `ollama_url` is where Ollama providers are, unless the file gives one its own `url`.
     `transports` replaces how a provider is reached, by the provider's name: tests pass
@@ -1291,9 +1505,9 @@ async def build(
         }
         declared = {name: bool(entry.thinking) for name, entry in file.models.items()}
         catalog = Catalog(models, default=file.default, thinking=declared, titles=file.titles)
-        # After the clients, so it is done before they are closed: a load under way is
-        # given up on while its connection is still there.
-        stack.push_async_callback(catalog.stop_loading)
+        # After the clients, so it is done before they are closed: a load or an ask about
+        # a status under way is given up on while its connection is still there.
+        stack.push_async_callback(catalog.stop_tasks)
         yield catalog
 
 

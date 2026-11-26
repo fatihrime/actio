@@ -545,6 +545,18 @@ SCRIPTED = "scripted"
 """The provider of a `Lineup`'s models, as their budgets' keys name it."""
 
 
+class Held:
+    """What the server of a `Lineup`'s model answers about the model, held until the
+    test lets it go (`Lineup.hold`)."""
+
+    def __init__(self) -> None:
+        self.asked = asyncio.Event()
+        """Set once its server has been asked, and holds the answer."""
+        self.answers = asyncio.Event()
+        """Set it to have the server answer: each ask held so far, and every one after.
+        It answers what the lineup says of the model then (`Lineup.becomes`)."""
+
+
 class Lineup:
     """Models a test offers, each with a script of its own, on servers of the test's
     choosing: a server that writes only so many answers at once is a `Gate`, which the
@@ -562,14 +574,22 @@ class Lineup:
 
     The models keep their breakers, and the waits their providers named, for as long as
     the lineup lives: every catalog it gives has the same ones, which a test reads
-    through `catalog().get(name).breaker` and `catalog().get(name).own_wait`."""
+    through `catalog().get(name).breaker` and `catalog().get(name).own_wait`.
+
+    What a model's server says of it can change while the test runs (`becomes`), and
+    its answer can be held (`hold`): every catalog the lineup gives asks its servers
+    through the lineup, which notes each ask (`asked`)."""
 
     def __init__(self) -> None:
         self._offered: dict[str, OfferedModel] = {}
         self._thinking: dict[str, bool] = {}
         self._states: dict[str, State] = {}
+        self._holds: dict[str, Held] = {}
         self._breakers: dict[str, Breaker] = {}
         self._own_waits: dict[str, OwnWait] = {}
+        self.asked: list[str] = []
+        """The names of the models whose servers were asked about them, in the order
+        asked: each when its server is asked, before any hold."""
 
     def add(
         self,
@@ -650,6 +670,18 @@ class Lineup:
         self._thinking[name] = thinking
         self._states[name] = state
 
+    def becomes(self, name: str, state: State) -> None:
+        """From now on, the server of the model called `name` says `state` of it when it
+        is asked: for a model whose server goes away, or comes back, or that is pulled."""
+        self._states[name] = state
+
+    def hold(self, name: str) -> Held:
+        """Hold what the server of the model called `name` answers about it, at each ask
+        from now on, until the test sets the `Held.answers` this gives. An ask held when
+        the test ends is cancelled with its app, or by `Catalog.stop_tasks`."""
+        held = self._holds[name] = Held()
+        return held
+
     @property
     def names(self) -> list[str]:
         return list(self._offered)
@@ -659,16 +691,13 @@ class Lineup:
         conversations' titles: by default none does."""
         default = next(iter(self._offered))
         return _LinedUp(
-            self._offered,
-            default=default,
-            thinking=self._thinking,
-            titles=titles,
-            states=self._states,
+            self._offered, default=default, thinking=self._thinking, titles=titles, lineup=self
         )
 
 
 class _LinedUp(Catalog):
-    """The catalog of a `Lineup`: each model's server says what the lineup says of it."""
+    """The catalog of a `Lineup`: each model's server says what the lineup says of it
+    when it is asked, after the lineup's hold, if any."""
 
     def __init__(
         self,
@@ -677,13 +706,18 @@ class _LinedUp(Catalog):
         default: str,
         thinking: Mapping[str, bool],
         titles: str | None,
-        states: Mapping[str, State],
+        lineup: Lineup,
     ) -> None:
         super().__init__(models, default=default, thinking=thinking, titles=titles)
-        self._states = dict(states)
+        self._lineup = lineup
 
     async def _ask(self, offered: OfferedModel) -> ModelStatus:
-        state = self._states[offered.name]
+        self._lineup.asked.append(offered.name)
+        held = self._lineup._holds.get(offered.name)
+        if held is not None:
+            held.asked.set()
+            await held.answers.wait()
+        state = self._lineup._states[offered.name]
         if state == "missing":
             # As a server that speaks OpenAI's API and hasn't got the model: the file's
             # word on reasoning stands.
@@ -697,6 +731,26 @@ class _LinedUp(Catalog):
 def lineup() -> Lineup:
     """An empty `Lineup`: add the models, then start an app with its `catalog()`."""
     return Lineup()
+
+
+type AsksEnded = Callable[[], Awaitable[None]]
+
+
+async def _asks_ended() -> None:
+    asking = [task for task in asyncio.all_tasks() if task.get_name().startswith("status-")]
+    if asking:
+        async with asyncio.timeout(5):
+            await asyncio.wait(asking)
+
+
+@pytest.fixture
+def asks_ended() -> AsksEnded:
+    """Call it, and await, to wait until every ask about a model's status that is under
+    way in this process has ended, however it ends: one that runs behind the request
+    that started it has kept its answer by then (`Catalog.chain_as_known`). Each is the
+    catalog's task called `status-<the model's name>`. The test fails after five
+    seconds."""
+    return _asks_ended
 
 
 class Offer(Protocol):

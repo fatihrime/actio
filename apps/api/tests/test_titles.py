@@ -281,12 +281,13 @@ def put_back(run_again: int, in_seconds: float) -> list[tuple[str, str, int, flo
 
 
 def status_of(state: Any) -> Callable[..., Awaitable[ModelStatus]]:
-    """What stands in for `Catalog.status`: the model is in `state`, whichever is asked."""
+    """What stands in for `Catalog._ask`, the catalog's one question to a model's server:
+    the model is in `state`, whichever is asked."""
 
-    async def status(name: str, *, now: datetime) -> ModelStatus:  # noqa: ARG001
+    async def ask(offered: OfferedModel) -> ModelStatus:  # noqa: ARG001
         return ModelStatus(state, thinking=False)
 
-    return status
+    return ask
 
 
 # --- When a title is asked for ---------------------------------------------------------
@@ -1087,7 +1088,7 @@ async def test_a_model_that_isnt_ready_is_not_asked_for_a_title(
     missing ends the job well. One whose server doesn't answer puts it back, to ask again
     in thirty seconds."""
     model, catalog = offer(TextDelta("Fixing a flat tyre"), DONE, titles="standard")
-    monkeypatch.setattr(catalog, "status", status_of(state))
+    monkeypatch.setattr(catalog, "_ask", status_of(state))
     begun = await started(db)
     await ended(db, begun)
 
@@ -1780,6 +1781,54 @@ async def test_a_model_that_isnt_ready_is_passed_over_for_one_that_stands_in(
             f"conversation {begun.conversation.id}: model second answered in place of standard",
         ),
     ]
+
+
+async def test_a_title_waits_for_its_chains_statuses_that_arent_fresh_as_ever(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    work_through: Any,
+    queue_books: Any,
+    asks_ended: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unlike a turn's start: the statuses are 20 s old, as a turn left them, and the
+    stand-in's server holds its answer. The job waits for it, though its own model was
+    last seen ready, until its time limit, and asks no model: the title is asked for
+    again in thirty seconds. Its wait cut short leaves the ask to go on, and its answer
+    is kept. The catalog's log says nothing of it."""
+    monkeypatch.setattr(titles, "WRITTEN_WITHIN_S", 0.5)
+    naming = lineup.add("standard", TextDelta("Fixing a flat tyre"), DONE, then=["second"])
+    lineup.add("second", TextDelta("Never"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    await catalog.chain_status("standard", now=clock.now)
+    clock.advance(seconds=20)
+    holding = lineup.hold("second")
+    begun = await started(db)
+    await ended(db, begun)
+
+    async with asyncio.timeout(PATIENCE_S):
+        await run_the_job(settings, catalog, clock, work_through)
+        held_for_the_job = holding.asked.is_set() and not holding.answers.is_set()
+        holding.answers.set()
+        await asks_ended()
+        after = await catalog.chain_status("standard", now=clock.now)
+
+    assert held_for_the_job
+    assert naming.requests == []
+    assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
+    assert await queue_books.due() == put_back(1, 30)
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: no title, its model took longer than 0.5 s",
+        )
+    ]
+    assert [record for record in caplog.records if record.name == "actio.catalog"] == []
+    assert [model.name for model, _ in after.ready] == ["standard", "second"]
+    assert lineup.asked == ["standard", "second", "standard", "second"]
 
 
 async def test_a_model_without_room_for_the_titles_request_is_passed_over_for_one_with_room(
