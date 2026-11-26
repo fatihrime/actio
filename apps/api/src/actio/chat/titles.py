@@ -285,14 +285,16 @@ async def write(
             conversation_id,
         )
         return
-    question = await _first_question(open_session, conversation_id)
-    if question is None:
+    found = await _first_question(open_session, conversation_id)
+    if found is None:
         return
+    question, account = found
     written = await _ask(
         catalog,
         catalog.get(catalog.titles),
         question,
         conversation_id,
+        account=account,
         now=now,
         budgets=budgets,
         clock=clock,
@@ -324,15 +326,16 @@ async def write(
 
 async def _first_question(
     open_session: async_sessionmaker[AsyncSession], conversation_id: uuid.UUID
-) -> str | None:
+) -> tuple[str, uuid.UUID] | None:
     """The text of the conversation's first question, as the branch it shows begins,
-    without the space around it, cut to `QUESTION_CHARS`. `None` when there is nothing
-    to name: the conversation is gone, someone or something named it already, or its
-    first question has no text."""
+    without the space around it, cut to `QUESTION_CHARS`, and the id of the account the
+    conversation belongs to. `None` when there is nothing to name: the conversation is
+    gone, someone or something named it already, or its first question has no text."""
     async with open_session() as db:
         conversation = await db.get(Conversation, conversation_id)
         if conversation is None or conversation.title_by != "question":
             return None
+        account = conversation.user_id
         branch = await tree.shown_branch(db, conversation)
     if not branch:
         return None
@@ -341,7 +344,7 @@ async def _first_question(
     text = "".join(part.text for part in first if isinstance(part, TextPart)).strip()
     if not text:
         return None
-    return text[:QUESTION_CHARS]
+    return text[:QUESTION_CHARS], account
 
 
 async def _ask(
@@ -350,6 +353,7 @@ async def _ask(
     question: str,
     conversation_id: uuid.UUID,
     *,
+    account: uuid.UUID,
     now: datetime,
     budgets: Budgets,
     clock: Callable[[], datetime],
@@ -376,9 +380,10 @@ async def _ask(
     A request is shaped as a turn's is, where the two meet: the model's own context
     window, since a local server reloads its model when that changes, and reasoning off,
     for a model that can reason. A model whose server writes only so many answers at
-    once waits at its gate, as an answer does, keeps its place there through a second
-    try, and gives it back once its last try's stream is closed: before the next model's
-    gate is waited at.
+    once waits at its gate, as an answer does, as the answer of `account`, the account
+    the conversation belongs to; keeps its place there through a second try; and gives
+    it back once its last try's stream is closed: before the next model's gate is waited
+    at.
 
     A model that isn't ready is not asked, as a turn doesn't ask one. What it can do
     isn't known then, and one that reasons unless it is told not to would spend a
@@ -501,7 +506,7 @@ async def _ask(
                             # not be told.
                             thinking=False if status.thinking else None,
                         ),
-                        model.gate,
+                        None if model.gate is None else model.gate.passing(account),
                     )
                     for model, status in asked.models
                 ],

@@ -127,6 +127,14 @@ async def guest_on(
     return browser
 
 
+async def another_guest(browser: httpx.AsyncClient) -> None:
+    """Make `browser` a new guest's, on the same app: another account, with a session of
+    its own. A request sent before goes on as whoever sent it: wait until it has reached
+    the app before this."""
+    browser.cookies.clear()
+    await browser.post("/api/session/guest")
+
+
 async def held(model: Any) -> None:
     """Wait until the model has yielded everything before its hold, and waits there."""
     await asyncio.wait_for(model.waiting.wait(), PATIENCE_S)
@@ -640,6 +648,40 @@ async def test_a_turn_stopped_while_it_waits_at_its_stand_ins_gate_is_stopped(
     # Nobody had answered: the record names no model, in the stop's answer too.
     assert stopped.json()["answered_by"] is None
     assert await answered_by(chat, response) is None
+
+
+async def test_a_turn_waits_at_its_stand_ins_gate_as_the_answer_of_the_account_that_asked_it(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any
+) -> None:
+    """A guest's long answer holds the stand-in's server, and the guest's next turn,
+    whose model fails at once, waits there for the stand-in. Another guest asks a model
+    on that server after it, and is answered first once the long answer ends: the turn
+    waits as the answer of its guest, who was given a place there, and the other guest
+    never was. Waiting as anyone else's, as an account never given a place, it would
+    pass first, having come first."""
+    assert migrated
+    order: list[str] = []
+    _, second_gate, _, other, hold = two_servers(
+        lineup, lambda: order.append("the stand-in"), TextDelta("At last."), DONE
+    )
+    lineup.add(
+        "beside", lambda: order.append("theirs"), TextDelta("Theirs."), DONE, gate=second_gate
+    )
+    browser = await guest_on(start_app, settings, lineup)
+    asked_other = Chat(browser).asking(model="other")
+    await held(other)
+    asked = Chat(browser).asking()
+    await until(lambda: second_gate.waiting == 1)
+    await another_guest(browser)
+    asked_theirs = Chat(browser).asking(model="beside")
+    await until(lambda: second_gate.waiting == 2)
+
+    hold.set()
+    _, response, theirs = await ended(asked_other, asked, asked_theirs)
+
+    assert order == ["theirs", "the stand-in"]
+    assert said(response) == "At last."
+    assert said(theirs) == "Theirs."
 
 
 async def test_a_turn_stopped_while_its_stand_in_writes_keeps_what_had_arrived(

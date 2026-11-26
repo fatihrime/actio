@@ -29,8 +29,10 @@ the hold on its credits: see `_beat`.
 A model's server that writes only so many answers at once has a gate in front of it
 (`actio.catalog.Gate`). A turn waits there, running like any other, and the model is
 asked only once the turn has passed: so the client's patience for the first word starts
-when the server is free. The turn gives its place back as soon as the model's stream is
-closed, however it ended.
+when the server is free. It waits as the answer of the account that asked it, and a
+place that comes free goes to the account that has had the least (ADR 0023, revision
+"a place that comes free goes to the account that has had the least"). The turn gives
+its place back as soon as the model's stream is closed, however it ended.
 
 A turn asks the model it names, and when that one can't answer, the models that stand in
 for it, one after the other, each behind its own gate (`actio.catalog.Catalog.chain`):
@@ -319,6 +321,7 @@ async def answer(
     chain: Sequence[Asking],
     *,
     model: str,
+    account: uuid.UUID,
     conversation_id: uuid.UUID,
     turn_id: uuid.UUID,
     answer_id: uuid.UUID,
@@ -355,7 +358,8 @@ async def answer(
     model is named for titles, goes to `turns.finish` with it.
 
     When a model's server is busy with other answers, the turn first waits at its gate,
-    saying all the while that it is alive.
+    saying all the while that it is alive: as the answer of `account`, the id of the
+    account that asked it, at the gate of each model it asks.
 
     `halt` ends it early. `on_beat` is called with every beat, after the turn has said
     that it is alive: for whatever else has to be kept while the turn runs. Neither it
@@ -374,7 +378,7 @@ async def answer(
                 asking.offered.name,
                 asked_through(asking.offered, budgets, tokens, clock),
                 asking.request,
-                _through(asking.offered.gate, turn_id, clock),
+                _through(asking.offered.gate, account, turn_id, clock),
             )
             for asking in chain
         ],
@@ -487,10 +491,11 @@ async def answer(
 
 @asynccontextmanager
 async def _through(
-    gate: Gate | None, turn_id: uuid.UUID, clock: Callable[[], datetime]
+    gate: Gate | None, account: uuid.UUID, turn_id: uuid.UUID, clock: Callable[[], datetime]
 ) -> AsyncIterator[None]:
-    """Wait until the model's server has room for the answer, and keep its place there
-    until the end of the block. Without a gate, the server is asked at once.
+    """Wait until the model's server has room for the answer, as `account`'s, and keep
+    its place there until the end of the block. Without a gate, the server is asked at
+    once.
 
     A turn that had to wait says so in the log, with how long: whether it got its turn,
     or was stopped, or ended by a shutdown, while it waited."""
@@ -500,7 +505,7 @@ async def _through(
     came = clock() if gate.full else None
     passed = False
     try:
-        async with gate:
+        async with gate.passing(account):
             passed = True
             if came is not None:
                 _waited(turn_id, came, clock)

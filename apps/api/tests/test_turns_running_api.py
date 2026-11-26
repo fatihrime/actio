@@ -1168,6 +1168,21 @@ async def guest_on(
     return browser
 
 
+async def another_guest(browser: httpx.AsyncClient) -> str:
+    """Make `browser` a new guest's, on the same app: another account, with a session of
+    its own, whose cookie this returns. A request sent before goes on as whoever sent
+    it: wait until it has reached the app before this."""
+    browser.cookies.clear()
+    await browser.post("/api/session/guest")
+    return browser.cookies["actio_session"]
+
+
+def back_to(browser: httpx.AsyncClient, session: str) -> None:
+    """Make `browser` the guest's whose session's cookie this is again."""
+    browser.cookies.clear()
+    browser.cookies.set("actio_session", session)
+
+
 async def test_a_turn_waits_while_its_models_server_is_busy_and_its_model_is_asked_only_then(
     start_app: Any,
     settings: Settings,
@@ -1208,7 +1223,7 @@ async def test_a_turn_waits_while_its_models_server_is_busy_and_its_model_is_ask
     assert caplog.text.count("for the model's server") == 1  # the first one didn't wait
 
 
-async def test_turns_that_wait_pass_in_the_order_they_came(
+async def test_one_accounts_turns_that_wait_pass_in_the_order_they_came(
     start_app: Any, settings: Settings, migrated: str, lineup: Any
 ) -> None:
     assert migrated
@@ -1243,6 +1258,58 @@ async def test_turns_that_wait_pass_in_the_order_they_came(
         "Second answered.",
         "Third answered.",
     ]
+
+
+async def test_another_accounts_question_is_answered_before_the_second_of_the_account_first_there(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    clock: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A server that writes one answer at a time. A guest asks two questions at once, and
+    another guest one a moment later: once the first answer ends, the other guest's
+    model is asked, and the first guest's second waits on. Each turn that waited says so
+    in the log, as ever."""
+    assert migrated
+    gate, first_hold, their_hold = Gate(1), asyncio.Event(), asyncio.Event()
+    first = lineup.add(
+        "standard", TextDelta("My first "), first_hold, TextDelta("answer."), DONE, gate=gate
+    )
+    second = lineup.add("second", TextDelta("My second answer."), DONE, gate=gate)
+    theirs = lineup.add(
+        "third", TextDelta("Their "), their_hold, TextDelta("answer."), DONE, gate=gate
+    )
+    browser = await guest_on(start_app, settings, lineup)
+    mine, mine_too = Chat(browser), Chat(browser)
+    asked_first = mine.asking()
+    await held(first)
+    asked_second = mine_too.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+    my_second = await mine_too.running_turn()
+    await another_guest(browser)
+    their_chat = Chat(browser)
+    asked_theirs = their_chat.asking(model="third")
+    await until(lambda: gate.waiting == 2)
+    their_turn = await their_chat.running_turn()
+
+    clock.advance(seconds=10)
+    first_hold.set()
+    await held(theirs)
+    my_second_asked_meanwhile = second.started.is_set()
+    clock.advance(seconds=5)
+    their_hold.set()
+    first_reader, second_reader, their_reader = await ended(asked_first, asked_second, asked_theirs)
+
+    assert not my_second_asked_meanwhile
+    assert said(first_reader) == "My first answer."
+    assert said(their_reader) == "Their answer."
+    assert said(second_reader) == "My second answer."
+    assert f"turn {their_turn}: waited 10.0 s for the model's server" in caplog.text
+    assert f"turn {my_second}: waited 15.0 s for the model's server" in caplog.text
+    assert caplog.text.count("for the model's server") == 2  # the first one didn't wait
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
 
 
 async def test_a_busy_server_holds_up_only_the_answers_it_is_to_write(
@@ -1377,7 +1444,8 @@ async def test_a_turn_stopped_while_it_waits_ends_at_once_and_leaves_the_others_
 ) -> None:
     """Stop takes a turn out of the queue. Nothing was written, so nothing is kept or
     charged, and its model never hears of it. The answer ahead of it goes on, and the
-    one behind it doesn't jump ahead. The log says how long the stopped one waited."""
+    one behind it doesn't jump ahead. The log says how long the stopped one waited.
+    Each of the three is another guest's."""
     assert migrated
     gate, hold = Gate(1), asyncio.Event()
     first = lineup.add(
@@ -1386,17 +1454,22 @@ async def test_a_turn_stopped_while_it_waits_ends_at_once_and_leaves_the_others_
     second = lineup.add("second", TextDelta("Never written."), DONE, gate=gate)
     third = lineup.add("third", TextDelta("The third answer."), DONE, gate=gate)
     browser = await guest_on(start_app, settings, lineup)
-    one, two, three = Chat(browser), Chat(browser), Chat(browser)
+    one = Chat(browser)
     asked_first = one.asking()
     await held(first)
+    stopping = await another_guest(browser)
+    two = Chat(browser)
     asked_second = two.asking(model="second")
     await until(lambda: gate.waiting == 1)
+    second_turn = await two.running_turn()
+    await another_guest(browser)
+    three = Chat(browser)
     asked_third = three.asking(model="third")
     await until(lambda: gate.waiting == 2)
-    second_turn = await two.running_turn()
     clock.advance(seconds=20)
 
     # A stop answers once the turn is recorded: never, if the wait can't be ended.
+    back_to(browser, stopping)
     stopped = await asyncio.wait_for(two.stop(second_turn), PATIENCE_S)
     # No pause is needed to see whether the turn behind slipped through. It would have
     # been let through when the stopped one left the line, and asked its model in its
@@ -1424,6 +1497,7 @@ async def test_a_turn_stopped_while_it_waits_ends_at_once_and_leaves_the_others_
     assert await count(db, UsageEntry) == 2  # the first and the third
     assert said(first_reader) == "The first answer."
     assert said(third_reader) == "The third answer."
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
 
 
 async def test_a_turn_that_waits_longer_than_a_minute_keeps_its_place_its_credits_and_its_stream(
@@ -1548,6 +1622,8 @@ async def test_a_shutdown_ends_the_turns_that_wait_too_and_leaves_the_gate_free(
     db: AsyncSession,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The turn that writes is one guest's, and the turn that waits another's. The gate
+    keeps nothing of either afterwards."""
     assert migrated
     gate, never = Gate(1), asyncio.Event()
     first = lineup.add(
@@ -1560,17 +1636,20 @@ async def test_a_shutdown_ends_the_turns_that_wait_too_and_leaves_the_gate_free(
     # A shutdown that can't end the turn that waits would wait for it: in time, or never.
     async with asyncio.timeout(PATIENCE_S), open_app(settings, catalog=catalog) as browser:
         await browser.post("/api/session/guest")
-        one, two = Chat(browser), Chat(browser)
+        one = Chat(browser)
         asked_first = one.asking()
         await held(first)
+        await another_guest(browser)
+        two = Chat(browser)
         asked_second = two.asking(model="second")
         await until(lambda: gate.waiting == 1)
-        cookies = dict(browser.cookies)
+        cookies = dict(browser.cookies)  # the second guest's
         # Leaving the block is the shutdown.
     first_reader, second_reader = await ended(asked_first, asked_second)
 
     for reader in (first_reader, second_reader):
         assert chunk(reader, "finish")["messageMetadata"]["turn"]["status"] == "interrupted"
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
     assert second.requests == []
     assert said(second_reader) == ""
     assert await count(db, UsageEntry) == 0

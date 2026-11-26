@@ -49,7 +49,16 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections import deque
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Hashable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -384,6 +393,15 @@ def read_file(path: Path) -> CatalogFile:
 # --- What the rest of Actio uses ------------------------------------------------------
 
 
+@dataclass(eq=False, slots=True)
+class _Waiting:
+    """An answer that waits at a gate: its number in the order the waiting answers came,
+    and the future the gate resolves when it hands the answer a place."""
+
+    came: int
+    passed: asyncio.Future[None]
+
+
 class Gate:
     """The way in to a server that writes only so many answers at once.
 
@@ -391,37 +409,153 @@ class Gate:
     stream is closed. One that comes while the server is full waits here, inside Actio,
     and its server hears of it only once it has passed: a server that is asked anyway
     keeps the request waiting inside itself, while the client's patience for the first
-    word runs out. Answers pass in the order they came. One that gives up waiting, by
-    being cancelled, leaves the others' order as it was.
+    word runs out.
 
-    `async with gate:` waits, and gives the place back on the way out, however that is.
+    Each answer passes as an account's: the one it is for, as a key that the gate only
+    compares and hashes. A place that is given back while answers wait goes on at once,
+    to the waiting answer of the account that holds the fewest places here; of those
+    that hold as few, the one given a place here the longest ago, an account of which
+    nothing is remembered before any that is; and of those, the one whose answer came
+    first. One account's own answers pass in the order they came. "Given a place" is
+    counted, not timed: the gate numbers the places it gives, and reads no clock (ADR
+    0023, revision "a place that comes free goes to the account that has had the least").
+
+    An account's last place is remembered while it holds a place or has an answer
+    waiting here, and beyond that until nobody waits. Whenever nobody waits, the gate
+    keeps nothing of an account that holds no place: guests are accounts, and there is
+    no end of them.
+
+    An answer that gives up waiting, by being cancelled, leaves, and changes nothing for
+    the others. One that was handed a place and was cancelled before it could go on
+    with it counts as given that place, and gives it back at once, as an answer that
+    ended at once would: the place goes on by the same rule, and is never lost, and the
+    account's next answer waits as that of an account given a place just then.
+
+    `async with gate.passing(account):` waits, and gives the place back on the way out,
+    however that is, in a step that awaits nothing.
     """
 
     def __init__(self, at_once: int) -> None:
         self.at_once = at_once
         """How many answers pass at the same time."""
-        self._way = asyncio.Semaphore(at_once)  # first come, first served
+        self._taken = 0
+        """How many places are held, one handed on and not yet gone on with included."""
+        self._held: dict[Hashable, int] = {}
+        """How many places each account holds. An account that holds none isn't in it."""
+        self._lines: dict[Hashable, deque[_Waiting]] = {}
+        """Each account's waiting answers, in the order they came. No line is empty."""
         self._waiting = 0
+        """How many answers are in the lines."""
+        self._last: dict[Hashable, int] = {}
+        """The number of each remembered account's last place."""
+        self._given = 0
+        """How many places the gate has given: the number of the last one, from 1."""
+        self._came = 0
+        """How many answers have come to wait: the number of the next one."""
 
     @property
     def full(self) -> bool:
         """Whether an answer that comes now has to wait."""
-        return self._way.locked()
+        return self._taken >= self.at_once
 
     @property
     def waiting(self) -> int:
         """How many answers wait to pass."""
         return self._waiting
 
-    async def __aenter__(self) -> None:
+    @property
+    def accounts(self) -> int:
+        """How many accounts the gate keeps anything of: those that hold a place or have
+        an answer waiting, and those it remembers while somebody waits. Once nobody
+        waits, as many as hold a place. For tests."""
+        return len(self._held.keys() | self._lines.keys() | self._last.keys())
+
+    @asynccontextmanager
+    async def passing(self, account: Hashable) -> AsyncIterator[None]:
+        """Pass as `account`'s answer, waiting as long as it takes, and hold the place
+        until the end of the block. At once, without waiting for anything, while a place
+        is free."""
+        await self._pass(account)
+        try:
+            yield
+        finally:
+            self._give_back(account)
+
+    async def _pass(self, account: Hashable) -> None:
+        if self._taken < self.at_once:
+            self._give(account)
+            return
+        waiting = _Waiting(self._came, asyncio.get_running_loop().create_future())
+        self._came += 1
+        self._lines.setdefault(account, deque()).append(waiting)
         self._waiting += 1
         try:
-            await self._way.acquire()
-        finally:
-            self._waiting -= 1
+            await waiting.passed
+        except BaseException:
+            if waiting.passed.cancelled() or not waiting.passed.done():
+                # It gave up waiting.
+                self._out_of_line(account, waiting)
+                self._forget_the_absent()
+            else:
+                # It was handed a place in the very step in which it was cancelled.
+                self._give_back(account)
+            raise
 
-    async def __aexit__(self, *_: object) -> None:
-        self._way.release()
+    def _give(self, account: Hashable) -> None:
+        """A place, to `account`: the next number, and remembered as its last."""
+        self._taken += 1
+        self._given += 1
+        self._last[account] = self._given
+        self._held[account] = self._held.get(account, 0) + 1
+
+    def _give_back(self, account: Hashable) -> None:
+        """`account` gives one of its places back: it goes on at once to the waiting
+        answer the rule chooses, and is free when none waits. Awaits nothing."""
+        left = self._held[account] - 1
+        if left:
+            self._held[account] = left
+        else:
+            del self._held[account]
+        self._taken -= 1
+        chosen = self._next()
+        if chosen is not None:
+            to, waiting = chosen
+            self._out_of_line(to, waiting)
+            self._give(to)
+            waiting.passed.set_result(None)
+        self._forget_the_absent()
+
+    def _next(self) -> tuple[Hashable, _Waiting] | None:
+        """The waiting answer a place goes to, with its account: of the account that
+        holds the fewest places, then the one given a place the longest ago, nothing
+        remembered counting as longest, then the one whose answer came first. `None`
+        when nobody waits. An answer that was cancelled while it waited, and hasn't left
+        its line yet, waits no more."""
+        chosen: tuple[Hashable, _Waiting] | None = None
+        best: tuple[int, int, int] | None = None
+        for account, line in self._lines.items():
+            first = next((each for each in line if not each.passed.done()), None)
+            if first is None:
+                continue
+            # Places are numbered from 1: an account of which nothing is remembered is 0.
+            rank = (self._held.get(account, 0), self._last.get(account, 0), first.came)
+            if best is None or rank < best:
+                chosen, best = (account, first), rank
+        return chosen
+
+    def _out_of_line(self, account: Hashable, waiting: _Waiting) -> None:
+        line = self._lines[account]
+        line.remove(waiting)
+        if not line:
+            del self._lines[account]
+        self._waiting -= 1
+
+    def _forget_the_absent(self) -> None:
+        """Whenever nobody waits: forget each account that holds no place."""
+        if not self._waiting:
+            self._last = {
+                account: last for account, last in self._last.items() if account in self._held
+            }
 
 
 @dataclass(frozen=True, slots=True)

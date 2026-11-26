@@ -378,6 +378,7 @@ async def start_turn(
             reserved,
             _Outlet(events, turn.id),
             halt,
+            account=principal.user_id,
             budgets=resources.budgets,
             tokens=tokens,
             ask_for_title=catalog.titles is not None,
@@ -708,6 +709,7 @@ async def _write(
     out: _Outlet,
     halt: Halt,
     *,
+    account: uuid.UUID,
     budgets: Budgets,
     tokens: int,
     ask_for_title: bool,
@@ -715,7 +717,8 @@ async def _write(
     """The turn itself: ask the models of `asking`, the one it names and those that
     stand in for it, that are ready, and send what the one that answers writes as
     chunks, from `start-step` to `[DONE]`. `start` was sent when the stream was opened.
-    What each request to a model takes of its budget is counted in `budgets`, from
+    At a model's gate, the turn waits as the answer of `account`, the account that asked
+    it. What each request to a model takes of its budget is counted in `budgets`, from
     `tokens`, the guess at the prompt. `ask_for_title`: a model is named for titles, and
     the conversation's first turn that completes asks it for one (`turns.finish`).
 
@@ -727,6 +730,7 @@ async def _write(
         ended = await answering.answer(
             asking,
             model=turn.model,
+            account=account,
             conversation_id=turn.conversation_id,
             turn_id=turn.id,
             answer_id=answer_id,

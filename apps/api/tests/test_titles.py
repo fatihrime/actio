@@ -15,7 +15,8 @@ a page reads it, in the list, with the clock moved by the test.
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Hashable
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1122,13 +1123,14 @@ async def test_a_title_that_waits_too_long_for_its_models_server_is_given_up_on_
     begun = await started(db)
     await ended(db, begun)
 
-    async with asyncio.timeout(PATIENCE_S * 2), one_at_a_time:
+    # Another account's answer holds the place.
+    async with asyncio.timeout(PATIENCE_S * 2), one_at_a_time.passing(new_id()):
         await run_the_job(settings, catalog, clock, work_through)
         waiting_afterwards = one_at_a_time.waiting
 
     assert naming.requests == []
     assert waiting_afterwards == 0
-    assert not one_at_a_time.full
+    assert (one_at_a_time.full, one_at_a_time.accounts) == (False, 0)
     assert await named(db, begun.conversation.id) == (QUESTION, "question", ANSWERED, ANSWERED)
     assert await queue_books.due() == put_back(1, 30)
     assert said(caplog) == [
@@ -1424,9 +1426,13 @@ class NotingGate(Gate):
         self.watched: Any = None
         self.closed_by_then: list[bool] = []
 
-    async def __aexit__(self, *exc: object) -> None:
-        self.closed_by_then.append(self.watched.closed.is_set())
-        await super().__aexit__(*exc)
+    @asynccontextmanager
+    async def passing(self, account: Hashable) -> AsyncIterator[None]:
+        async with super().passing(account):
+            try:
+                yield
+            finally:
+                self.closed_by_then.append(self.watched.closed.is_set())
 
 
 async def test_a_title_gives_its_place_at_the_gate_back_once_the_models_stream_is_closed(
@@ -1450,6 +1456,48 @@ async def test_a_title_gives_its_place_at_the_gate_back_once_the_models_stream_i
     assert not gate.full
     title, by, *_ = await named(db, begun.conversation.id)
     assert (title, by) == ("Fixing a flat tyre", "model")
+
+
+async def test_a_title_waits_at_the_gate_as_the_answer_of_its_conversations_account(
+    db: AsyncSession, settings: Settings, clock: Any, lineup: Any
+) -> None:
+    """A place that comes free goes to the account that has had the least. With the
+    server's one place held by somebody else's answer, a turn of A's waits, then the
+    title of A's conversation, then a turn of B's: A's turn passes, then B's, and the
+    title last. Waiting as anyone else's, as an account never given a place, the title
+    would pass before B's turn, having come before it. The two turns are put at the gate
+    by hand, each as its account's answer, as a turn waits there."""
+    passed: list[str] = []
+    one_at_a_time = Gate(1)
+    lineup.add(
+        "standard",
+        lambda: passed.append("A's title"),
+        TextDelta("Fixing a flat tyre"),
+        DONE,
+        gate=one_at_a_time,
+    )
+    catalog = lineup.catalog(titles="standard")
+    begun = await started(db)
+    await ended(db, begun)
+
+    async def turn(name: str, account: uuid.UUID) -> None:
+        async with one_at_a_time.passing(account):
+            passed.append(name)
+
+    async with open_resources(settings) as resources, asyncio.timeout(PATIENCE_S):
+        async with one_at_a_time.passing(new_id()):
+            turn_of_a = asyncio.create_task(turn("A's turn", begun.conversation.user_id))
+            await until(lambda: one_at_a_time.waiting == 1)
+            title = asyncio.create_task(writes(resources, catalog, begun, clock))
+            await until(lambda: one_at_a_time.waiting == 2)
+            turn_of_b = asyncio.create_task(turn("B's turn", new_id()))
+            await until(lambda: one_at_a_time.waiting == 3)
+        await asyncio.gather(turn_of_a, title, turn_of_b)
+
+    assert passed == ["A's turn", "B's turn", "A's title"]
+    assert (one_at_a_time.full, one_at_a_time.accounts) == (False, 0)
+    title_written, by, *_ = await named(db, begun.conversation.id)
+    assert (title_written, by) == ("Fixing a flat tyre", "model")
 
 
 async def test_inside_the_api_a_title_waits_behind_an_answer_at_its_server_and_comes_after_it(

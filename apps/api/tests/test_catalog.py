@@ -15,8 +15,10 @@ import tomllib
 import traceback
 import uuid
 import weakref
+from collections import Counter
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing, suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ from typing import Any
 import anyio
 import httpx2
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from valkey.asyncio import Valkey
 from valkey.exceptions import ValkeyError
@@ -2896,19 +2898,35 @@ async def test_a_server_still_writing_after_its_own_time_for_an_answer_is_cut(
 
 
 # --- The gate by itself ---------------------------------------------------------------
+#
+# An answer is named by its account and its number there: `A2` is account A's second.
 
 
 class Answering:
-    """An answer that passes a gate, and holds its place there until it is let go."""
+    """An answer that passes a gate as its account's, and holds its place there until it
+    is let go. Its account is its name without the number, unless one is given. `then`,
+    when set, is called in the very step in which it leaves the gate, before any other
+    task runs."""
 
-    def __init__(self, gate: Gate, passed: list[str], name: str) -> None:
+    def __init__(self, gate: Gate, passed: list[str], name: str, account: str = "") -> None:
+        self.name = name
         self.done = asyncio.Event()
-        self.task = asyncio.create_task(self._pass(gate, passed, name))
+        self.then: Callable[[], object] | None = None
+        self.task = asyncio.create_task(
+            self._pass(gate, passed, account or name.rstrip("0123456789"))
+        )
 
-    async def _pass(self, gate: Gate, passed: list[str], name: str) -> None:
-        async with gate:
-            passed.append(name)
+    async def _pass(self, gate: Gate, passed: list[str], account: str) -> None:
+        async with gate.passing(account):
+            passed.append(self.name)
             await self.done.wait()
+        if self.then is not None:
+            self.then()
+
+
+def came(gate: Gate, passed: list[str], *names: str) -> list[Answering]:
+    """Answers that come to `gate` in this order, before the loop runs again."""
+    return [Answering(gate, passed, name) for name in names]
 
 
 async def settled() -> None:
@@ -2917,63 +2935,482 @@ async def settled() -> None:
         await asyncio.sleep(0)
 
 
-async def test_answers_pass_in_the_order_they_came_as_many_at_a_time_as_the_server_takes() -> None:
+async def ends(*answers: Answering) -> None:
+    """Let each answer go, in this order, each once the one before has left the gate and
+    its place has gone on. One that hasn't passed yet leaves as soon as it passes."""
+    for answer in answers:
+        answer.done.set()
+        await settled()
+
+
+async def test_one_accounts_answers_pass_in_the_order_they_came_as_many_as_it_takes() -> None:
     gate, passed = Gate(2), list[str]()
-    first, second, third, fourth = (Answering(gate, passed, name) for name in "abcd")
+    first, second, third, fourth = came(gate, passed, "A1", "A2", "A3", "A4")
     await settled()
     at_first, waiting = list(passed), gate.waiting
 
-    second.done.set()
-    await settled()
+    await ends(second)
     then = list(passed)
-    first.done.set()
-    third.done.set()
-    fourth.done.set()
-    await asyncio.wait_for(asyncio.gather(first.task, second.task, third.task, fourth.task), 1)
+    await asyncio.wait_for(ends(first, third, fourth), 1)
 
-    assert (at_first, waiting) == (["a", "b"], 2)
-    assert then == ["a", "b", "c"]
-    assert passed == ["a", "b", "c", "d"]
-    assert (gate.full, gate.waiting) == (False, 0)
+    assert (at_first, waiting) == (["A1", "A2"], 2)
+    assert then == ["A1", "A2", "A3"]
+    assert passed == ["A1", "A2", "A3", "A4"]
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
 
 
-async def test_an_answer_that_gives_up_waiting_leaves_the_order_of_the_others_as_it_was() -> None:
+async def test_one_accounts_answers_at_once_dont_hold_up_another_accounts_first() -> None:
+    """One answer at a time. A asks three at once, and B one a moment later: B's is
+    answered second, not fourth."""
     gate, passed = Gate(1), list[str]()
-    first, second, third = (Answering(gate, passed, name) for name in "abc")
+    a1, a2, a3 = came(gate, passed, "A1", "A2", "A3")
+    await settled()
+    [b1] = came(gate, passed, "B1")
     await settled()
 
-    second.task.cancel()  # stopped while it waits
-    await settled()
-    still_waiting = gate.waiting
-    first.done.set()
-    third.done.set()
-    await asyncio.wait_for(asyncio.gather(first.task, third.task), 1)
+    await asyncio.wait_for(ends(a1, b1, a2, a3), 1)
 
-    assert still_waiting == 1
-    assert passed == ["a", "c"]
-    assert second.task.cancelled()
-    assert not gate.full
+    assert passed == ["A1", "B1", "A2", "A3"]
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+
+async def test_accounts_with_answers_waiting_take_turns_each_in_the_order_it_asked() -> None:
+    """H holds the one place while A asks three, and B three after them."""
+    gate, passed = Gate(1), list[str]()
+    [h1] = came(gate, passed, "H1")
+    await settled()
+    a1, a2, a3, b1, b2, b3 = came(gate, passed, "A1", "A2", "A3", "B1", "B2", "B3")
+    await settled()
+    waiting = gate.waiting
+
+    await asyncio.wait_for(ends(h1, a1, b1, a2, b2, a3, b3), 1)
+
+    assert waiting == 6
+    assert passed == ["H1", "A1", "B1", "A2", "B2", "A3", "B3"]
+
+
+async def test_the_account_holding_fewer_places_goes_before_one_given_a_place_longer_ago() -> None:
+    """Four at once. A's three pass, then B's first, and the server is full. A's fourth
+    and B's second wait. When B's first ends, A holds three places and B none, so B's
+    second passes, though A was given its last place before B was given its."""
+    gate, passed = Gate(4), list[str]()
+    a1, a2, a3, b1 = came(gate, passed, "A1", "A2", "A3", "B1")
+    await settled()
+    a4, b2 = came(gate, passed, "A4", "B2")
+    await settled()
+    full, waiting = gate.full, gate.waiting
+
+    await ends(b1)
+    then = list(passed)
+    await asyncio.wait_for(ends(a1, a2, a3, b2, a4), 1)
+
+    assert (full, waiting) == (True, 2)
+    assert then == ["A1", "A2", "A3", "B1", "B2"]
+    assert passed == ["A1", "A2", "A3", "B1", "B2", "A4"]
+
+
+async def test_an_account_that_left_is_remembered_while_somebody_waits() -> None:
+    """One answer at a time. A asks two at once, B and C one each. B's ends, and while
+    C's is written, B asks again. A's second, which has waited all along, passes before
+    B's: B was given a place after A was. Forgotten when it left, B would pass first, as
+    an account never given a place."""
+    gate, passed = Gate(1), list[str]()
+    a1, a2, b1, c1 = came(gate, passed, "A1", "A2", "B1", "C1")
+    await settled()
+    await ends(a1, b1)
+    [b2] = came(gate, passed, "B2")  # while C's first is written
+    await settled()
+
+    await asyncio.wait_for(ends(c1, a2, b2), 1)
+
+    assert passed == ["A1", "B1", "C1", "A2", "B2"]
+
+
+async def test_an_account_is_forgotten_once_nobody_waits() -> None:
+    """A's first passes and ends while nobody waits. Then H holds the one place, and A's
+    second comes, then C's first. A's passes first, having come first: were A still
+    remembered, C's would, C never having been given a place."""
+    gate, passed = Gate(1), list[str]()
+    [a1] = came(gate, passed, "A1")
+    await settled()
+    await ends(a1)
+    left_behind = gate.accounts
+    [h1] = came(gate, passed, "H1")
+    await settled()
+    a2, c1 = came(gate, passed, "A2", "C1")
+    await settled()
+
+    await asyncio.wait_for(ends(h1, a2, c1), 1)
+
+    assert left_behind == 0
+    assert passed == ["A1", "H1", "A2", "C1"]
+
+
+async def test_an_account_that_holds_a_place_is_remembered_though_nobody_waits() -> None:
+    """One answer at a time. H's holds the place, and A's first waits. H's ends, A's
+    first passes, and nobody waits: A, which holds the place, is remembered as given it.
+    A's second comes then, and B's first after it. When A's first ends, B's passes, B
+    never having been given a place, though A's second came before it."""
+    gate, passed = Gate(1), list[str]()
+    h1, a1 = came(gate, passed, "H1", "A1")
+    await settled()
+    await ends(h1)
+    a2, b1 = came(gate, passed, "A2", "B1")
+    await settled()
+
+    await asyncio.wait_for(ends(a1, b1, a2), 1)
+
+    assert passed == ["H1", "A1", "B1", "A2"]
+
+
+async def test_the_gate_keeps_nothing_of_accounts_that_have_gone() -> None:
+    """Guests are accounts, and there is no end of them. Forty come, each once: two pass,
+    the others wait, and a third of those give up waiting. Once all have gone, the gate
+    keeps what a new one keeps."""
+    gate, passed = Gate(2), list[str]()
+    answers = [
+        Answering(gate, passed, str(number), account=f"guest {number}") for number in range(40)
+    ]
+    await settled()
+    while_they_wait = gate.accounts
+    giving_up = answers[2::3]  # none of the first two, which hold the places
+    for answer in giving_up:
+        answer.task.cancel()
+    await settled()
+    after_some_gave_up = gate.accounts
+
+    await asyncio.wait_for(ends(*(answer for answer in answers if answer not in giving_up)), 1)
+
+    assert (while_they_wait, after_some_gave_up) == (40, 40 - len(giving_up))
+    assert len(passed) == 40 - len(giving_up)
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, Gate(2).accounts)
+
+
+async def test_an_answer_that_gives_up_waiting_leaves_the_others_as_the_rule_has_them() -> None:
+    """One answer at a time. A's first holds the place, and B's and C's wait. B's passes
+    when A's ends, and A, which left, is remembered while C's waits. D's comes and gives
+    up waiting, stopped: nothing changes for the others, and A is still remembered. A's
+    second and E's first come: C's passes, then E's, never given a place, then A's."""
+    gate, passed = Gate(1), list[str]()
+    a1, b1, c1 = came(gate, passed, "A1", "B1", "C1")
+    await settled()
+    await ends(a1)
+    [d1] = came(gate, passed, "D1")
+    await settled()
+
+    d1.task.cancel()  # stopped while it waits
+    await settled()
+    afterwards = (list(passed), gate.full, gate.waiting)
+    a2, e1 = came(gate, passed, "A2", "E1")
+    await settled()
+    await asyncio.wait_for(ends(b1, c1, e1, a2), 1)
+
+    assert afterwards == (["A1", "B1"], True, 1)
+    assert d1.task.cancelled()
+    assert passed == ["A1", "B1", "C1", "E1", "A2"]
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+
+async def test_a_place_handed_to_an_answer_cancelled_in_that_step_goes_on_by_the_rule() -> None:
+    """One answer at a time, held by this test as A's. B's first, A's second, C's first
+    and B's second wait. The test leaves, the place is handed to B's first, and that one
+    is cancelled before it could go on with it: in the very step, before the loop runs
+    again. The place goes on to C's, by the rule, and not to A's second, which came
+    before it: A was given a place, C never. B counts as given that place: so B's second
+    passes after A's second, A having been given its last place before B was. Not
+    counted, B's second would pass before A's."""
+    gate, passed = Gate(1), list[str]()
+    async with asyncio.timeout(1), gate.passing("A"):
+        b1, a2, c1, b2 = came(gate, passed, "B1", "A2", "C1", "B2")
+        await settled()
+    handed_on = (gate.full, gate.waiting)
+    b1.task.cancel()  # before B's first could go on with the place it was handed
+    await settled()
+    then = (list(passed), gate.full, gate.waiting, gate.accounts)
+
+    await asyncio.wait_for(ends(c1, a2, b2), 1)
+
+    assert handed_on == (True, 3)
+    assert b1.task.cancelled()
+    assert then == (["C1"], True, 2, 3)  # C holds the place, and A and B wait
+    assert passed == ["C1", "A2", "B2"]
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+
+async def test_an_answer_cancelled_in_the_step_a_place_comes_free_isnt_handed_it() -> None:
+    """One answer at a time, held by this test as H's. A's first and B's first wait. A's
+    is cancelled, and in the very step, before it could leave its line, the place is
+    given back: it goes to B's, and isn't lost with A's. And when the one cancelled so
+    is the only one waiting, C's, nobody is left to hand the place to: it is free, and
+    an answer that comes in that same step, D's, passes without waiting."""
+    gate, passed = Gate(1), list[str]()
+    async with asyncio.timeout(1), gate.passing("H"):
+        a1, b1 = came(gate, passed, "A1", "B1")
+        await settled()
+        a1.task.cancel()  # stopped while it waits: its task hasn't run again yet
+    await settled()
+    then = (list(passed), gate.full, gate.waiting)
+    await asyncio.wait_for(ends(b1), 1)
+
+    async with asyncio.timeout(1), gate.passing("H"):
+        [c1] = came(gate, passed, "C1")
+        await settled()
+        c1.task.cancel()
+    # Before the loop runs again: C's is in its line still.
+    async with asyncio.timeout(1), gate.passing("D"):
+        held_by_d = gate.full
+    await settled()
+
+    assert then == (["B1"], True, 0)
+    assert held_by_d
+    assert a1.task.cancelled()
+    assert c1.task.cancelled()
+    assert passed == ["B1"]
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+
+async def test_once_the_last_answer_waiting_gives_up_the_absent_are_forgotten() -> None:
+    """One answer at a time. A's first holds the place, B's and C's wait. A's ends, B's
+    passes, and A, which left, is remembered while C's waits. C's gives up: nobody waits
+    now, and the gate keeps nothing of A, nor of C. So A's second, which comes then,
+    passes before D's first, which comes after it: were A still remembered, D's would
+    pass first, D never having been given a place."""
+    gate, passed = Gate(1), list[str]()
+    a1, b1, c1 = came(gate, passed, "A1", "B1", "C1")
+    await settled()
+    await ends(a1)
+    while_one_waits = gate.accounts
+
+    c1.task.cancel()  # stopped while it waits, the last one waiting
+    await settled()
+    once_it_gave_up = gate.accounts
+    a2, d1 = came(gate, passed, "A2", "D1")
+    await settled()
+    await asyncio.wait_for(ends(b1, a2, d1), 1)
+
+    assert (while_one_waits, once_it_gave_up) == (3, 1)  # A, B and C; then B alone
+    assert passed == ["A1", "B1", "A2", "D1"]
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+
+async def test_of_accounts_alike_the_one_whose_waiting_answer_came_first_passes_first() -> None:
+    """One answer at a time, held by H's. A's first comes to wait, then B's first, then
+    A's second, and A's first gives up. Neither A nor B holds a place or was ever given
+    one: B's first passes before A's second, having come before it, though A has had an
+    answer waiting here for longer than B."""
+    gate, passed = Gate(1), list[str]()
+    [h1] = came(gate, passed, "H1")
+    await settled()
+    a1, b1, a2 = came(gate, passed, "A1", "B1", "A2")
+    await settled()
+    a1.task.cancel()  # stopped while it waits
+    await settled()
+
+    await asyncio.wait_for(ends(h1, b1, a2), 1)
+
+    assert a1.task.cancelled()
+    assert passed == ["H1", "B1", "A2"]
+
+
+async def test_a_place_given_back_no_longer_counts_as_its_accounts_when_the_next_is_chosen() -> (
+    None
+):
+    """Three at once. A's two pass, then B's first, and the server is full. B's second
+    comes to wait, then A's third. When A's first ends, A holds one place and B one: so
+    A's third passes, A having been given its last place before B was, though B's second
+    came first. Were the place just given back still counted as A's, B's would pass."""
+    gate, passed = Gate(3), list[str]()
+    a1, a2, b1 = came(gate, passed, "A1", "A2", "B1")
+    await settled()
+    b2, a3 = came(gate, passed, "B2", "A3")
+    await settled()
+
+    await ends(a1)
+    then = list(passed)
+    await asyncio.wait_for(ends(a2, b1, a3, b2), 1)
+
+    assert then == ["A1", "A2", "B1", "A3"]
+    assert passed == ["A1", "A2", "B1", "A3", "B2"]
 
 
 async def test_a_place_at_the_gate_is_given_back_however_the_answer_ended() -> None:
     gate = Gate(1)
 
     with pytest.raises(RuntimeError):
-        async with gate:
+        async with asyncio.timeout(1), gate.passing("A"):
             raise RuntimeError("the model failed")
     after_a_failure = gate.full
 
     async def holds_its_place() -> None:
-        async with gate:
+        async with gate.passing("A"):
             await asyncio.Event().wait()
 
     holding = asyncio.create_task(holds_its_place())
     await settled()
     while_held = gate.full
     holding.cancel()  # from outside, as a process going down does
-    await asyncio.gather(holding, return_exceptions=True)
+    await asyncio.wait_for(asyncio.gather(holding, return_exceptions=True), 1)
 
     assert (after_a_failure, while_held, gate.full) == (False, True, False)
+
+
+@dataclass
+class PlainGate:
+    """A gate written the plain way, from its rules, with no asyncio: which answers hold
+    a place, which wait, and the number of each remembered account's last place."""
+
+    at_once: int
+    holding: dict[str, str] = field(default_factory=dict)
+    """Each answer that holds a place, with its account."""
+    waiting: list[tuple[str, str]] = field(default_factory=list)
+    """Each answer that waits, with its account, in the order they came."""
+    last: dict[str, int] = field(default_factory=dict)
+    given: int = 0
+    passed: list[str] = field(default_factory=list)
+    """The answers that went on with the place they were given, in the order they did."""
+
+    def comes(self, answer: str, account: str) -> None:
+        if len(self.holding) < self.at_once:
+            self._gives(answer, account)
+            self.passed.append(answer)
+        else:
+            self.waiting.append((answer, account))
+
+    def gives_up(self, answer: str) -> None:
+        self.waiting = [each for each in self.waiting if each[0] != answer]
+        self._forgets()
+
+    def ends(self, answer: str) -> None:
+        del self.holding[answer]
+        handed = self._hands_on()
+        if handed is not None:
+            self.passed.append(handed)
+
+    def ends_and_cancels(self, answer: str) -> str | None:
+        """`answer` ends, and the answer its place is handed to is cancelled before it
+        goes on with it: that one counts as given the place, and gives it back at once.
+        Which answer that is, if one waited."""
+        del self.holding[answer]
+        handed = self._hands_on()
+        if handed is not None:
+            del self.holding[handed]
+            then = self._hands_on()
+            if then is not None:
+                self.passed.append(then)
+        return handed
+
+    @property
+    def kept(self) -> int:
+        """How many accounts it keeps anything of."""
+        waiting = {account for _, account in self.waiting}
+        return len(set(self.holding.values()) | waiting | set(self.last))
+
+    def _hands_on(self) -> str | None:
+        """The answer a place that was given back goes to, if one waits."""
+        handed = None
+        if self.waiting:
+            held = Counter(self.holding.values())
+            handed, account = min(
+                self.waiting,
+                key=lambda each: (
+                    held[each[1]],
+                    self.last.get(each[1], 0),
+                    self.waiting.index(each),
+                ),
+            )
+            self.waiting.remove((handed, account))
+            self._gives(handed, account)
+        self._forgets()
+        return handed
+
+    def _gives(self, answer: str, account: str) -> None:
+        self.given += 1
+        self.last[account] = self.given
+        self.holding[answer] = account
+
+    def _forgets(self) -> None:
+        if not self.waiting:
+            holders = set(self.holding.values())
+            self.last = {account: last for account, last in self.last.items() if account in holders}
+
+
+GATE_STEPS = st.lists(
+    st.one_of(
+        st.tuples(st.just("comes"), st.sampled_from("ABCD")),
+        st.tuples(st.just("comes"), st.sampled_from("ABCD")),
+        st.tuples(st.just("ends"), st.integers(0, 3)),
+        st.tuples(st.just("ends, and the next is cancelled"), st.integers(0, 3)),
+        st.tuples(st.just("gives up"), st.integers(0, 9)),
+    ),
+    max_size=50,
+)
+"""Answers of four accounts that come, more often than anything else, end, end with the
+answer handed their place cancelled in that step, and give up waiting: each by its
+place among those that hold a place, or that wait, counted round."""
+
+
+@settings(deadline=None)  # each example runs an event loop of its own
+@given(at_once=st.integers(1, 4), steps=GATE_STEPS)
+def test_the_gate_passes_answers_as_the_plain_one_does_whatever_comes_ends_and_gives_up(
+    at_once: int, steps: list[tuple[str, Any]]
+) -> None:
+    """At every step the same answers have passed, in the same order, as through the
+    plain gate, and the same hold a place and wait; never more than `at_once` hold one,
+    none is free while one waits, and each passes once at the most; it keeps what the
+    plain gate keeps of accounts, and once nobody waits, nothing of those that hold no
+    place. Once every answer has ended, it keeps nothing."""
+
+    async def play() -> None:
+        gate, plain = Gate(at_once), PlainGate(at_once)
+        passed: list[str] = []
+        answers: dict[str, Answering] = {}
+
+        def check() -> None:
+            inside = [name for name in passed if not answers[name].task.done()]
+            assert passed == plain.passed
+            assert len(passed) == len(set(passed))
+            assert sorted(inside) == sorted(plain.holding)
+            assert len(inside) <= at_once
+            assert gate.waiting == len(plain.waiting)
+            if gate.waiting:
+                assert len(inside) == at_once
+            assert gate.full == (len(inside) == at_once)
+            assert gate.accounts == plain.kept
+            if not gate.waiting:
+                assert gate.accounts == len(set(plain.holding.values()))
+
+        for number, (kind, which) in enumerate(steps):
+            holding, waiting = list(plain.holding), [name for name, _ in plain.waiting]
+            match kind:
+                case "comes":
+                    name = f"{which}{number}"
+                    answers[name] = Answering(gate, passed, name)
+                    plain.comes(name, which)
+                case "ends" if holding:
+                    name = holding[which % len(holding)]
+                    answers[name].done.set()
+                    plain.ends(name)
+                case "ends, and the next is cancelled" if holding:
+                    name = holding[which % len(holding)]
+                    handed = plain.ends_and_cancels(name)
+                    if handed is not None:
+                        answers[name].then = answers[handed].task.cancel
+                    answers[name].done.set()
+                case "gives up" if waiting:
+                    name = waiting[which % len(waiting)]
+                    answers[name].task.cancel()
+                    plain.gives_up(name)
+            await settled()
+            check()
+        while plain.holding:
+            name = next(iter(plain.holding))
+            answers[name].done.set()
+            plain.ends(name)
+            await settled()
+            check()
+        assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+    asyncio.run(asyncio.wait_for(play(), 10))
 
 
 # --- Reaching the providers -----------------------------------------------------------

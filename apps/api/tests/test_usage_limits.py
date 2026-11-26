@@ -722,6 +722,7 @@ async def test_a_turn_whose_outcome_cannot_be_written_is_not_counted(
                 )
             ],
             model="standard",
+            account=guest.user_id,
             conversation_id=new_id(),
             turn_id=reserved.id,
             answer_id=new_id(),
