@@ -257,3 +257,7 @@ On the tree as it was committed, all 33 were planted once more, 28 in the page a
 Five of them were then planted where only the whole stack shows them, each on an end-to-end stack built from the copy, with the new test run against it: the refusal not told apart, the time left standing still, "Dismiss" leaving the keyboard where it was, sending blocked during the wait, and "rationed" with no budget. The test passed on the unchanged copy, and failed on each of the five.
 
 **Not measured:** a refusal on a cloud provider's figures; a wait of hours or a day, which the component tests hold by the test's clock; what a screen reader says of the notice; and the page in a tab in the background, where a browser may slow its timers.
+
+### 2026-11-26: the wait counted down may be a provider's own
+
+A refusal for now is also a provider's own wait now: a model whose provider refused a request with 429 and named a wait longer than 2 s has no budget left until that wait is over, and when no model with room for a question has budget, the question is refused with the same 429, its `retry_after` what is left of that wait ([ADR 0030](0030-the-providers-budgets-are-counted.md), revision "a provider's own wait is kept, and until it is over its model has no budget"). The page counts it down as it counts any refusal for now. Its source didn't change.

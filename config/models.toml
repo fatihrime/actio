@@ -127,13 +127,17 @@ kind = "ollama"
 #                    and keeps to nine tenths of each figure. A ready model that has
 #                    nothing left of one for a request is asked after the models of the
 #                    same chain that have some; when none of those with room for it has
-#                    any, the question is refused for now, with how long to wait. Each
-#                    is the provider's own figure, a whole number of 1 or more, and may
-#                    be there without the others. Two models of this file that are the
-#                    same model on the same provider share one budget, and state the same
-#                    figures. Left out, the server has no such limit. `make preflight`
-#                    holds the four against what the provider's API states, where it
-#                    states them, and fails where this file states more.
+#                    any, the question is refused for now, with how long to wait. A
+#                    model whose provider refused a request and said to wait longer
+#                    than 2 seconds has none either, stated or not, until that wait is
+#                    over, a day at the most. Each is the provider's own figure, a
+#                    whole number of 1 or more, and may be there without the others.
+#                    Two models of this file that are the same model on the same
+#                    provider share one budget, and state the same figures, and a wait
+#                    their provider names. Left out, the server has no such limit.
+#                    `make preflight` holds the four against what the provider's API
+#                    states, where it states them, and fails where this file states
+#                    more.
 #                    See docs/adr/0030-the-providers-budgets-are-counted.md:
 #
 #   requests_a_minute = 30

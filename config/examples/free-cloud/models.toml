@@ -71,11 +71,13 @@ max_output_tokens = 2048
 # sends to each model, and keeps to nine tenths of each figure: a model that has nothing
 # left of one for a request is asked after those of its chain that have some, and when
 # none of those with room has any, the question is refused for now, with how long to
-# wait. `make preflight` holds requests_a_day and tokens_a_minute to the headers'
-# figures for your account, and context_window and max_output_tokens to Groq's list of
-# models, and fails where this file states more. requests_a_minute and tokens_a_day,
-# which no answer states, it can't check: read them at
-# https://console.groq.com/settings/limits. Raise them on a paid plan.
+# wait. A model whose provider refused a request and said to wait longer than 2 seconds
+# counts as having nothing left too, until that wait is over. `make preflight` holds
+# requests_a_day and tokens_a_minute to the headers' figures for your account, and
+# context_window and max_output_tokens to Groq's list of models, and fails where this
+# file states more. requests_a_minute and tokens_a_day, which no answer states, it can't
+# check: read them at https://console.groq.com/settings/limits. Raise them on a paid
+# plan.
 #
 # These models always reason, and "low" is the least they can be told: a turn that asks
 # for no reasoning gets that, and one that asks for reasoning gets "medium". Told "high",

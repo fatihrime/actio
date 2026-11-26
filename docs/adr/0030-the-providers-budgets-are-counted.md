@@ -415,3 +415,170 @@ The decision left the refusal of a turn "for now", when no model of its chain ha
 ### 2026-11-26: a model that keeps failing is asked after the others of its group
 
 [ADR 0031](0031-a-model-that-keeps-failing-is-asked-last.md) adds a circuit breaker to the rule's order: within each of its two groups, the models with budget and those without, a ready model whose breaker says that it keeps failing is asked after those that don't, each in the chain's order. So the order is with budget and not failing, with budget and failing, without and not failing, without and failing. The refusal for now is the budget's alone: a failing model with budget still keeps it away, and a failing model without counts for its wait as before. `Chain.asked_with` takes what the breakers said as its third argument, and `asked_through` gives the client a model is asked through, the counted one inside it. "A provider's own 429 still closes nothing" is still so: the breaker counts it as one failed try, and a wait the provider names is a later step.
+
+### 2026-11-26: a provider's own wait is kept, and until it is over its model has no budget
+
+The decision's "Known, and left" said that "what a provider answers is not heeded yet: a 429 that names a wait doesn't close the model's budget until then". The revision "a turn is refused for now …" weighed it, chose the circuit breaker for it, and left "a provider's own 429 still closes nothing: that is for the circuit breaker". [ADR 0031](0031-a-model-that-keeps-failing-is-asked-last.md) then built the breaker without it, and its "Known, and left" named it the next step: "a provider's own 429 that names a wait still closes nothing by that wait: it counts as one failed call". This is that step, and it takes the wait to the budget, not to the breaker.
+
+Until now only the walk read a 429's wait (`RateLimitedError.retry_after_s`): a wait of 2 s or less has the model asked once more after it, and a longer one moves on to the next model at once ([ADR 0028](0028-a-model-names-those-that-stand-in-for-it.md), revision "a model is asked once more, and a server says how long it may take to begin"). Nothing remembered it, so the next turn asked the same model first again, and was refused again. A chain's only model whose provider said "retry in 23 hours" would have failed every question for those 23 hours, each with "try again in a moment" (worked out).
+
+What the providers were seen to send, in the saved exchanges of earlier steps:
+
+- **Groq,** for a request that passed its minute's tokens: `retry-after: 1` where its body said "try again in 457.5ms" (ADR 0028), and in three more saved refusals `retry-after: 2`, `2` and `1` where the bodies said 1.695 s, 1.77 s and 735 ms: the wait rounded up to whole seconds. The body says whose wait it is, "Limit 8000, Used 3171, Requested 5055": that request's, at its size;
+- **the Gemini API,** for the sixteenth request of a minute to `gemini-3.5-flash-lite`: no `Retry-After`, "Please retry in 49.846993202s" and a `retryDelay` of `49s` (ADR 0028). For a model its free tier doesn't include, a `retryDelay` of `83280s`, 23 hours ([ADR 0027](0027-cloud-models-through-their-openai-compatible-layers.md));
+- **six 429s,** five saved and one more in ADR 0028's table, came after 0.13 to 0.38 s;
+- **a request the Gemini API refused still counted against its minute** (Context, above).
+
+**Whose rule it is:**
+
+1. **The breaker's: open until the provider's moment.**
+    - Con: a breaker never refuses and never drops a model (ADR 0031), so a chain's only model whose day is spent would be asked at every question, and each would be a failed turn that says "try again in a moment", for 23 hours. And it is the provider's word about its count of the account, not a guess at the model's health.
+2. **The budget's: until then the model has no budget.** Chosen: the order, the refusal for now and the page's countdown are there already.
+
+**Where it is kept:**
+
+1. **In Valkey, beside the buckets.**
+    - Con: a third operation of the script, with its plain twin, and a read before every turn of a chain that states no limits, to save each other process one refused request a wait: the six 429s seen came after 0.13 to 0.38 s. And the example's titles go to the local model, so its worker meets none.
+2. **In each process, beside the breaker.** Chosen.
+    - Con: the API and a separate worker each learn it, and at the Gemini API the request that learns it counts against the minute (seen, above); a restart forgets it.
+
+**Which waits:**
+
+1. **Every one.**
+    - Con: the walk waits 2 s or less out itself and asks once more, and Groq's header named 1 or 2 s each time it was seen. Kept, such a wait would refuse a lone model's next question for a second where the walk would have had it answered.
+2. **Longer than the walk's, and a day at the most.** Chosen.
+
+**A model told to wait, while another has budget:**
+
+1. **Not asked at all.**
+    - Con: Groq's wait is one request's, at its size, so a smaller one may be taken; and when the others fail, the turn fails.
+2. **Asked last, as a model without budget is.** Chosen.
+
+**What ends it before its time:**
+
+1. **Nothing.**
+    - Con: a wait that is wrong, a plan changed that day, keeps a model that answers last for up to a day.
+2. **Any answer of the model's.**
+    - Con: an answer to a request that was sent before the refusal says nothing of the refusal's wait. This was the step's first build, and the Gemini API showed it: of two questions under way, one was refused with a wait of 8 s, the other, sent a second before it, was answered 2 s later, and the wait was forgotten (seen, see Measured).
+3. **An answer to a request sent after the wait was noted, and the provider's next wait of more than 2 s.** Chosen.
+
+**Whether that 429 is still a failed call of the breaker's:**
+
+1. **No.**
+    - Con: a provider that names a short wait at every request would never be found out: each turn would pay the walk's wait and a second refusal.
+2. **Yes, as before.** Chosen: the two rules don't know of each other, and each only moves a model later.
+
+**Decision: a wait that a provider names in a 429, longer than the 2 seconds the walk waits out itself, is kept in the process for that model on that provider, until it is over, a day at the most; meanwhile the model has no budget left, by the rule the budgets have: it is asked after the models that have budget, and a turn that no model with room for it has budget for is refused for now, for what is left of the wait. An answer of the model to a request sent after the wait was noted ends it, and the provider's next wait of more than 2 seconds replaces it. `Chain.asked_with` is unchanged: the wait reaches it as one more `Spent`.**
+
+**Which waits are believed** (`believed` in `actio.catalog`, pure):
+
+- **none** for a 429 that names no wait, for `nan` and `inf`, and for a wait of `WAITS_AT_MOST_S`, 2 s, or less, negative ones among them: the walk waits those out itself and asks once more (`actio_llm.router`), so nothing is left of them to keep. `WAITS_AT_MOST_S` is imported from `actio_llm.router`, as `actio.catalog` imports from the breaker's module;
+- **otherwise the wait,** and a day, `BELIEVED_AT_MOST`, when it is a day or more: a provider's longest period is a day, and a wait named longer is taken for a day, after which one request finds out;
+- **comparisons alone decide,** before any `timedelta` is made: `timedelta(seconds=1e308)` raises `OverflowError`, and this runs where a try ends, which must never raise.
+
+**Where it is kept** (`OwnWait`, `OfferedModel.own_wait`): what a model's provider last said of when it takes requests again, pure, with no clock and no log, every moment given. `told(until)` is the provider's newest word, and replaces whatever was kept, later or sooner; `left(now)` is how long until it is over, `None` when nothing is kept and from the moment itself on; `words` is how many waits of the provider's have been noted so far, which a try reads when it begins; `over(now, words=…)`, for a try that ended answered, forgets the wait when none has been noted since that try began, and says whether a wait that was still running was forgotten. A count, so that no two readings of a clock are compared. `catalog.build` gives one to each model on a provider, as it gives breakers: two models of the file that are one model on one provider share it, and the same `model` on two providers has two. An `OfferedModel` made without one gets one of its own. Nothing of Valkey, `actio.core` or `Resources` changes.
+
+**Who notes it** (`_Recorded`, which `asked_through` gives, its signature unchanged): at the end of each try, in the same `finally` as the breaker's record, with nothing awaited, once, by the one moment the clock handed down gives there:
+
+- **a `RateLimitedError` whose wait is believed:** the wait is told, from that moment, and one warning says it, by the model's name in Actio and the wait in whole seconds, rounded up, 1 at the least: `model gemini-lite: its provider said to wait 49 s, and until then it counts as having no budget left`;
+- **a try that ended answered,** by the breaker's own outcome, a stop or a cut after something was handed on included, **while a wait was running:** it is over, and one warning says it: `model gemini-lite: it answered before its provider's wait was over, and counts as having budget again`. An answer with no wait running says nothing. Neither does an answer to a request that was sent before the wait was noted, which leaves the wait as it is: that request was sent before Actio heard the refusal, and says nothing of it;
+- **anything else changes nothing:** a 429 without a wait, or with one of 2 s or less, any other error, a try closed or cancelled before anything was handed on;
+- **the breaker's record is as it was:** that 429 is still a failed call. When one try's end has both lines, the breaker's comes first;
+- the error is handed on as it came, the same object, and the counted client inside is untouched: the refused request and its guess stay counted.
+
+**Who reads it** (`Chain.with_own_waits`, pure): what a look said, with each ready model of the chain whose wait isn't over as a `Spent` of what is left of it, its limit `PROVIDERS_WAIT`, whose words are "its provider's own wait". Of a model the look names too, the longer wait, and of two as long, the provider's own. A model that isn't ready is never added, and nobody is asked anything. `Spent.limit` is a bucket or `PROVIDERS_WAIT`, and both are said in words the same way.
+
+**The two callers,** `actio.api.turns.start_turn` and `actio.chat.titles._ask`, each have one line more, right after the look and what it does when the look can't be had: `spent = chain.with_own_waits(spent, now)`. So a look that couldn't be had still gets the providers' own waits, and a chain with no budget at all gets them without Valkey being asked. Nothing else of them changes: the refusal, its 429, the log's lines and their order. Their lines read:
+
+- `turn …: model gemini-lite has no budget left for the request for about 49 s (its provider's own wait): it is asked after those that have`;
+- `conversation …: no model has budget left for the request, which is refused for about 49 s: gemini-lite for about 49 s (its provider's own wait)`;
+- `conversation …: no title, no model has budget left for the request: gemini-lite for about 49 s (its provider's own wait)`.
+
+**The fake** (`packages/fakellm`): `[[retry-after: 30]]` says how many seconds a scripted 429 names in its `Retry-After`, a whole number, 0 or more, and 1 without it, as before. Anything else is a directive the fake can't read, its 400. With another status, or without `[[fail: …]]`, it changes nothing. A directive's name may now hold a `-`.
+
+**Unchanged:** `Chain.asked_with`'s rule and `Chain.look`, `counted` and its client, `actio_llm.breaker`, the walk and its rules, the adapters, the routes and the API's description, what a turn streams, the recorded fixtures, the tables, the page, the models file's keys, the settings, `actio.core` and `budget.lua`. No migration.
+
+**Tests:**
+
+- **the catalog's** (`test_catalog.py`): `believed` by its numbers, none, `nan`, `inf` and `-inf`, negative waits, 0, 1 and 2 s not kept, the next float above 2 kept, a day and anything longer, `1e308` and the largest float among them, a day; `OwnWait` by example, `left` before, at and after its moment, `told` replacing a later and a sooner one, `over` saying whether one was running and forgetting it, and leaving a wait that was named since the try began, a first one or a second; the recording client, a 429 of 49.2 s kept from the end of its try, by a clock that moved 10 s during it, with its line whole, in whole seconds rounded up, and the same error handed on, waits the walk waits out or none kept and said nowhere, a day or more kept for a day, the counted client keeping the request and the guess, five such 429s opening the breaker with its line first, an answer, a thought's, one closed after a word and one cut at its time ending a wait with their line, and a try closed before a word, a server too busy, a stream without its finish, a request too large and 429s of 1 s and of none leaving it, a stop before and after a word, a later 429 replacing a wait with a later and a sooner one, an answer with no wait running saying nothing, and an answer that was under way when another try was refused leaving that wait and saying nothing, with the next answer ending it; a wait said in whole seconds, rounded up, and 1 at the least for one made by hand; `Chain.with_own_waits` for ready models alone, with and without a budget, for what is left of the wait, the longer of the count's and the provider's, the provider's of two as long, two names of one model sharing a wait through `build` and the same name on two providers not; and through `asked_with`, unchanged, a told model asked after one that has budget, and alone refused for its wait;
+- **a turn's** (`test_turns_own_wait_api.py`): a chain's model that answers 429 with 49 s, its turn answered by the stand-in, the next turns asking the stand-in first for what is left of the wait, by the test's clock, and the model first at the wait's very moment, the log's lines whole and in order, without the error's text or a word of the question; the wait dated when the try ended, by a server that took 10 s of the test's clock to refuse; 2.001 s kept, a wait of 0.01 s waited out and not kept, alone and in a chain, and a second try's 30 s kept; a 429 without a wait changing nothing; a lone model's turn failed as before, and the questions after it refused for what is left of the wait, rounded up, the 429 whole and its line; a day's wait in hours; nothing left behind by a refusal; models without a budget, with Valkey asked nothing; budgets that can't be read; the count's wait and the provider's, the longer said; a model passed over for its room, whose wait is never the refusal's; no model with room, each asked; a model that isn't ready, never named, and alone answered 503; the 422 for reasoning; a last resort that answers and ends the wait; two questions at once, the one that was being written when the other was refused answering after it, the wait left, and the question after them refused for now; a failure of another kind that leaves it; later 429s that replace it with a later and a sooner one; and two names of one model sharing it, and another model not;
+- **a title's** (`test_titles.py`): its model told to wait by a turn of the same catalog asked after its stand-in, with the line by the conversation's id; alone, nothing asked, `NotWrittenError` with the line's text and the job put back; a title's own 429 kept for the turns of the same catalog; and with the budgets unreadable, the named model told to wait asked after its stand-in, the log's two lines in order;
+- **the fake's** (`packages/fakellm/tests/test_chat.py`): the directive with a 429, named before or after `[[fail: 429]]`, and of 0; without it, 1, as before; with another status and without `[[fail: …]]`, nothing; and what it can't read, a negative number, a fraction, a sign, a word and nothing. **And through the adapter** (`packages/llm/tests/test_openai_compatible.py`): the fake's `[[fail: 429]] [[retry-after: 30]]` is a `RateLimitedError` whose `retry_after_s` is 30.
+
+**Known, and left:**
+
+- **the turn that meets the refusal is as before:** a lone model's fails with "try again in a moment", though its provider named a longer wait (read in the code);
+- **the API's and a separate worker's waits are apart, and a restart forgets them,** which is also how a wait that is wrong is ended by hand (read in the code);
+- **a lone model's wrong wait stands until it is over,** since nothing asks the model meanwhile (worked out);
+- **Groq's wait is one request's, at its size:** a smaller question might have been taken sooner, and is asked last or refused all the same. So one person's large question can have everybody's smaller ones asked last, or refused, for that wait: up to about a minute for a minute's tokens, and longer for a day's (the body seen, and a short question refused after a long one's refusal seen twice, see Measured; the rest worked out). Telling a limit of tokens from one of requests, which each provider's refusal says in its own words, would let a smaller question through: a step of its own;
+- **the provider's newest wait of more than 2 s replaces the one before it,** and one of 2 s or less, or a 429 that names none, leaves it: a short wait named for a small request ends a long one, and the next large request learns it again (worked out);
+- **a request sent after the provider named a wait and before Actio noted it,** about as long as a refusal takes to arrive, leaves the wait when it is answered, though its provider took it after the refusal: the wait then runs to its time, or to the answer of a later request. This keeps a wait that could have ended, and never ends one that should stay (worked out);
+- **a 429 that named a wait after something of its answer was handed on would be kept too:** no client raises one there, since a refusal comes with the response's status, before any line of an answer (read in the code);
+- **`Retry-After` given as a date is not read** (read in the code: `_seconds` in `actio_llm.openai_compatible`);
+- **waits of 2 s or less that keep coming cost each turn the walk's pause and a second refusal,** until the breaker opens (worked out);
+- **the order is decided when a turn starts:** a turn waiting at a gate when a wait is noted asks in the order it had (read in the code);
+- **a refusal of a second is still a refusal, and the title job's waits are its own,** as for the budgets (read in the code);
+- **the refused request stays counted in Actio's own budget,** as before (read in the code);
+- **a clock set back holds a wait that much longer** (worked out);
+- **a turn refused with the budgets unreadable doesn't say that they couldn't be read:** that line comes after the commit, which a refusal doesn't reach; before this step nothing was refused when they couldn't be read. And where the line is said, a turn's or a title's, it says that each model is taken to have some left, which is of Actio's counts: the line after it may name a model without budget by its provider's own wait (read in the code);
+- **the 2 s and the day are constants of the code;**
+- **no end-to-end test:** a wait outlives its test in the stack's API, so it would need a model on a provider of its own there, as the budget's test has.
+
+**How to reverse it:** `OwnWait`, `believed`, `BELIEVED_AT_MOST`, `OfferedModel.own_wait` and the waits in `catalog.build`; the two branches in `_Recorded` (`_heard`); `Chain.with_own_waits`, its line in `start_turn` and in `titles._ask`, and `ProvidersWait`, `PROVIDERS_WAIT`, the second kind of `Spent.limit`; the fake's directive, with the `-` its names may hold.
+
+**Measured,** on 2026-11-26, on the real stack, built from the tree as it was committed unless it says "the first build", with models files made for the look. None of them states a limit, so Actio counted nothing, and a provider's own refusal was what was met. One guest, through the API, each question in a conversation of its own.
+
+**The repository's fake model as the model asked,** run on the same machine: a question that holds `[[fail: 429]] [[retry-after: 30]]` has it refuse with that wait, and its own log counted the requests it was sent. Each of these was seen once on this tree, and once before on the first build, alike.
+
+**A chain: the fake, with the shipped local model standing in,** `qwen3.5:4b-q4_K_M` on Ollama. Five questions, of which the fake was sent five requests:
+
+| When, UTC | What was asked | What came back, and what the API's log said |
+|---|---|---|
+| 14:43:42 | A question that tells the fake to refuse with a wait of 30 s | The local model's answer, after 3.78 s, the turn's `answered_by` "standard". "model fake: its provider said to wait 30 s, and until then it counts as having no budget left", then "turn …: model fake failed (RateLimitedError), and standard is asked next" |
+| 14:43:46 | A plain question | The local model's answer, after 0.34 s: "turn …: model fake has no budget left for the request for about 27 s (its provider's own wait): it is asked after those that have". The fake was sent nothing |
+| 14:44:18, the 30 seconds over | A plain question | The fake's answer, after 0.12 s, its second request, and no line |
+| 14:44:18 | A question that tells the fake to refuse with a wait of 1 s | "turn …: model fake failed (RateLimitedError), and is asked once more after 1 s", refused again, and the local model's answer after 1.51 s. Two requests to the fake, and nothing said of a provider's wait |
+| 14:44:20 | A plain question | The fake's answer, after 0.03 s: asked first, as before |
+
+**The fake alone,** with nobody standing in for it, from 14:44:37:
+
+1. a question that tells it to refuse with a wait of 30 s: a failed turn, `model_unavailable`, after 0.06 s, as before this step, and the line of the wait;
+2. a plain question at once: 429, as `application/problem+json`, with `Retry-After: 30`: "No model can take this message right now: this installation has reached the limits of its models' providers. Try again in 30 seconds.", `retry_after` 30 and `model` "fake". Reading its conversation answered 404. The log: "conversation …: no model has budget left for the request, which is refused for about 30 s: fake for about 30 s (its provider's own wait)". Ten seconds later, another: the same, with 20. The fake was sent nothing for either;
+3. at 14:45:09, the wait over: a plain question, the fake's answer after 0.14 s;
+4. a question that tells it to refuse with a wait of 100,000 s: a failed turn, and "model fake: its provider said to wait 86400 s, …". The question after it: 429, `Retry-After: 86400`, "… Try again in 24 hours.";
+5. the API restarted, and the same question again: the fake's answer, after 0.05 s. The wait was forgotten.
+
+**The page,** in Chromium at http://localhost:8080, the fake alone, once on this tree and once on the first build, alike. A first question that tells the fake to refuse with a wait of 30 s left a failed turn: "The model's server can't be reached, or is too busy. Try again in a moment.", with "Try again". A second question in that conversation, 2.6 s later, was refused with `Retry-After: 28`: the page said "No model can take this message right now.", with a timer that read "in 28 seconds", and 27, 26 and 25 at readings a second apart, and the question was back in the box. The notice went by itself 28.48 s after the refusal, and Enter then had the question answered. The console had one line, the browser's own for a response of 429. The page's source didn't change.
+
+**The Gemini API,** `gemini-3.5-flash-lite` alone, on a free account whose page gives it 15 requests a minute. Short questions, four runs:
+
+1. **the first build, one after the other:** seventeen were answered, in 0.72 to 8.89 s, and the eighteenth, 45 s after the first, was refused after 0.25 s: "model gemini-lite: its provider said to wait 16 s, …";
+2. **the first build, 24 one after the other:** each was answered. The answers took long enough that no minute held sixteen requests;
+3. **the first build, two at a time,** while the minute still held requests of the run before: the sixth question sent was refused after 0.29 s, "its provider said to wait 8 s". The fifth, sent a second before it, was being written then, and was answered about 2 s after the refusal: "model gemini-lite: it answered before its provider's wait was over, and counts as having budget again". The next question, about 3 s after the refusal, was sent to the provider, which refused it after 0.14 s, "said to wait 5 s": a failed turn, where a refusal for now was due. The review had worked the same case out by reading. The rule for what ends a wait was changed for it;
+4. **this tree, two at a time,** from 14:46:00: the eighteenth question sent was refused after 0.33 s, "its provider said to wait 42 s". The seventeenth, sent a second before it, was answered about 2 s after the refusal, and the log said nothing of it: the wait stayed. The question after it, at 14:46:19, was refused by Actio after 0.03 s, with `Retry-After: 40`, and its conversation read 404; another at 14:46:24, with 36: "conversation …: no model has budget left for the request, which is refused for about 36 s: gemini-lite for about 36 s (its provider's own wait)". At 14:47:01, the wait over, a question was answered, after 2.99 s.
+
+**Groq,** `openai/gpt-oss-20b` alone, whose minute takes 8,000 tokens by its headers (Context, above): two made-up questions of 19,950 and 20,423 characters, one after the other, from 14:48:01. The first was answered, after 2.67 s. The second was refused by Groq after 0.27 s: a failed turn, and "model groq-small: its provider said to wait 22 s, and until then it counts as having no budget left". A short question at once was refused by Actio, with `Retry-After: 22`; another 8 s later, with 14; and one at 14:48:29, the wait over, was answered by Groq after 0.96 s. On the first build the same, with 23 and 15. Whether Groq would have taken the short questions during that wait was not tried.
+
+**What the two providers were asked for this step:** flash-lite 68 questions, of which it refused 4; Groq's smaller model 5, four of them long, of which it refused 2. A question refused for now by Actio was sent to nobody.
+
+**The end-to-end tests,** on their own stack: 80 passed, none of them new. None of their questions has the fake refuse with a wait.
+
+**Mistakes planted on purpose,** each alone in a scratch copy of the tree, with the tests that should notice run. On the step's first build, while the review read it, 45: 41 failed a test. The four that failed none:
+
+- **the line of a wait, said rounded down:** every test's wait was a whole number of seconds. The test of that line now names 49.2 s, which is said as 50;
+- **a wait in whole seconds that may be 0:** no wait that is kept or looked up is nothing, so "1 at the least" shows only for one made by hand, which a test now makes;
+- **a title that reads the providers' waits only when the look at the budgets could be had:** a turn's test held that, and no title's. One was added;
+- **a wait noted only before anything of an answer was handed on:** no client raises a 429 after that, so this is no mistake where it was run.
+
+On the tree as it was committed, 51, six of them for the rule that an answer under way ends no wait: 50 failed a test, and the one that failed none is the last above.
+
+**The review,** by a reviewer that had not seen the build, once, and once more for the one part that changed after it. The first read found one fault that had to be fixed, a sentence of the getting-started page that the change had made untrue: that a model which states no limit is never without budget. Of its six smaller points:
+
+- **one changed the rule:** an answer to a request sent before a refusal ended the refusal's wait, which the Gemini API showed the same hour (above);
+- **three changed sentences:** that a newer 429 replaces a wait only when it names more than 2 s, that a turn refused with the budgets unreadable is new with this step, and that one person's large question can have another's smaller one refused, each now as "Known, and left" has it;
+- **one put back a section's heading** in a test file, which the new tests had taken the place of;
+- **one was left:** a turn's test of a model that isn't ready passes without this step, since it holds what was so before, the 503, and the rule's own test holds that only ready models are added. Its neighbour's docstring was corrected.
+
+The second read, of the rule for what ends a wait, found nothing to change in the code, and two points of wording: "noted" where the sentences said "named", since the count is of what Actio has heard, and one more line under "Known, and left".
+
+**Not measured:** a wait of a day named by a provider, which the tests hold by their clock and the fake showed; a chain of cloud models one of which was told to wait; a separate worker's own wait, which is read in the code; and the page in Firefox and WebKit, whose source didn't change.
