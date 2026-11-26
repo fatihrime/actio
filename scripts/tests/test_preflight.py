@@ -6,9 +6,12 @@ and headers are shaped as the providers' documentation shows them, and its refus
 a key as each provider answered a request made with a made-up key. Seen with real keys
 on 2026-11-25, Groq's list entries carried the window and the longest answer, and no
 answer of the Gemini API carried a header about limits: the fake leaves the longest
-answer out of some entries, to show what is said without it. Two refusals are
-made up here, in no shape either was seen to give: Groq's at a rate limit, and the
-Gemini API's 403. So are the bodies that are broken on purpose. A request the fake
+answer out of some entries, to show what is said without it. The Gemini API's answer of
+a model too busy, 503, is as it was seen on 2026-11-26, and its refusal at a limit is
+shaped as two answers saved on 2026-11-25 were, with values made up. Other refusals are
+made up here, in no shape their provider was seen to give: Groq's at a rate limit and
+its 503, the Gemini API's 403, and the 500 and the 502 of a server's other errors. So
+are the bodies that are broken on purpose. A request the fake
 doesn't expect fails the test, and a test that must see no request at all gives it a
 fake that fails at any. What a run prints is read for the facts in its lines, not for
 their wording.
@@ -858,6 +861,19 @@ def cant_connect(request: httpx2.Request) -> httpx2.Response:
             lambda _request: httpx2.Response(200, json={"choices": [{"index": 0}]}),
             ["isn't shaped as expected"],
         ),
+        (
+            # Only 503 is a provider too busy: any other error of its server's fails.
+            "groq ask openai/gpt-oss-120b",
+            lambda _request: httpx2.Response(502, json={"error": {"message": "Bad gateway"}}),
+            ["502", "Bad gateway"],
+        ),
+        (
+            "gemini ask gemini-3.6-flash",
+            lambda _request: httpx2.Response(
+                500, json=[{"error": {"code": 500, "message": "Internal error"}}]
+            ),
+            ["500", "Internal error"],
+        ),
         ("groq ask openai/gpt-oss-120b", cant_connect, ["can't reach Groq", "ConnectError"]),
         ("gemini ask gemini-3.6-flash", times_out, ["didn't answer within 30 s"]),
         ("groq ask openai/gpt-oss-120b", connects_too_slowly, ["couldn't connect", "within 5 s"]),
@@ -1498,6 +1514,8 @@ def test_a_variable_that_is_set_and_names_no_file_is_taken_as_the_api_takes_it(
     [line] = printed.splitlines()
     assert "FAILED" in line
     assert "models file" in line
+    # The line says which variable to set, as the API's does.
+    assert "ACTIO_MODELS_FILE" in line
 
 
 def test_the_models_file_may_be_named_between_providers(tmp_path: Path) -> None:
@@ -1993,3 +2011,215 @@ def test_what_a_providers_headers_count_is_a_key_of_the_models_file() -> None:
         for kind, window in provider.counts.items():
             key = preflight.counted_by(kind, window)
             assert LIMITS[key] == (kind, window.removeprefix("a "))
+
+
+# As the Gemini API's OpenAI-compatible surface answered a question on 2026-11-26, to a
+# model too busy: a list of one error, and no header that names a wait.
+GEMINI_TOO_BUSY = [
+    {
+        "error": {
+            "code": 503,
+            "message": "This model is currently experiencing high demand. Spikes in demand "
+            "are usually temporary. Please try again later.",
+            "status": "UNAVAILABLE",
+        }
+    }
+]
+
+
+def too_busy(_request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(503, json=GEMINI_TOO_BUSY)
+
+
+def test_a_model_too_busy_to_answer_fails_nothing_and_is_counted() -> None:
+    providers = Providers()
+    providers.answers["gemini ask gemini-3.6-flash"] = too_busy
+    models = models_file(
+        GEMINI_TABLE,
+        model_table("flash", "gemini", "gemini-3.6-flash", requests_a_day=20),
+        model_table("lite", "gemini", "gemini-3.5-flash-lite"),
+    )
+
+    status, printed = run("gemini", models=models, providers=providers)
+
+    assert status == 0
+    assert not failures(printed)
+    # Asked once, and the model after it as usual.
+    assert providers.asked("gemini") == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+    said = under(printed, "gemini-3.6-flash")
+    busy = line_of(said, "too busy")
+    for fact in ["503", "high demand", "no failure"]:
+        assert fact in busy, busy
+    assert "answered in" not in said
+    # What the provider said of the model before the question is held all the same.
+    assert "1,048,576" in line_of(said, "context_window")
+    assert "requests_a_day 20" in line_of(said, "not checked")
+    last = summary(printed, "Gemini (providers.gemini)")
+    assert "passed" in last
+    assert "1 model too busy" in last
+    assert "1 figure" in last
+
+
+def test_a_figure_too_large_fails_though_its_model_was_too_busy() -> None:
+    providers = Providers()
+    providers.answers["gemini ask gemini-3.6-flash"] = too_busy
+    models = one_model("gemini", "gemini-3.6-flash", max_output_tokens=70_000)
+
+    status, printed = run("gemini", models=models, providers=providers)
+
+    assert status == 1
+    [failed] = failures(printed)
+    for fact in ["models.big", "max_output_tokens", "70,000", "65,536"]:
+        assert fact in failed, failed
+    assert "too busy" in under(printed, "gemini-3.6-flash")
+    assert summary(printed, "Gemini (providers.gemini)") == "Gemini (providers.gemini) failed"
+
+
+def test_the_limits_an_answer_would_have_stated_are_not_checked_for_a_model_too_busy() -> None:
+    providers = Providers()
+    # As Groq's server would say it, with a wait.
+    providers.answers["groq ask"] = lambda _request: httpx2.Response(
+        503,
+        json={"error": {"message": "Service unavailable", "type": "service_unavailable"}},
+        headers={"retry-after": "30"},
+    )
+    limits = {"requests_a_day": 1000, "tokens_a_minute": 8000, "requests_a_minute": 30}
+    models = models_file(
+        GROQ_TABLE,
+        model_table("big", "groq", "openai/gpt-oss-120b", **limits),
+        model_table("small", "groq", "openai/gpt-oss-20b"),
+    )
+
+    status, printed = run("groq", models=models, providers=providers)
+
+    assert status == 0
+    assert not failures(printed)
+    said = under(printed, "openai/gpt-oss-120b")
+    # The wait the provider names is said.
+    assert "30 s" in line_of(said, "too busy to answer,")
+    # The two limits an answer's headers state: not checked, since no answer came.
+    headers = line_of(said, "requests_a_day 1,000")
+    for fact in ["not checked", "tokens_a_minute 8,000", "too busy", preflight.GROQ.limits_at]:
+        assert fact in headers, headers
+    assert "API" not in headers
+    # The one no answer states: not checked for the reason it never is.
+    never = line_of(said, "requests_a_minute 30")
+    assert "API" in never
+    assert "too busy" not in never
+    # Its window and its longest answer are in Groq's list, and held.
+    assert "65,536" in line_of(said, "max_output_tokens 2,048")
+    # Both models; and the three limits of the one that states any, with the other's
+    # longest answer, which the fake's list leaves out of its entry.
+    last = summary(printed, "Groq (providers.groq)")
+    assert "passed" in last
+    assert "2 models too busy" in last
+    assert "4 figures" in last
+
+
+def test_a_model_of_a_provider_without_a_table_that_is_too_busy_fails_nothing() -> None:
+    providers = Providers()
+    providers.answers["gemini ask gemini-3.6-flash"] = too_busy
+
+    status, printed = run("gemini", providers=providers)
+
+    assert status == 0
+    assert "too busy" in under(printed, "gemini-3.6-flash")
+    assert "answered in" in under(printed, "gemini-3.5-flash-lite")
+    assert summary(printed, "Gemini") == "Gemini passed, with 1 model too busy to answer"
+
+
+@pytest.mark.parametrize(
+    ("call", "label"),
+    [
+        ("groq list", "Groq (providers.groq)"),
+        ("gemini list", "Gemini (providers.gemini)"),
+        ("gemini describe gemini-3.6-flash", "Gemini (providers.gemini)"),
+    ],
+)
+def test_only_a_question_answered_with_503_is_a_model_too_busy(call: str, label: str) -> None:
+    providers = Providers()
+    providers.answers[call] = too_busy
+    models = models_file(
+        GROQ_TABLE,
+        GEMINI_TABLE,
+        model_table("big", "groq", "openai/gpt-oss-120b"),
+        model_table("flash", "gemini", "gemini-3.6-flash"),
+    )
+
+    status, printed = run(models=models, providers=providers)
+
+    # A list of models or a description answered so fails its check, as it did.
+    assert status == 1
+    [failed] = failures(printed)
+    assert "503" in failed
+    assert summary(printed, label) == f"{label} failed"
+    assert "model too busy" not in printed
+
+
+def test_a_wait_that_isnt_one_is_cut_where_a_providers_other_text_is() -> None:
+    providers = Providers()
+    providers.answers["groq ask openai/gpt-oss-120b"] = lambda _request: httpx2.Response(
+        429, json={"error": {"message": "Rate limit"}}, headers={"retry-after": "x" * 1000}
+    )
+
+    status, printed = run("groq=openai/gpt-oss-120b", providers=providers)
+
+    assert status == 1
+    [failed] = failures(printed)
+    # Two hundred characters of it, the last of them the mark of a cut: only a refusal's
+    # message is shown further.
+    assert "x" * 199 + "…" in failed
+    assert "x" * 200 not in failed
+
+
+def gemini_at_a_limit(limits: int) -> list[dict[str, Any]]:
+    """A refusal at `limits` limits, shaped as the Gemini API's were in answers saved on
+    2026-11-25: 236 characters before the first limit, each limit on a line of its own
+    with its value, and the wait last. The values are made up."""
+    before = (
+        "You exceeded your current quota, please check your plan and billing details. For "
+        "more information on this error, head to: https://aistudio.google.com/docs/rate-limits. "
+        "To monitor your current usage, head to: https://ai.dev/rate-limit. "
+    )
+    reached = [
+        "\n* Quota exceeded for metric: generativelanguage.googleapis.com/"
+        f"generate_content_free_tier_requests, limit: {15 + number}, model: "
+        "gemini-3.5-flash-lite, description: Generate content requests per minute limit "
+        "exceeded on Free Tier. See https://aistudio.google.com/docs/rate-limits."
+        for number in range(limits)
+    ]
+    message = before + "".join(reached) + "\nPlease retry in 49.846993202s."
+    assert message.index("* Quota exceeded") == 236
+    return [{"error": {"code": 429, "message": message, "status": "RESOURCE_EXHAUSTED"}}]
+
+
+def test_a_refusal_at_a_limit_shows_the_limit_the_provider_names_and_its_wait() -> None:
+    providers = Providers()
+    providers.answers["gemini ask gemini-3.5-flash-lite"] = lambda _request: httpx2.Response(
+        429, json=gemini_at_a_limit(1)
+    )
+
+    status, printed = run("gemini=gemini-3.5-flash-lite", providers=providers)
+
+    assert status == 1
+    [failed] = failures(printed)
+    for fact in ["429", "requests per minute", "limit: 15", "Please retry in 49.8"]:
+        assert fact in failed, failed
+
+
+def test_a_refusals_message_is_cut_too_only_later_than_other_text() -> None:
+    providers = Providers()
+    providers.answers["gemini ask gemini-3.5-flash-lite"] = lambda _request: httpx2.Response(
+        429, json=gemini_at_a_limit(40)
+    )
+
+    status, printed = run("gemini=gemini-3.5-flash-lite", providers=providers)
+
+    assert status == 1
+    [failed] = failures(printed)
+    # The first limit is on the line, and the last, with the wait after it, is not.
+    assert "limit: 15" in failed
+    assert "limit: 54" not in failed
+    assert "Please retry" not in failed
+    assert "…" in failed
+    assert preflight.SHOWN_AT_MOST < len(failed) < preflight.REFUSAL_SHOWN_AT_MOST + 100

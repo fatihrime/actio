@@ -40,6 +40,14 @@ Groq's API never states its requests a minute and its tokens a day, nor the Gemi
 any of its limits. A model of the file on another server is asked nothing, and its
 limits are named as not checked.
 
+A model whose provider was too busy to answer its question, with 503, is no failure
+either: that says nothing of the key or of the file. It is said and counted, its window
+and its longest answer, which are read before the question, are held all the same, and
+the limits an answer's headers would have stated are named as not checked. Any other
+refusal of a question fails, and is printed with up to REFUSAL_SHOWN_AT_MOST characters
+of what the provider says: the Gemini API names the limit that was reached, and its
+value, only after three sentences of other text.
+
 Questions go to the providers' own addresses, written below, whatever url a table
 gives: a key goes nowhere a file names. A table whose url isn't its provider's
 OpenAI-compatible address is said, and is no failure. Each question counts against the
@@ -58,9 +66,10 @@ printed as it is. What the models file holds is printed without those control
 characters too, a model's id above all, and a table's url with the key hidden in it as
 in a provider's text: a url may carry one.
 
-Exit status: 0 when every check that had a key passed; 1 when one failed, a figure too
-large included, when none had a key, since a run that checked nothing is no pass, and
-when the models file can't be read; 2 for arguments that can't be read.
+Exit status: 0 when every check that had a key passed, a model too busy to answer
+failing nothing; 1 when one failed, a figure too large included, when none had a key,
+since a run that checked nothing is no pass, and when the models file can't be read; 2
+for arguments that can't be read.
 
 Usage: preflight.py [--models-file PATH] [PROVIDER[=MODEL,...] ...]   (--help says more)
 """
@@ -103,8 +112,13 @@ MOST_PAGES = 20
 MODELS_FILE_VARIABLE = "ACTIO_MODELS_FILE"
 DEFAULT_MODELS_FILE: Path = Settings.model_fields["models_file"].default
 
-# How much of a provider's text, such as an error's message, is printed.
+# How much of a provider's text, such as a model's id, is printed.
 SHOWN_AT_MOST = 200
+# A refusal's message is printed longer. The Gemini API's refusal at a limit names the
+# limit and its value only after 236 characters of other text: in answers saved on
+# 2026-11-25, one limit and the wait after it made 536 characters, and the first of
+# four limits ended at the 507th.
+REFUSAL_SHOWN_AT_MOST = 600
 # A piece of a key this long or longer, found in a provider's text, is hidden as the
 # whole key is: some providers quote a key's first and last few characters. A shorter
 # piece says little of a key, and the text's own words could match it.
@@ -142,6 +156,15 @@ type Listed = Mapping[str, Any]
 
 class CheckError(Exception):
     """A check that failed, said in one line, in words."""
+
+
+class TooBusyError(CheckError):
+    """A model's provider was too busy to answer its question, and said so with 503. It
+    says nothing of the key, the account or the models file, so it is no failure: the
+    model's limits aren't checked, and nothing is asked a second time. Seen on
+    2026-11-26, the Gemini API answered one model so seven times in 50 minutes, three of
+    them within 30 seconds, asked again after 5 and after 15 more: a second try was not
+    seen to help, and each try may count against the account's limits."""
 
 
 @dataclass(frozen=True)
@@ -267,12 +290,12 @@ def plain(text: str) -> str:
     return " ".join(text.split())
 
 
-def printable(text: str, key: str) -> str:
+def printable(text: str, key: str, at_most: int = SHOWN_AT_MOST) -> str:
     """A provider's `text` as it may be printed: without escape sequences and other
     control characters, on one line, with `key` hidden, whole or in part, and cut to
-    SHOWN_AT_MOST characters."""
-    text = hidden(plain(text[: SHOWN_AT_MOST * 10]), key)
-    return text if len(text) <= SHOWN_AT_MOST else text[: SHOWN_AT_MOST - 1] + "…"
+    `at_most` characters."""
+    text = hidden(plain(text[: at_most * 10]), key)
+    return text if len(text) <= at_most else text[: at_most - 1] + "…"
 
 
 def hidden(text: str, key: str) -> str:
@@ -369,11 +392,14 @@ def error_of(response: httpx2.Response) -> Any:
 
 
 def refusal(asking: Asking, response: httpx2.Response) -> str:
-    """A refusal in a few words: its status, and the provider's message when it has one."""
+    """A refusal in a few words: its status, and the provider's message when it has
+    one, up to REFUSAL_SHOWN_AT_MOST characters of it."""
     said = f"HTTP {response.status_code} {httpx2.codes.get_reason_phrase(response.status_code)}"
     error = error_of(response)
     message = error.get("message") if isinstance(error, dict) else error
-    if isinstance(message, str) and (shown := asking.printable(message)):
+    if isinstance(message, str) and (
+        shown := printable(message, asking.key, REFUSAL_SHOWN_AT_MOST)
+    ):
         return f"{said.rstrip()}: {shown}"
     return said.rstrip()
 
@@ -407,6 +433,11 @@ def listing(asking: Asking, response: httpx2.Response) -> Any:
             f"({refusal(asking, response)}), so no model was asked"
         )
     raise CheckError(f"{provider.name} didn't list its models ({refusal(asking, response)})")
+
+
+# Why a limit an answer's headers state is held against nothing, when the model's
+# provider was too busy to answer.
+TOO_BUSY = "as the model was too busy to answer"
 
 
 def unreadable(provider: Provider) -> str:
@@ -643,8 +674,11 @@ def model_checked(
     asking: Asking, model: str, offered: Mapping[str, Listed], stated: dict[str, Stated]
 ) -> Iterator[str]:
     """What a model's checks found, a line at a time as each is done. The first that
-    fails raises it, and the model's checks end there. What the provider states of the
-    figures of the models file is put in `stated`, by key, as it is found."""
+    fails raises it, and the model's checks end there; a question the provider was too
+    busy to answer raises `TooBusyError`, which is no failure. What the provider states
+    of the figures of the models file is put in `stated`, by key, as it is found: for a
+    model too busy to answer, what an answer's headers would have stated is put there as
+    not stated, with that reason."""
     provider = asking.provider
     listed = offered.get(model)
     if listed is None:
@@ -662,6 +696,12 @@ def model_checked(
         "POST", f"{provider.openai_at}/chat/completions", headers=asking.bearer(), body=question
     )
     took_s = time.monotonic() - started
+    if response.status_code == httpx2.codes.SERVICE_UNAVAILABLE:
+        stated.update(
+            (counted_by(kind, window), Stated(None, TOO_BUSY))
+            for kind, window in provider.counts.items()
+        )
+        raise TooBusyError(f"{refusal(asking, response)}{waits(asking, response)}")
     if response.status_code != 200:
         raise CheckError(
             f"the question was refused ({refusal(asking, response)}){waits(asking, response)}"
@@ -850,15 +890,26 @@ def elsewhere(file: CatalogFile) -> Iterator[str]:
             )
 
 
-def checked(asking: Asking, check: Check, out: TextIO) -> tuple[bool, int]:
+@dataclass(frozen=True)
+class Result:
+    """How one check ended: whether it passed, how many figures of the models file it
+    didn't check, and how many of its models were too busy to answer."""
+
+    passed: bool
+    unchecked: int = 0
+    busy: int = 0
+
+
+def checked(asking: Asking, check: Check, out: TextIO) -> Result:
     """Checks one provider's key and models, as one table of the models file or as
-    itself, writes what it found, and says whether everything passed, and how many
-    figures of the file weren't checked."""
+    itself, writes what it found, and says how it ended. A model too busy to answer is
+    said and counted, and fails nothing: what its provider said of it before the
+    question, its window and its longest answer, is held against the file all the same."""
     provider = asking.provider
     out.write(f"\n{check.label}\n")
     for note in check.notes(asking.key):
         out.write(f"  {note}\n")
-    passed, unchecked = True, 0
+    passed, unchecked, busy = True, 0, 0
     try:
         offered = provider.offered(asking)
     except CheckError as failure:
@@ -878,6 +929,12 @@ def checked(asking: Asking, check: Check, out: TextIO) -> tuple[bool, int]:
             try:
                 for line in model_checked(asking, model, offered, stated):
                     out.write(f"    {line}\n")
+            except TooBusyError as refused:
+                out.write(
+                    f"    too busy to answer, which is no failure of the key or the models "
+                    f"file ({refused}). Nothing is asked twice: run this again later\n"
+                )
+                busy += 1
             except CheckError as failure:
                 out.write(f"    FAILED: {failure}\n")
                 passed = False
@@ -893,14 +950,14 @@ def checked(asking: Asking, check: Check, out: TextIO) -> tuple[bool, int]:
             f"  Not stated by {provider.name}'s API: {provider.unstated}. "
             f"Read them at {provider.limits_at}\n"
         )
-    return passed, unchecked
+    return Result(passed, unchecked, busy)
 
 
 def outcome(
     check: Check, environ: Mapping[str, str], client: httpx2.Client, out: TextIO
-) -> tuple[bool, int] | None:
-    """Runs one check, with the key its variable holds, and says whether it passed and
-    how many figures of the file it didn't check, or None when it had no key."""
+) -> Result | None:
+    """Runs one check, with the key its variable holds, and says how it ended, or None
+    when it had no key."""
     provider = check.provider
     variable = check.variable
     if variable is None:
@@ -908,7 +965,7 @@ def outcome(
             f"\n{check.label}\n  FAILED: providers.{check.table} names no api_key_env, so "
             f"Actio would ask {provider.name} without a key, and nothing is asked\n"
         )
-        return False, 0
+        return Result(passed=False)
     key = environ.get(variable, "").strip()
     if not key:
         out.write(
@@ -922,7 +979,7 @@ def outcome(
             "spaces, no quotes and no other characters but letters, digits and signs. Look "
             "at its line in .env, or at what the shell exports\n"
         )
-        return False, 0
+        return Result(passed=False)
     return checked(Asking(provider, key, client, variable), check, out)
 
 
@@ -980,7 +1037,11 @@ def chosen(arguments: Sequence[str]) -> Options:
             "Groq's requests a day and tokens a minute are held against what the provider\n"
             "states: a figure of the file larger than the provider's fails. One the\n"
             "provider doesn't state, such as Groq's requests a minute and tokens a day and\n"
-            "every limit of the Gemini API, is named as not checked, with where to read it.\n\n"
+            "every limit of the Gemini API, is named as not checked, with where to read it.\n"
+            "A model whose provider was too busy to answer (503) is said and counted, and\n"
+            "that is no failure. Its window and its longest answer are held all the same,\n"
+            "and one of them larger than the provider's still fails. Nothing is asked\n"
+            "twice: run the check again later.\n\n"
             "Every provider is checked when none is named. A provider named with models\n"
             "after '=', separated by commas, asks those instead, in each of its checks.\n\n"
             "examples:\n"
@@ -1070,7 +1131,7 @@ def run(
     # host. It takes away only `Authorization`.
     with httpx2.Client(transport=transport, timeout=TIMEOUT, follow_redirects=False) as client:
         results = [
-            (check.label, *result)
+            (check.label, result)
             for check in checks_of(file, options.providers)
             if (result := outcome(check, environ, client, out)) is not None
         ]
@@ -1079,19 +1140,24 @@ def run(
     if not results:
         out.write("\nNo provider had a key, so nothing was checked.\n")
         return 1
-    out.write(f"\n{'; '.join(summary(*result) for result in results)}.\n")
-    return 0 if all(passed for _, passed, _ in results) else 1
+    out.write(f"\n{'; '.join(summary(label, result) for label, result in results)}.\n")
+    return 0 if all(result.passed for _, result in results) else 1
 
 
-def summary(label: str, passed: bool, unchecked: int) -> str:
+def summary(label: str, result: Result) -> str:
     """What the last line says of one check: whether it passed, and for one that did,
-    how many figures of the models file it didn't check."""
-    if not passed:
+    how many of its models were too busy to answer, and how many figures of the models
+    file it didn't check."""
+    if not result.passed:
         return f"{label} failed"
-    if not unchecked:
-        return f"{label} passed"
-    figures = "figure" if unchecked == 1 else "figures"
-    return f"{label} passed, with {unchecked} {figures} of the models file not checked"
+    left = []
+    if result.busy:
+        models = "model" if result.busy == 1 else "models"
+        left.append(f"{result.busy} {models} too busy to answer")
+    if result.unchecked:
+        figures = "figure" if result.unchecked == 1 else "figures"
+        left.append(f"{result.unchecked} {figures} of the models file not checked")
+    return f"{label} passed" + (f", with {' and '.join(left)}" if left else "")
 
 
 def main(arguments: Sequence[str]) -> int:
