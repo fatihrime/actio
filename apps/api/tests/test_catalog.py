@@ -26,7 +26,7 @@ from typing import Any
 import anyio
 import httpx2
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from valkey.asyncio import Valkey
 from valkey.exceptions import ValkeyError
@@ -242,6 +242,22 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
         "tokens_a_minute": None,
         "tokens_a_day": None,
     }
+    # And the fake once more, behind a gate of one, so that a test sees an answer wait its
+    # turn (apps/web/e2e/waits.spec.ts). On a provider of its own at the fake's address:
+    # the others take every answer as it comes, and the tests run side by side.
+    queued = file.models["queued"]
+    assert (queued.model, queued.thinking) == (standard.model, False)
+    assert file.providers[queued.provider].url == provider.url
+    assert {name: entry.at_once for name, entry in file.providers.items()} == {
+        standard.provider: None,
+        hurried.provider: None,
+        away.provider: None,
+        rationed.provider: None,
+        queued.provider: 1,
+    }
+    assert queued.provider not in {
+        model.provider for name, model in file.models.items() if name != "queued"
+    }
     assert {
         name: (entry.answers_within_seconds, entry.timeouts.answer_s)
         for name, entry in file.providers.items()
@@ -250,6 +266,7 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
         hurried.provider: (3, 3),
         away.provider: (None, 300),
         rationed.provider: (None, 300),
+        queued.provider: (None, 300),
     }
     # The fake takes any number of tokens a minute: no model's room is less than its window.
     # Nor does it limit anything else: no other model has a budget.
@@ -2906,27 +2923,35 @@ class Answering:
     """An answer that passes a gate as its account's, and holds its place there until it
     is let go. Its account is its name without the number, unless one is given. `then`,
     when set, is called in the very step in which it leaves the gate, before any other
-    task runs."""
+    task runs. With `told`, it asks the gate to be told how many answers have to end
+    before it starts, and keeps each number it is told."""
 
-    def __init__(self, gate: Gate, passed: list[str], name: str, account: str = "") -> None:
+    def __init__(
+        self, gate: Gate, passed: list[str], name: str, account: str = "", *, told: bool = False
+    ) -> None:
         self.name = name
         self.done = asyncio.Event()
         self.then: Callable[[], object] | None = None
+        self.told: list[int] | None = [] if told else None
+        """Each number it was told, in order, when it asked to be told: `None` when it
+        didn't."""
         self.task = asyncio.create_task(
             self._pass(gate, passed, account or name.rstrip("0123456789"))
         )
 
     async def _pass(self, gate: Gate, passed: list[str], account: str) -> None:
-        async with gate.passing(account):
+        placed = None if self.told is None else self.told.append
+        async with gate.passing(account, placed):
             passed.append(self.name)
             await self.done.wait()
         if self.then is not None:
             self.then()
 
 
-def came(gate: Gate, passed: list[str], *names: str) -> list[Answering]:
-    """Answers that come to `gate` in this order, before the loop runs again."""
-    return [Answering(gate, passed, name) for name in names]
+def came(gate: Gate, passed: list[str], *names: str, told: bool = False) -> list[Answering]:
+    """Answers that come to `gate` in this order, before the loop runs again: each asking
+    to be told its number, with `told`."""
+    return [Answering(gate, passed, name, told=told) for name in names]
 
 
 async def settled() -> None:
@@ -3254,6 +3279,339 @@ async def test_a_place_at_the_gate_is_given_back_however_the_answer_ended() -> N
     assert (after_a_failure, while_held, gate.full) == (False, True, False)
 
 
+# How many answers have to end before a waiting one starts: what the gate tells an answer
+# that asks (ADR 0023, revision "a turn says that it waits, and behind how many answers").
+
+
+async def test_an_answer_that_waits_is_told_its_number_as_it_comes_and_one_that_passes_nothing() -> (
+    None
+):
+    """One answer at a time. A's first passes at once, and is told nothing. B's comes,
+    and is told 1 in the very step in which it comes: before the loop runs again."""
+    gate, passed = Gate(1), list[str]()
+    [a1] = came(gate, passed, "A1", told=True)
+    await settled()
+
+    [b1] = came(gate, passed, "B1", told=True)
+    await asyncio.sleep(0)  # B's task takes its first step: it comes to wait
+    as_it_came = (gate.waiting, list(b1.told or []))
+    await asyncio.wait_for(ends(a1, b1), 1)
+
+    assert as_it_came == (1, [1])
+    assert a1.told == []
+    assert b1.told == [1]  # nothing more: that its turn has come, it sees by passing
+    assert passed == ["A1", "B1"]
+
+
+async def test_the_gate_tells_an_answer_once_its_books_are_complete() -> None:
+    """When an answer is told, the one that comes is in its line already, and a place
+    given back has gone on, to an answer out of its line. Each answer is told what it
+    sees then: one place held, and how many wait."""
+    gate, passed = Gate(1), list[str]()
+    seen: list[tuple[str, int, int, bool]] = []
+
+    async def waits(account: str) -> None:
+        def placed(behind: int) -> None:
+            seen.append((account, behind, gate.waiting, gate.full))
+
+        async with gate.passing(account, placed):
+            passed.append(account)
+
+    async with asyncio.timeout(1):
+        async with gate.passing("H"):
+            first = asyncio.create_task(waits("A"))
+            await settled()
+            second = asyncio.create_task(waits("B"))
+            await settled()
+        await asyncio.wait_for(asyncio.gather(first, second), 1)
+
+    assert seen == [
+        ("A", 1, 1, True),  # A in its line, as the one place is held
+        ("B", 2, 2, True),
+        ("B", 1, 1, True),  # the place went to A, out of its line, before B was told
+    ]
+    assert passed == ["A", "B"]
+
+
+async def test_answers_are_told_the_order_the_rule_has_them_pass_and_one_less_as_each_ends() -> (
+    None
+):
+    """One answer at a time. A's first holds the place; A's second, B's first and C's
+    first come, in that order. By the rule B's passes first, then C's, then A's second:
+    they are told 1, 2 and 3, not in the order they came. Each is told one less as each
+    place goes on, and nobody the same number twice."""
+    gate, passed = Gate(1), list[str]()
+    [a1] = came(gate, passed, "A1", told=True)
+    await settled()
+    a2, b1, c1 = came(gate, passed, "A2", "B1", "C1", told=True)
+    await settled()
+    once_all_came = [(answer.told or [])[-1] for answer in (b1, c1, a2)]
+
+    await asyncio.wait_for(ends(a1, b1, c1, a2), 1)
+
+    assert once_all_came == [1, 2, 3]
+    assert passed == ["A1", "B1", "C1", "A2"]
+    # A's second was told 1 alone, then behind B's, then behind C's too.
+    assert a2.told == [1, 2, 3, 2, 1]
+    assert b1.told == [1]
+    assert c1.told == [2, 1]
+
+
+async def test_an_answer_is_told_a_higher_number_when_one_that_goes_before_it_comes() -> None:
+    """One answer at a time. A's first holds the place, and A's second waits behind it:
+    1. B's first comes, B never having been given a place: it goes before A's second,
+    which is told 2."""
+    gate, passed = Gate(1), list[str]()
+    [a1] = came(gate, passed, "A1", told=True)
+    await settled()
+    [a2] = came(gate, passed, "A2", told=True)
+    await settled()
+    before = list(a2.told or [])
+
+    [b1] = came(gate, passed, "B1", told=True)
+    await settled()
+    after = list(a2.told or [])
+    await asyncio.wait_for(ends(a1, b1, a2), 1)
+
+    assert (before, after) == ([1], [1, 2])
+    assert b1.told == [1]
+    assert passed == ["A1", "B1", "A2"]
+
+
+async def test_when_an_answer_gives_up_waiting_those_behind_it_are_told_and_those_before_not() -> (
+    None
+):
+    """One answer at a time, held by H's. A's, B's and C's first come: 1, 2 and 3. B's
+    gives up waiting: C's is told 2, and A's nothing."""
+    gate, passed = Gate(1), list[str]()
+    [h1] = came(gate, passed, "H1")
+    await settled()
+    a1, b1, c1 = came(gate, passed, "A1", "B1", "C1", told=True)
+    await settled()
+
+    b1.task.cancel()  # stopped while it waits
+    await settled()
+    await asyncio.wait_for(ends(h1, a1, c1), 1)
+
+    assert b1.task.cancelled()
+    assert a1.told == [1]
+    assert b1.told == [2]
+    assert c1.told == [3, 2, 1]
+    assert passed == ["H1", "A1", "C1"]
+
+
+async def test_an_answer_cancelled_before_its_accounts_next_isnt_played_forward_in_its_place() -> (
+    None
+):
+    """One answer at a time, held by this test as H's. B's first, B's second and C's
+    first wait: 1, 3 and 2, since B's second goes after C's once B has had a place. B's
+    first is cancelled, and before it could leave its line, D's first comes, which has
+    everyone told anew: B's first waits no more, so B's second is the next to pass, then
+    C's, then D's. B's second is told 1, once, though the answer that stands before it
+    in its account's line is the cancelled one: it isn't taken out of the forward play
+    in its place. And nobody is told anything more when the cancelled one has left."""
+    gate, passed = Gate(1), list[str]()
+    async with asyncio.timeout(1), gate.passing("H"):
+        b1, b2, c1 = came(gate, passed, "B1", "B2", "C1", told=True)
+        await settled()
+        while_all_wait = [list(answer.told or []) for answer in (b1, b2, c1)]
+        # D's task is to run before B's first runs again: so it comes first, and B's
+        # first, cancelled after, is in its line still when D's comes to wait.
+        [d1] = came(gate, passed, "D1", told=True)
+        b1.task.cancel()  # stopped while it waits
+        await settled()
+        then = [list(answer.told or []) for answer in (b2, c1, d1)]
+    await asyncio.wait_for(ends(b2, c1, d1), 1)
+
+    assert while_all_wait == [[1], [2, 3], [2]]
+    assert then == [[2, 3, 1], [2], [3]]
+    assert b1.task.cancelled()
+    assert b1.told == [1]
+    assert b2.told == [2, 3, 1]
+    assert passed == ["B2", "C1", "D1"]
+
+
+async def test_an_answer_cancelled_in_the_step_a_place_comes_free_counts_for_nobodys_number() -> (
+    None
+):
+    """One answer at a time, held by this test as H's. A's, B's and C's first wait: 1, 2
+    and 3. A's is cancelled, and in the very step, before it could leave its line, the
+    place is given back: it goes to B's, and C's is told 1, not 2. A's is told nothing
+    more."""
+    gate, passed = Gate(1), list[str]()
+    async with asyncio.timeout(1), gate.passing("H"):
+        a1, b1, c1 = came(gate, passed, "A1", "B1", "C1", told=True)
+        await settled()
+        a1.task.cancel()  # stopped while it waits: its task hasn't run again yet
+    told_then = list(c1.told or [])
+    await settled()
+    await asyncio.wait_for(ends(b1, c1), 1)
+
+    assert told_then == [3, 1]
+    assert a1.task.cancelled()
+    assert a1.told == [1]
+    assert b1.told == [2]
+    assert c1.told == [3, 1]
+    assert passed == ["B1", "C1"]
+
+
+async def test_after_an_answer_handed_a_place_is_cancelled_the_others_numbers_are_right() -> None:
+    """One answer at a time, held by this test as A's. B's first, A's second, C's first
+    and B's second wait: 1, 3, 2 and 4. The test leaves, the place is handed to B's
+    first, and that one is cancelled in that very step: the place goes on to C's, by the
+    rule. A's second is told 1 then, and B's second 2, and they pass so."""
+    gate, passed = Gate(1), list[str]()
+    async with asyncio.timeout(1), gate.passing("A"):
+        b1, a2, c1, b2 = came(gate, passed, "B1", "A2", "C1", "B2", told=True)
+        await settled()
+        while_held = [(answer.told or [])[-1] for answer in (b1, a2, c1, b2)]
+    b1.task.cancel()  # before B's first could go on with the place it was handed
+    await settled()
+    then = [(answer.told or [])[-1] for answer in (a2, b2)]
+
+    await asyncio.wait_for(ends(c1, a2, b2), 1)
+
+    assert while_held == [1, 3, 2, 4]
+    assert then == [1, 2]
+    assert passed == ["C1", "A2", "B2"]
+    assert c1.told == [2, 1]
+    assert a2.told == [2, 3, 2, 1]
+    assert b2.told == [4, 3, 2, 1]
+
+
+async def test_at_more_than_one_at_once_the_places_held_come_back_in_the_order_they_were_given() -> (
+    None
+):
+    """Two at once. A's first, then B's first, hold the places; A's second, B's second
+    and C's first come. Played forward with A's place coming back first: C's passes, C
+    never having been given a place; then B's comes back, and A's second passes, A
+    having been given its place before B; then B's second. So they are told 2, 3 and 1,
+    and pass so when the places come back in that order. Which place comes back first
+    decides before C's has come, while A's second and B's second wait alone: with A's
+    place first, A's second is told 1 and B's second 2, as they are; played forward with
+    B's place first, it would be the other way round."""
+    gate, passed = Gate(2), list[str]()
+    a1, b1 = came(gate, passed, "A1", "B1", told=True)
+    await settled()
+    a2, b2, c1 = came(gate, passed, "A2", "B2", "C1", told=True)
+    await settled()
+    once_all_came = [(answer.told or [])[-1] for answer in (a2, b2, c1)]
+
+    await asyncio.wait_for(ends(a1, b1, c1, a2, b2), 1)
+
+    assert once_all_came == [2, 3, 1]
+    assert passed == ["A1", "B1", "C1", "A2", "B2"]
+    assert a2.told == [1, 2, 1]
+    assert b2.told == [2, 3, 2, 1]
+    assert c1.told == [1]
+
+
+async def test_an_answer_whose_telling_raises_is_logged_and_the_others_are_told_all_the_same(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One answer at a time, held by this test as H's. C's first comes, then an answer
+    whose telling raises each time, then D's first: 1, 2 and 3. The test leaves: C's
+    passes, the one whose telling raises is told 1, which raises in the test's own step,
+    and D's is told 2 all the same. The place isn't lost, nothing reaches the test, and
+    the log says it with its trace, and nothing of whose answer it is."""
+    gate, passed = Gate(1), list[str]()
+    raised: list[int] = []
+
+    def raises(behind: int) -> None:
+        raised.append(behind)
+        raise RuntimeError("a reader's mistake")
+
+    async def raising() -> None:
+        async with gate.passing("the one whose telling raises", raises):
+            passed.append("R1")
+            await let_go.wait()
+
+    let_go = asyncio.Event()
+    async with asyncio.timeout(1), gate.passing("H"):
+        [c1] = came(gate, passed, "C1", told=True)
+        await settled()
+        their = asyncio.create_task(raising())
+        await settled()
+        [d1] = came(gate, passed, "D1", told=True)
+        await settled()
+    await settled()
+    then = (list(passed), gate.full, gate.waiting)
+    await asyncio.wait_for(ends(c1), 1)
+    let_go.set()
+    await asyncio.wait_for(their, 1)
+    await asyncio.wait_for(ends(d1), 1)
+
+    assert raised == [2, 1]
+    assert then == (["C1"], True, 2)
+    assert passed == ["C1", "R1", "D1"]
+    assert c1.told == [1]
+    assert d1.told == [3, 2, 1]
+    logged = [record for record in caplog.records if record.name == "actio.catalog"]
+    assert [record.getMessage() for record in logged] == [
+        "an answer that waits at a gate couldn't be told its number"
+    ] * 2
+    assert all(record.exc_info is not None for record in logged)
+    assert "the one whose telling raises" not in caplog.text
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+
+async def test_an_answer_that_asked_to_be_told_nothing_counts_in_the_others_numbers() -> None:
+    """As a title waits: `passing(account)` alone. One answer at a time, held by H's. A's
+    first, a title of T's and B's first come: A's is told 1 and B's 3, the title counted
+    between them, and told nothing itself."""
+    gate, passed = Gate(1), list[str]()
+    [h1] = came(gate, passed, "H1")
+    await settled()
+    [a1] = came(gate, passed, "A1", told=True)
+    [title] = came(gate, passed, "T1")
+    [b1] = came(gate, passed, "B1", told=True)
+    await settled()
+
+    await asyncio.wait_for(ends(h1, a1, title, b1), 1)
+
+    assert passed == ["H1", "A1", "T1", "B1"]
+    assert a1.told == [1]
+    assert title.told is None
+    assert b1.told == [3, 2, 1]
+
+
+async def test_nothing_is_played_forward_while_no_waiting_answer_asked_to_be_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answers that asked nothing, as titles do, cost the gate what they cost before it
+    told anybody anything: no forward play of the rule at any change."""
+    played: list[int] = []
+    order = Gate._order
+
+    def counted(gate: Gate) -> Any:
+        played.append(1)
+        return order(gate)
+
+    monkeypatch.setattr(Gate, "_order", counted)
+    gate, passed = Gate(1), list[str]()
+    a1, b1, c1 = came(gate, passed, "A1", "B1", "C1")
+    await settled()
+    c1.task.cancel()
+    await settled()
+    without = len(played)
+    await asyncio.wait_for(ends(a1, b1), 1)
+    [d1] = came(gate, passed, "D1", told=True)
+    await settled()
+    await asyncio.wait_for(ends(d1), 1)
+
+    assert (without, len(played)) == (0, 0)  # D's passed at once, and was never told
+    [e1, f1] = came(gate, passed, "E1", "F1", told=True)
+    await settled()
+    assert len(played) == 1  # F's came to wait
+    await asyncio.wait_for(ends(e1, f1), 1)
+    # Once those that asked have gone, the others cost nothing again.
+    g1, h1 = came(gate, passed, "G1", "H1")
+    await settled()
+    await asyncio.wait_for(ends(g1, h1), 1)
+    assert len(played) == 1
+    assert passed == ["A1", "B1", "D1", "E1", "F1", "G1", "H1"]
+
+
 @dataclass
 class PlainGate:
     """A gate written the plain way, from its rules, with no asyncio: which answers hold
@@ -3408,6 +3766,73 @@ def test_the_gate_passes_answers_as_the_plain_one_does_whatever_comes_ends_and_g
             plain.ends(name)
             await settled()
             check()
+        assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+    asyncio.run(asyncio.wait_for(play(), 10))
+
+
+@settings(deadline=None)  # each example runs an event loop of its own
+@given(at_once=st.integers(1, 4), steps=GATE_STEPS)
+# Three at once: A's, B's and C's hold the places, and D's two and C's second wait. As the
+# rule is played forward, D's first takes A's place, and when B's comes back D holds one
+# place and C one, C's given longer ago: C's second passes second. Played forward without
+# counting the place D's first was given, D's second would.
+@example(
+    at_once=3,
+    steps=[("comes", account) for account in "ABCDDC"],
+)
+def test_the_answers_pass_in_the_order_of_the_numbers_they_were_last_told(
+    at_once: int, steps: list[tuple[str, Any]]
+) -> None:
+    """After any history of answers that come, end, end with the answer handed their
+    place cancelled in that step, and give up waiting, at a gate of one to four places,
+    nobody comes or leaves, and the places held come back in the order they were given.
+    Then each waiting answer that asked to be told passes as the one whose number it was
+    last told, counted among all that wait: so those numbers are each its own, from 1 up.
+    D's answers ask to be told nothing, as a title's, and count in the others' numbers."""
+
+    async def play() -> None:
+        gate, plain = Gate(at_once), PlainGate(at_once)
+        passed: list[str] = []
+        answers: dict[str, Answering] = {}
+
+        for number, (kind, which) in enumerate(steps):
+            holding, waiting = list(plain.holding), [name for name, _ in plain.waiting]
+            match kind:
+                case "comes":
+                    name = f"{which}{number}"
+                    answers[name] = Answering(gate, passed, name, told=which != "D")
+                    plain.comes(name, which)
+                case "ends" if holding:
+                    name = holding[which % len(holding)]
+                    answers[name].done.set()
+                    plain.ends(name)
+                case "ends, and the next is cancelled" if holding:
+                    name = holding[which % len(holding)]
+                    handed = plain.ends_and_cancels(name)
+                    if handed is not None:
+                        answers[name].then = answers[handed].task.cancel
+                    answers[name].done.set()
+                case "gives up" if waiting:
+                    name = waiting[which % len(waiting)]
+                    answers[name].task.cancel()
+                    plain.gives_up(name)
+            await settled()
+
+        waiting = [name for name, _ in plain.waiting]
+        last_told = {name: told[-1] for name in waiting if (told := answers[name].told) is not None}
+        before = len(passed)
+        # The place given the longest ago comes back first: the plain gate keeps the
+        # answers that hold one in the order they were given it.
+        while plain.holding:
+            name = next(iter(plain.holding))
+            answers[name].done.set()
+            plain.ends(name)
+            await settled()
+        then = passed[before:]
+
+        assert sorted(then) == sorted(waiting)
+        assert {name: then.index(name) + 1 for name in last_told} == last_told
         assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
 
     asyncio.run(asyncio.wait_for(play(), 10))

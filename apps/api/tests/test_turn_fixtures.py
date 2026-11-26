@@ -25,6 +25,7 @@ import json
 import os
 import re
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from valkey.asyncio import Valkey
 
 from actio.api import turns as turn_routes
 from actio.api import ui_stream
+from actio.catalog import Gate
 from actio.chat import events
 from actio.core.budget import Budgets
 from actio.core.settings import Settings
@@ -86,6 +88,15 @@ async def turn(browser: httpx.AsyncClient, text: str, **more: Any) -> httpx.Resp
     )
     assert response.status_code == 200, response.text
     return response
+
+
+async def until(condition: Callable[[], bool]) -> None:
+    """Wait until `condition` holds: the app gets there in a moment."""
+    async with asyncio.timeout(PATIENCE_S):
+        while True:
+            if condition():
+                return
+            await asyncio.sleep(0.005)
 
 
 @pytest.mark.parametrize(
@@ -164,6 +175,43 @@ async def test_an_answer_by_a_model_that_stood_in_streams_what_was_recorded(
     response = await turn(browser, "Who answers?")
 
     as_recorded("stood_in.sse", response.text)
+
+
+async def test_an_answer_that_waited_its_turn_streams_what_was_recorded(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, appended: Any
+) -> None:
+    """Its model's server writes one answer at a time. This test holds the place, as an
+    account of its own, and another account's answer waits before the turn's: the turn
+    waits behind two. The test lets its place go, and the other answer has it: behind
+    one. That one ends, and the turn's turn has come. For the web app, which says behind
+    how many other answers an answer waits, in place of the wait for the model.
+
+    Each number is in the stream before the line changes again: a turn hands them on
+    from a task of its own, and skips one that a newer one overtook."""
+    assert migrated
+    gate = Gate(1)
+    lineup.add("standard", TextDelta("Your turn "), TextDelta("came."), DONE, gate=gate)
+    browser = await start_app(settings, catalog=lineup.catalog())
+    theirs_passed, theirs_go = asyncio.Event(), asyncio.Event()
+
+    async def theirs() -> None:
+        async with gate.passing("another account"):
+            theirs_passed.set()
+            await theirs_go.wait()
+
+    async with asyncio.timeout(PATIENCE_S):
+        async with gate.passing("this test"):
+            other = asyncio.create_task(theirs())
+            await until(lambda: gate.waiting == 1)
+            asked = asyncio.create_task(turn(browser, "Is it my turn?"))
+            await until(lambda: appended.waits(TURN) == [2])
+        await theirs_passed.wait()
+        await until(lambda: appended.waits(TURN) == [2, 1])
+        theirs_go.set()
+        response = await asked
+        await other
+
+    as_recorded("waited.sse", response.text)
 
 
 async def test_a_thought_that_used_up_the_answer_streams_what_was_recorded(

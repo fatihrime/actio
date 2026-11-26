@@ -1,6 +1,7 @@
-# The models the end-to-end test stack offers (`make e2e`): the fake, under five names,
-# one of them with a budget of one request a minute, and a sixth model whose server
-# isn't there, which the fake stands in for.
+# The models the end-to-end test stack offers (`make e2e`): the fake, under six names,
+# one of them with a budget of one request a minute and one behind a gate that lets one
+# answer through at a time, and a seventh model whose server isn't there, which the
+# fake stands in for.
 #
 # compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API and
 # the worker read this file in place of config/models.toml. "standard" is the same name
@@ -45,6 +46,16 @@ url = "http://fakellm:8101/v1"
 [providers.fake-rationed]
 kind = "openai-compatible"
 url = "http://fakellm:8100/v1"
+
+# The same fakellm container once more, behind a gate that lets one answer through at a
+# time, for the model "queued" below: an answer asked while another is written there
+# waits its turn, and the page says behind how many (apps/web/e2e/waits.spec.ts). A
+# provider of its own: on "fake", every test's answers would wait for each other's.
+# Nothing else is asked here.
+[providers.fake-queued]
+kind = "openai-compatible"
+url = "http://fakellm:8100/v1"
+answers_at_once = 1
 
 [models.standard]
 title = "Fake model"
@@ -116,3 +127,16 @@ context_window = 8192
 max_output_tokens = 2048
 thinking = false
 requests_a_minute = 1
+
+# The fake on the provider above, behind its gate of one: a second answer asked while one
+# is written waits its turn, and the page says behind how many other answers. The page
+# has no way to choose it: a test gives each of its questions this model's name on its
+# way out, as for "rationed". Priced like "standard" (plans.toml), so that it isn't
+# offered at a limit either.
+[models.queued]
+title = "Queued"
+provider = "fake-queued"
+model = "fake-chat"
+context_window = 8192
+max_output_tokens = 2048
+thinking = false

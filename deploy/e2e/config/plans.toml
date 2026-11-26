@@ -51,6 +51,12 @@ output = 1_000_000
 input = 1_000_000
 output = 1_000_000
 
+# The fake behind a gate of one (models.toml): priced like "standard", for the same
+# reason.
+[prices.queued]
+input = 1_000_000
+output = 1_000_000
+
 # Two answers at once, as people get: apps/web/e2e/turns.spec.ts asks for a third.
 [plans.guest]
 title = "Guest"

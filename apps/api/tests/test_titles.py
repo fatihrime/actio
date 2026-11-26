@@ -1427,8 +1427,10 @@ class NotingGate(Gate):
         self.closed_by_then: list[bool] = []
 
     @asynccontextmanager
-    async def passing(self, account: Hashable) -> AsyncIterator[None]:
-        async with super().passing(account):
+    async def passing(
+        self, account: Hashable, placed: Callable[[int], object] | None = None
+    ) -> AsyncIterator[None]:
+        async with super().passing(account, placed):
             try:
                 yield
             finally:

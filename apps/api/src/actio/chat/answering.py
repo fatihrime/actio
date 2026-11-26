@@ -1,9 +1,10 @@
 """Following a model's answer as it streams, and making sure the turn gets recorded.
 
 `answer` asks a model and hands on what it writes, as `Step`s: a part of the answer
-opens, grows, closes. It returns `Ended`, after the turn was written to the database,
-or was found given up on or deleted meanwhile (`Ended.recorded`). Whatever happens on
-the way, the turn doesn't stay `running`:
+opens, grows, closes; and before that, at a model's gate, how many answers it waits
+behind. It returns `Ended`, after the turn was written to the database, or was found
+given up on or deleted meanwhile (`Ended.recorded`). Whatever happens on the way, the
+turn doesn't stay `running`:
 
 - the model finishes: `completed`, with the whole answer;
 - the model is still writing when its server's time for a whole answer is over
@@ -31,8 +32,11 @@ A model's server that writes only so many answers at once has a gate in front of
 asked only once the turn has passed: so the client's patience for the first word starts
 when the server is free. It waits as the answer of the account that asked it, and a
 place that comes free goes to the account that has had the least (ADR 0023, revision
-"a place that comes free goes to the account that has had the least"). The turn gives
-its place back as soon as the model's stream is closed, however it ended.
+"a place that comes free goes to the account that has had the least"). While it waits,
+it hands on how many answers have to end before it starts, as the gate tells it, and
+then that its turn has come (`Waits`, ADR 0023, revision "a turn says that it waits,
+and behind how many answers"). The turn gives its place back as soon as the model's
+stream is closed, however it ended.
 
 A turn asks the model it names, and when that one can't answer, the models that stand in
 for it, one after the other, each behind its own gate (`actio.catalog.Catalog.chain`):
@@ -199,6 +203,15 @@ class Closed:
 
 
 @dataclass(frozen=True, slots=True)
+class Waits:
+    """The turn waits at a model's gate, and `behind` answers have to end before it
+    starts. 0: its turn has come. Only a turn that waited says it, at each gate it waited
+    at."""
+
+    behind: int
+
+
+@dataclass(frozen=True, slots=True)
 class Ended:
     """The turn is over, and its outcome was written, or found to have no place."""
 
@@ -219,7 +232,11 @@ class Ended:
     was the first to pass."""
 
 
-type Step = Opened | Wrote | Closed
+type Written = Opened | Wrote | Closed
+"""What an answer's text does: a part opens, grows, closes."""
+
+type Step = Written | Waits
+"""What a turn hands on to its readers, in order."""
 
 
 class Answer:
@@ -236,7 +253,7 @@ class Answer:
         self.finish: Finish | None = None
         """The model's last event, once it has come."""
 
-    def take(self, event: StreamEvent) -> list[Step]:
+    def take(self, event: StreamEvent) -> list[Written]:
         """Add one event from the model, and return the steps it amounts to."""
         match event:
             case TextDelta(text=text):
@@ -249,7 +266,7 @@ class Answer:
             case _:
                 raise ProviderError("the model asked for a tool, and none was offered to it")
 
-    def close(self) -> list[Step]:
+    def close(self) -> list[Written]:
         """Close the open part, if there is one."""
         if not self._open:
             return []
@@ -265,13 +282,13 @@ class Answer:
             made.append(TextPart(text=text) if kind == "text" else ReasoningPart(text=text))
         return made
 
-    def _write(self, kind: Kind, text: str) -> list[Step]:
+    def _write(self, kind: Kind, text: str) -> list[Written]:
         if not text:
             return []
         # Before a reader is shown it: what is streamed is what is stored. A character
         # that can't be stored would keep the whole answer from being recorded.
         text = storable(text)
-        steps: list[Step] = []
+        steps: list[Written] = []
         if not self._open or self._parts[-1][0] != kind:
             steps += self.close()
             self._parts.append((kind, []))
@@ -359,7 +376,9 @@ async def answer(
 
     When a model's server is busy with other answers, the turn first waits at its gate,
     saying all the while that it is alive: as the answer of `account`, the id of the
-    account that asked it, at the gate of each model it asks.
+    account that asked it, at the gate of each model it asks. Meanwhile it hands on, as
+    `Waits`, how many answers have to end before it starts, each time that changes, and
+    `Waits(0)` once its turn has come: only at a gate it waited at.
 
     `halt` ends it early. `on_beat` is called with every beat, after the turn has said
     that it is alive: for whatever else has to be kept while the turn runs. Neither it
@@ -378,7 +397,7 @@ async def answer(
                 asking.offered.name,
                 asked_through(asking.offered, budgets, tokens, clock),
                 asking.request,
-                _through(asking.offered.gate, account, turn_id, clock),
+                _through(asking.offered.gate, account, turn_id, clock, emit),
             )
             for asking in chain
         ],
@@ -491,11 +510,21 @@ async def answer(
 
 @asynccontextmanager
 async def _through(
-    gate: Gate | None, account: uuid.UUID, turn_id: uuid.UUID, clock: Callable[[], datetime]
+    gate: Gate | None,
+    account: uuid.UUID,
+    turn_id: uuid.UUID,
+    clock: Callable[[], datetime],
+    emit: Callable[[Step], Awaitable[None]],
 ) -> AsyncIterator[None]:
     """Wait until the model's server has room for the answer, as `account`'s, and keep
     its place there until the end of the block. Without a gate, the server is asked at
     once.
+
+    While it waits, it hands on to `emit` how many answers have to end before it starts,
+    as the gate tells it (`_Told`), and once it has passed, `Waits(0)`, if it handed on
+    a number: before its model is asked. A turn that passed at once hands on nothing, and
+    one that was stopped, or ended by a shutdown, while it waited hands on no 0. Either
+    way nothing of it is handed on after the block has begun, or it has left.
 
     A turn that had to wait says so in the log, with how long: whether it got its turn,
     or was stopped, or ended by a shutdown, while it waited."""
@@ -503,16 +532,79 @@ async def _through(
         yield
         return
     came = clock() if gate.full else None
+    told = _Told(emit, turn_id)
     passed = False
     try:
-        async with gate.passing(account):
+        async with gate.passing(account, told.placed):
             passed = True
             if came is not None:
                 _waited(turn_id, came, clock)
+            # Only waiting can be halted: a step that has come is handed on whole.
+            with anyio.CancelScope(shield=True):
+                if await told.over():
+                    await emit(Waits(0))
             yield
     finally:
-        if came is not None and not passed:
-            _waited(turn_id, came, clock, ", and didn't get its turn")
+        if not passed:
+            if came is not None:
+                _waited(turn_id, came, clock, ", and didn't get its turn")
+            with anyio.CancelScope(shield=True):
+                await told.over()
+
+
+class _Told:
+    """What the gate tells a turn that waits there, handed on to its readers, in order.
+
+    The gate tells it in a step that awaits nothing (`placed`), and a step is handed on
+    by awaiting `emit`. So a task of the turn's own, started by the first number, hands
+    them on, one at a time: each the newest number noted by then, so a number that a
+    newer one overtook before it could be handed on is skipped. A turn that passes at
+    once is told nothing, and starts no task."""
+
+    def __init__(self, emit: Callable[[Step], Awaitable[None]], turn_id: uuid.UUID) -> None:
+        self._emit = emit
+        self._name = f"waits-{turn_id}"
+        self._newest: int | None = None
+        """The number noted and not handed on yet."""
+        self._noted = asyncio.Event()
+        self._over = False
+        self._said = False
+        """Whether a number was handed on."""
+        self._task: asyncio.Task[None] | None = None
+
+    def placed(self, behind: int) -> None:
+        """What the gate says: `behind` answers have to end before this one starts.
+        Awaits nothing. The gate says nothing once the turn has passed or left its
+        line, which is before `over`."""
+        self._newest = behind
+        self._noted.set()
+        if self._task is None:
+            self._task = asyncio.create_task(self._hand_on(), name=self._name)
+
+    async def _hand_on(self) -> None:
+        while not self._over:
+            if self._newest is None:
+                self._noted.clear()
+                await self._noted.wait()
+                continue
+            behind, self._newest = self._newest, None
+            await self._emit(Waits(behind))
+            self._said = True
+
+    async def over(self) -> bool:
+        """Hand on nothing more: a number noted and not handed on yet is dropped, since
+        the task looks at this before each number, and the step under way, if one is,
+        is waited for, never cut off. Returns whether a number was handed on. Awaited
+        under a shield where the turn may be halted."""
+        self._over = True
+        self._noted.set()
+        if self._task is None:
+            return False
+        # Waited for, not awaited: a cancellation of the turn's task must not reach it.
+        await asyncio.wait({self._task})
+        # `emit` doesn't raise. If it did, it is raised here, as it is from `answer`.
+        self._task.result()
+        return self._said
 
 
 def _passed_over(

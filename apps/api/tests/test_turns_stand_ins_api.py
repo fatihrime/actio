@@ -76,6 +76,11 @@ def said(response: httpx.Response, kind: str = "text") -> str:
     return "".join(c["delta"] for c in chunks(response)[:-1] if c["type"] == f"{kind}-delta")
 
 
+def waits_in(response: httpx.Response) -> list[int]:
+    """How many answers the stream said its turn waits behind at a gate, in order."""
+    return [c["data"]["behind"] for c in chunks(response)[:-1] if c["type"] == "data-waits"]
+
+
 def turn_of(response: httpx.Response) -> dict[str, Any]:
     """The turn as the stream's last metadata says it was recorded."""
     ending = [c for c in chunks(response)[:-1] if c["type"] in ("finish", "message-metadata")]
@@ -682,6 +687,71 @@ async def test_a_turn_waits_at_its_stand_ins_gate_as_the_answer_of_the_account_t
     assert order == ["theirs", "the stand-in"]
     assert said(response) == "At last."
     assert said(theirs) == "Theirs."
+
+
+async def test_a_turn_that_waits_at_its_stand_ins_gate_says_behind_how_many_there(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, appended: Any
+) -> None:
+    """The asked model's server is free, and fails it at once: nothing is said of that
+    gate. The stand-in's server writes another answer: the turn waits behind one there,
+    and says so, and then that its turn has come."""
+    assert migrated
+    _, second_gate, _, other, hold = two_servers(lineup, TextDelta("At last."), DONE)
+    browser = await guest_on(start_app, settings, lineup)
+    asked_other = Chat(browser).asking(model="other")
+    await held(other)
+    chat = Chat(browser)
+    asked = chat.asking()
+    await until(lambda: second_gate.waiting == 1)
+    turn_id = await chat.running_turn()
+    await until(lambda: appended.waits(turn_id) == [1])
+
+    hold.set()
+    _, response = await ended(asked_other, asked)
+
+    assert waits_in(response) == [1, 0]
+    assert [c["type"] for c in chunks(response)[:5]] == [
+        "start",
+        "start-step",
+        "data-waits",
+        "data-waits",
+        "text-start",
+    ]
+    assert said(response) == "At last."
+
+
+async def test_a_turn_that_waits_at_both_gates_says_behind_how_many_at_each(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, appended: Any
+) -> None:
+    """Both servers are busy. The turn waits behind one at its model's gate, and its turn
+    comes; its model fails at once, and it waits behind one at the stand-in's gate, and
+    its turn comes there too: each gate says its own."""
+    assert migrated
+    first_gate, second_gate, _, other, hold = two_servers(lineup, TextDelta("At last."), DONE)
+    first_hold = asyncio.Event()
+    beside = lineup.add(
+        "beside", TextDelta("Beside "), first_hold, TextDelta("it."), DONE, gate=first_gate
+    )
+    browser = await guest_on(start_app, settings, lineup)
+    asked_other = Chat(browser).asking(model="other")
+    await held(other)
+    asked_beside = Chat(browser).asking(model="beside")
+    await held(beside)
+    chat = Chat(browser)
+    asked = chat.asking()
+    await until(lambda: first_gate.waiting == 1)
+    turn_id = await chat.running_turn()
+    await until(lambda: appended.waits(turn_id) == [1])
+
+    first_hold.set()
+    await until(lambda: second_gate.waiting == 1)
+    await until(lambda: appended.waits(turn_id) == [1, 0, 1])
+    hold.set()
+    _, _, response = await ended(asked_other, asked_beside, asked)
+
+    assert waits_in(response) == [1, 0, 1, 0]
+    assert said(response) == "At last."
+    assert await answered_by(chat, response) == "second"
 
 
 async def test_a_turn_stopped_while_its_stand_in_writes_keeps_what_had_arrived(

@@ -396,10 +396,15 @@ def read_file(path: Path) -> CatalogFile:
 @dataclass(eq=False, slots=True)
 class _Waiting:
     """An answer that waits at a gate: its number in the order the waiting answers came,
-    and the future the gate resolves when it hands the answer a place."""
+    the future the gate resolves with the number of the place it hands the answer, and,
+    for an answer that asked to be told how many answers have to end before it starts,
+    whom to tell and what it was last told."""
 
     came: int
-    passed: asyncio.Future[None]
+    passed: asyncio.Future[int]
+    placed: Callable[[int], object] | None = None
+    told: int = 0
+    """The number it was last told: 0 while it was told none."""
 
 
 class Gate:
@@ -426,10 +431,22 @@ class Gate:
     no end of them.
 
     An answer that gives up waiting, by being cancelled, leaves, and changes nothing for
-    the others. One that was handed a place and was cancelled before it could go on
-    with it counts as given that place, and gives it back at once, as an answer that
-    ended at once would: the place goes on by the same rule, and is never lost, and the
-    account's next answer waits as that of an account given a place just then.
+    the others but the number those behind it are told (below). One that was handed a
+    place and was cancelled before it could go on with it counts as given that place,
+    and gives it back at once, as an answer that ended at once would: the place goes on
+    by the same rule, and is never lost, and the account's next answer waits as that of
+    an account given a place just then.
+
+    An answer that waits may ask to be told how many answers have to end before it
+    starts: its number in the order the waiting answers would pass, by the rule played
+    forward from the gate as it stands, the places held coming back in the order they
+    were given, since nothing better is known of when each ends. It is told when it
+    comes to wait, and again whenever that number changes, in the step in which it
+    does: a place went on, an answer came that goes before it, or one before it gave up
+    waiting. The number is exact at one answer at a time while nobody comes and nobody
+    leaves, and a guess at more: and it can go up, since an account that has had less
+    goes first (ADR 0023, revision "a turn says that it waits, and behind how many
+    answers").
 
     `async with gate.passing(account):` waits, and gives the place back on the way out,
     however that is, in a step that awaits nothing.
@@ -438,8 +455,9 @@ class Gate:
     def __init__(self, at_once: int) -> None:
         self.at_once = at_once
         """How many answers pass at the same time."""
-        self._taken = 0
-        """How many places are held, one handed on and not yet gone on with included."""
+        self._places: dict[int, Hashable] = {}
+        """Each place held, by its number, with its account, in the order the places
+        were given: one handed on and not yet gone on with included."""
         self._held: dict[Hashable, int] = {}
         """How many places each account holds. An account that holds none isn't in it."""
         self._lines: dict[Hashable, deque[_Waiting]] = {}
@@ -452,11 +470,13 @@ class Gate:
         """How many places the gate has given: the number of the last one, from 1."""
         self._came = 0
         """How many answers have come to wait: the number of the next one."""
+        self._to_tell = 0
+        """How many of the answers in the lines asked to be told their number."""
 
     @property
     def full(self) -> bool:
         """Whether an answer that comes now has to wait."""
-        return self._taken >= self.at_once
+        return len(self._places) >= self.at_once
 
     @property
     def waiting(self) -> int:
@@ -471,77 +491,130 @@ class Gate:
         return len(self._held.keys() | self._lines.keys() | self._last.keys())
 
     @asynccontextmanager
-    async def passing(self, account: Hashable) -> AsyncIterator[None]:
+    async def passing(
+        self, account: Hashable, placed: Callable[[int], object] | None = None
+    ) -> AsyncIterator[None]:
         """Pass as `account`'s answer, waiting as long as it takes, and hold the place
         until the end of the block. At once, without waiting for anything, while a place
-        is free."""
-        await self._pass(account)
+        is free.
+
+        `placed` is told, while the answer waits, how many answers have to end before it
+        starts, 1 or more: when it comes to wait, before it waits, and whenever that
+        number is another than the one it was last told. It is called by the gate, in a
+        step that awaits nothing, once the gate's books are complete, and must await
+        nothing either. Never for an answer that passes at once, never with 0, and never
+        once the answer has passed or left its line: that its turn has come, the caller
+        sees by being let in. One that raises is logged, and the others are told all the
+        same."""
+        place = await self._pass(account, placed)
         try:
             yield
         finally:
-            self._give_back(account)
+            self._give_back(place)
 
-    async def _pass(self, account: Hashable) -> None:
-        if self._taken < self.at_once:
-            self._give(account)
-            return
-        waiting = _Waiting(self._came, asyncio.get_running_loop().create_future())
+    async def _pass(self, account: Hashable, placed: Callable[[int], object] | None) -> int:
+        """Wait until `account`'s answer is given a place, and return its number."""
+        if len(self._places) < self.at_once:
+            return self._give(account)
+        waiting = _Waiting(self._came, asyncio.get_running_loop().create_future(), placed)
         self._came += 1
         self._lines.setdefault(account, deque()).append(waiting)
         self._waiting += 1
+        if placed is not None:
+            self._to_tell += 1
+        self._tell()
         try:
-            await waiting.passed
+            return await waiting.passed
         except BaseException:
             if waiting.passed.cancelled() or not waiting.passed.done():
                 # It gave up waiting.
                 self._out_of_line(account, waiting)
                 self._forget_the_absent()
+                self._tell()
             else:
                 # It was handed a place in the very step in which it was cancelled.
-                self._give_back(account)
+                self._give_back(waiting.passed.result())
             raise
 
-    def _give(self, account: Hashable) -> None:
-        """A place, to `account`: the next number, and remembered as its last."""
-        self._taken += 1
+    def _give(self, account: Hashable) -> int:
+        """A place, to `account`: the next number, and remembered as its last. Returns
+        the number."""
         self._given += 1
+        self._places[self._given] = account
         self._last[account] = self._given
         self._held[account] = self._held.get(account, 0) + 1
+        return self._given
 
-    def _give_back(self, account: Hashable) -> None:
-        """`account` gives one of its places back: it goes on at once to the waiting
-        answer the rule chooses, and is free when none waits. Awaits nothing."""
+    def _give_back(self, place: int) -> None:
+        """The place numbered `place` is given back: it goes on at once to the waiting
+        answer the rule chooses, and is free when none waits. Then each waiting answer
+        whose number that changed is told. Awaits nothing."""
+        account = self._places.pop(place)
         left = self._held[account] - 1
         if left:
             self._held[account] = left
         else:
             del self._held[account]
-        self._taken -= 1
         chosen = self._next()
         if chosen is not None:
             to, waiting = chosen
             self._out_of_line(to, waiting)
-            self._give(to)
-            waiting.passed.set_result(None)
+            waiting.passed.set_result(self._give(to))
         self._forget_the_absent()
+        self._tell()
 
     def _next(self) -> tuple[Hashable, _Waiting] | None:
-        """The waiting answer a place goes to, with its account: of the account that
-        holds the fewest places, then the one given a place the longest ago, nothing
-        remembered counting as longest, then the one whose answer came first. `None`
-        when nobody waits. An answer that was cancelled while it waited, and hasn't left
-        its line yet, waits no more."""
-        chosen: tuple[Hashable, _Waiting] | None = None
-        best: tuple[int, int, int] | None = None
-        for account, line in self._lines.items():
-            first = next((each for each in line if not each.passed.done()), None)
-            if first is None:
+        """The waiting answer a place goes to, with its account, by the rule
+        (`_chosen`). `None` when nobody waits."""
+        return _chosen(self._lines, self._held, self._last)
+
+    def _order(self) -> list[_Waiting]:
+        """The waiting answers in the order they would pass, by the rule played forward
+        from the gate as it stands: the places held come back in the order they were
+        given, each goes on to the waiting answer the rule chooses with the places held
+        and the last places as they would be then, and that answer holds the newest
+        place from then on. Nobody comes or leaves meanwhile. An answer that was
+        cancelled while it waited, and hasn't left its line yet, is in no order."""
+        lines = {
+            account: deque(each for each in line if not each.passed.done())
+            for account, line in self._lines.items()
+        }
+        held = dict(self._held)
+        last = dict(self._last)
+        given = self._given
+        # The accounts of the places held, the one given the longest ago first.
+        places = deque(self._places.values())
+        order: list[_Waiting] = []
+        while places:
+            held[places.popleft()] -= 1
+            chosen = _chosen(lines, held, last)
+            if chosen is None:
+                break
+            to, waiting = chosen
+            lines[to].popleft()  # the first of its line: none in these is cancelled
+            given += 1
+            last[to] = given
+            held[to] = held.get(to, 0) + 1
+            places.append(to)
+            order.append(waiting)
+        return order
+
+    def _tell(self) -> None:
+        """Tell each waiting answer that asked to be told how many answers have to end
+        before it starts, where that is another number than the one it was last told.
+        Nothing is played forward while none asked."""
+        if not self._to_tell:
+            return
+        for behind, waiting in enumerate(self._order(), start=1):
+            if waiting.placed is None or waiting.told == behind:
                 continue
-            # Places are numbered from 1: an account of which nothing is remembered is 0.
-            rank = (self._held.get(account, 0), self._last.get(account, 0), first.came)
-            if best is None or rank < best:
-                chosen, best = (account, first), rank
-        return chosen
+            waiting.told = behind
+            try:
+                waiting.placed(behind)
+            except Exception:
+                # Nothing of whose answer it is: the others are told all the same, and
+                # nothing reaches the task whose place was given back.
+                logger.exception("an answer that waits at a gate couldn't be told its number")
 
     def _out_of_line(self, account: Hashable, waiting: _Waiting) -> None:
         line = self._lines[account]
@@ -549,6 +622,8 @@ class Gate:
         if not line:
             del self._lines[account]
         self._waiting -= 1
+        if waiting.placed is not None:
+            self._to_tell -= 1
 
     def _forget_the_absent(self) -> None:
         """Whenever nobody waits: forget each account that holds no place."""
@@ -556,6 +631,32 @@ class Gate:
             self._last = {
                 account: last for account, last in self._last.items() if account in self._held
             }
+
+
+def _chosen(
+    lines: Mapping[Hashable, deque[_Waiting]],
+    held: Mapping[Hashable, int],
+    last: Mapping[Hashable, int],
+) -> tuple[Hashable, _Waiting] | None:
+    """The rule, written once: of each account's waiting answers in `lines`, with the
+    places each account holds (`held`) and the number of its last place (`last`), the one
+    a place that comes free goes to, with its account. Of the account that holds the
+    fewest places, then the one given a place the longest ago, nothing remembered
+    counting as longest, then the one whose answer came first. `None` when nobody waits.
+    An answer that was cancelled while it waited, and hasn't left its line yet, waits no
+    more. The gate asks it for the place given back (`Gate._next`), and for each place
+    as it plays the rule forward (`Gate._order`)."""
+    chosen: tuple[Hashable, _Waiting] | None = None
+    best: tuple[int, int, int] | None = None
+    for account, line in lines.items():
+        first = next((each for each in line if not each.passed.done()), None)
+        if first is None:
+            continue
+        # Places are numbered from 1: an account of which nothing is remembered is 0.
+        rank = (held.get(account, 0), last.get(account, 0), first.came)
+        if best is None or rank < best:
+            chosen, best = (account, first), rank
+    return chosen
 
 
 @dataclass(frozen=True, slots=True)

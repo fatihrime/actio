@@ -85,6 +85,23 @@ def said(response: httpx.Response) -> str:
     return "".join(c["delta"] for c in chunks(response)[:-1] if c["type"] == "text-delta")
 
 
+def waits_in(response: httpx.Response) -> list[int]:
+    """How many answers the stream said its turn waits behind, in order: each
+    `data-waits` chunk's, each of which is checked whole."""
+    said: list[int] = []
+    for each in chunks(response)[:-1]:
+        if each["type"] == "data-waits":
+            assert each == ui_stream.waits(each["data"]["behind"])
+            said.append(each["data"]["behind"])
+    return said
+
+
+def named(name: str) -> list[asyncio.Task[Any]]:
+    """The tasks of this process called `name`, as a turn that waits at a gate names the
+    one that hands on its number: `waits-<the turn's id>`."""
+    return [task for task in asyncio.all_tasks() if task.get_name() == name]
+
+
 class Chat:
     """One conversation, as a browser would hold it."""
 
@@ -1441,11 +1458,15 @@ async def test_a_turn_stopped_while_it_waits_ends_at_once_and_leaves_the_others_
     db: AsyncSession,
     clock: Any,
     caplog: pytest.LogCaptureFixture,
+    appended: Any,
 ) -> None:
     """Stop takes a turn out of the queue. Nothing was written, so nothing is kept or
     charged, and its model never hears of it. The answer ahead of it goes on, and the
     one behind it doesn't jump ahead. The log says how long the stopped one waited.
-    Each of the three is another guest's."""
+    Each of the three is another guest's.
+
+    Its stream said behind how many answers it waited, and never that its turn had
+    come: it ends as before, and nothing of the turn is left handing anything on."""
     assert migrated
     gate, hold = Gate(1), asyncio.Event()
     first = lineup.add(
@@ -1466,6 +1487,7 @@ async def test_a_turn_stopped_while_it_waits_ends_at_once_and_leaves_the_others_
     three = Chat(browser)
     asked_third = three.asking(model="third")
     await until(lambda: gate.waiting == 2)
+    await until(lambda: appended.waits(second_turn) == [1])
     clock.advance(seconds=20)
 
     # A stop answers once the turn is recorded: never, if the wait can't be ended.
@@ -1476,6 +1498,7 @@ async def test_a_turn_stopped_while_it_waits_ends_at_once_and_leaves_the_others_
     # very next step; the stop answers only after the stopped turn was recorded, which
     # takes the database several round trips after that, while other tasks run.
     behind = (gate.waiting, third.started.is_set(), first.closed.is_set())
+    left_handing_on = named(f"waits-{second_turn}")
     [second_reader] = await ended(asked_second)
     hold.set()
     first_reader, third_reader = await ended(asked_first, asked_third)
@@ -1487,7 +1510,16 @@ async def test_a_turn_stopped_while_it_waits_ends_at_once_and_leaves_the_others_
         in caplog.text
     )
     assert second.requests == []
-    assert kinds(second_reader) == ["start", "start-step", "finish-step", "finish", "[DONE]"]
+    assert kinds(second_reader) == [
+        "start",
+        "start-step",
+        "data-waits",
+        "finish-step",
+        "finish",
+        "[DONE]",
+    ]
+    assert waits_in(second_reader) == [1]  # and no 0
+    assert left_handing_on == []
     conversation = await two.read()
     assert [m["role"] for m in conversation["messages"]] == ["user"]
     assert (conversation["unanswered"]["status"], conversation["unanswered"]["credits"]) == (
@@ -1608,7 +1640,10 @@ async def test_the_reader_of_a_turn_that_waits_is_kept_connected_and_then_reads_
     _, waited = await ended(asked_first, asked_second)
 
     lines = waited.text.split("\n\n")
-    assert lines.index(": keep-alive") == 2  # after `start` and `start-step`
+    # After `start` and `start-step`, while it waits: before or after the line that says
+    # behind how many answers, which its turn hands on from a task of its own.
+    first_word = next(number for number, line in enumerate(lines) if '"text-start"' in line)
+    assert 2 <= lines.index(": keep-alive") < first_word
     assert said(waited) == "Second."
     assert kinds(waited)[-3:] == ["finish-step", "finish", "[DONE]"]
 
@@ -1621,9 +1656,11 @@ async def test_a_shutdown_ends_the_turns_that_wait_too_and_leaves_the_gate_free(
     lineup: Any,
     db: AsyncSession,
     caplog: pytest.LogCaptureFixture,
+    appended: Any,
 ) -> None:
     """The turn that writes is one guest's, and the turn that waits another's. The gate
-    keeps nothing of either afterwards."""
+    keeps nothing of either afterwards. The one that waits had said behind how many, and
+    never says that its turn has come."""
     assert migrated
     gate, never = Gate(1), asyncio.Event()
     first = lineup.add(
@@ -1643,6 +1680,8 @@ async def test_a_shutdown_ends_the_turns_that_wait_too_and_leaves_the_gate_free(
         two = Chat(browser)
         asked_second = two.asking(model="second")
         await until(lambda: gate.waiting == 1)
+        second_turn = await two.running_turn()
+        await until(lambda: appended.waits(second_turn) == [1])
         cookies = dict(browser.cookies)  # the second guest's
         # Leaving the block is the shutdown.
     first_reader, second_reader = await ended(asked_first, asked_second)
@@ -1657,6 +1696,10 @@ async def test_a_shutdown_ends_the_turns_that_wait_too_and_leaves_the_gate_free(
     assert f"turn {waited}: waited 0.0 s for the model's server, and didn't get its turn" in (
         caplog.text
     )
+    # It never got its turn, and its stream never said that it had.
+    assert waited == second_turn
+    assert waits_in(second_reader) == [1]
+    assert named(f"waits-{waited}") == []
 
     # The same server, behind the same gate, takes the next answer at once.
     second.script = [TextDelta("Asked again, and answered."), DONE]
@@ -1670,6 +1713,340 @@ async def test_a_shutdown_ends_the_turns_that_wait_too_and_leaves_the_gate_free(
     )
 
     assert (again.status_code, said(again)) == (200, "Asked again, and answered.")
+
+
+# --- What a turn that waits says of its place -----------------------------------------
+#
+# A turn that waits at its model's gate hands on to its readers how many answers have to
+# end before it starts, as the gate tells it, and that its turn has come: `data-waits`
+# (ADR 0023, revision "a turn says that it waits, and behind how many answers"). It hands
+# them on from a task of its own, so a test waits until each number is in the turn's
+# stream (`appended`) before it changes the line again: a number overtaken by the next
+# before it could be handed on is skipped.
+
+
+async def holding_a_place(
+    gate: Gate, account: str, passed: asyncio.Event, go: asyncio.Event
+) -> None:
+    """An answer of `account` that isn't a turn, as a title's: it passes the gate, says
+    so, and holds its place until it is let go."""
+    async with gate.passing(account):
+        passed.set()
+        await go.wait()
+
+
+NOT_AT_ONCE_S = 0.3
+"""How long a test looks at something that must not happen yet, before it lets it happen:
+a stop that has to wait for a number that is being handed on. A stop that didn't wait
+would answer within milliseconds, once its turn is recorded."""
+
+
+def handing_on_slowly(
+    monkeypatch: pytest.MonkeyPatch, behind: int
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """Have the chunk that says a turn waits behind `behind` answers take a while to
+    reach its stream: until the second event is set. The first is set once the chunk is
+    being handed on."""
+    handing_on, slow = asyncio.Event(), asyncio.Event()
+    append = TurnEvents.append
+    held = ui_stream.event(ui_stream.waits(behind))
+
+    async def slowly(events: TurnEvents, turn_id: uuid.UUID, event: bytes) -> bool:
+        if event == held:
+            handing_on.set()
+            await slow.wait()
+        return await append(events, turn_id, event)
+
+    monkeypatch.setattr(TurnEvents, "append", slowly)
+    return handing_on, slow
+
+
+async def test_a_turn_that_waits_says_behind_how_many_answers_and_then_that_its_turn_has_come(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    appended: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One answer at a time. A guest's answer is written, another guest's waits, and a
+    third guest asks: behind two. Once the first has ended, behind one; once the second
+    has, its turn has come, and its model is asked. That is all that is new in its
+    stream, between `start-step` and the answer's first chunk, and its log is as it was.
+    The turn that passed at once says nothing of it, and the one that waited behind one
+    says that, and then that its turn came."""
+    assert migrated
+    gate, first_hold, second_hold = Gate(1), asyncio.Event(), asyncio.Event()
+    first = lineup.add(
+        "standard", TextDelta("The first "), first_hold, TextDelta("answer."), DONE, gate=gate
+    )
+    second = lineup.add(
+        "second", TextDelta("The second "), second_hold, TextDelta("answer."), DONE, gate=gate
+    )
+    lineup.add("third", TextDelta("Mine, at last."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    asked_first = Chat(browser).asking()
+    await held(first)
+    await another_guest(browser)
+    asked_second = Chat(browser).asking(model="second")
+    await until(lambda: gate.waiting == 1)
+    await another_guest(browser)
+    mine = Chat(browser)
+    asked = mine.asking(model="third")
+    await until(lambda: gate.waiting == 2)
+    turn_id = await mine.running_turn()
+
+    await until(lambda: appended.waits(turn_id) == [2])
+    first_hold.set()
+    await held(second)
+    await until(lambda: appended.waits(turn_id) == [2, 1])
+    second_hold.set()
+    first_reader, second_reader, reader = await ended(asked_first, asked_second, asked)
+
+    assert kinds(reader) == [
+        "start",
+        "start-step",
+        "data-waits",
+        "data-waits",
+        "data-waits",
+        "text-start",
+        "text-delta",
+        "text-end",
+        "finish-step",
+        "finish",
+        "[DONE]",
+    ]
+    assert waits_in(reader) == [2, 1, 0]
+    assert said(reader) == "Mine, at last."
+    assert chunk(reader, "finish")["messageMetadata"]["turn"]["status"] == "completed"
+    assert waits_in(first_reader) == []
+    assert "data-waits" not in kinds(first_reader)
+    assert waits_in(second_reader) == [1, 0]
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith(f"turn {turn_id}: ")
+    ] == [f"turn {turn_id}: waited 0.0 s for the model's server"]
+
+
+async def test_a_turn_says_so_when_one_that_goes_before_it_comes(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, appended: Any
+) -> None:
+    """One answer at a time. A guest's first answer is written, and its second waits
+    behind it: one. Another account's first comes, which goes before the guest's second,
+    that account never having been given a place: two. Then one, and its turn."""
+    assert migrated
+    gate, hold = Gate(1), asyncio.Event()
+    first = lineup.add("standard", TextDelta("First "), hold, TextDelta("answer."), DONE, gate=gate)
+    lineup.add("second", TextDelta("Second answer."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    asked_first = Chat(browser).asking()
+    await held(first)
+    mine = Chat(browser)
+    asked = mine.asking(model="second")
+    await until(lambda: gate.waiting == 1)
+    turn_id = await mine.running_turn()
+    await until(lambda: appended.waits(turn_id) == [1])
+
+    theirs_passed, theirs_go = asyncio.Event(), asyncio.Event()
+    theirs = asyncio.create_task(holding_a_place(gate, "another account", theirs_passed, theirs_go))
+    await until(lambda: appended.waits(turn_id) == [1, 2])
+    hold.set()
+    await asyncio.wait_for(theirs_passed.wait(), PATIENCE_S)
+    await until(lambda: appended.waits(turn_id) == [1, 2, 1])
+    theirs_go.set()
+    _, reader = await ended(asked_first, asked)
+    await asyncio.wait_for(theirs, PATIENCE_S)
+
+    assert waits_in(reader) == [1, 2, 1, 0]
+    assert said(reader) == "Second answer."
+
+
+async def test_a_number_said_while_the_one_before_it_is_handed_on_is_dropped_when_the_turn_passes(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One answer at a time, held by this test as an account's of its own, and another
+    account's answer waits before the turn's: two. Handing that on takes a while. Then
+    the place goes on, which makes it one, and that one ends: the turn's turn has come
+    while the two is still being handed on. The two is handed on whole, and the one is
+    dropped: the stream says two, then that its turn has come, never a number after it,
+    and only then the answer."""
+    assert migrated
+    handing_on, slow = handing_on_slowly(monkeypatch, 2)
+    gate = Gate(1)
+    lineup.add("standard", TextDelta("At last."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    theirs_passed, theirs_go = asyncio.Event(), asyncio.Event()
+    async with asyncio.timeout(PATIENCE_S):
+        async with gate.passing("this test"):
+            theirs = asyncio.create_task(
+                holding_a_place(gate, "another account", theirs_passed, theirs_go)
+            )
+            await until(lambda: gate.waiting == 1)
+            asked = Chat(browser).asking()
+            await handing_on.wait()
+        await theirs_passed.wait()  # the turn is told one, while the two is handed on
+        theirs_go.set()
+        await theirs  # the turn passes
+        slow.set()
+        reader = await asked
+
+    assert waits_in(reader) == [2, 0]
+    assert kinds(reader)[:6] == [
+        "start",
+        "start-step",
+        "data-waits",
+        "data-waits",
+        "text-start",
+        "text-delta",
+    ]
+    assert said(reader) == "At last."
+
+
+async def test_a_turn_stopped_while_its_number_is_handed_on_waits_for_it_and_says_nothing_after(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One answer at a time, held by this test as an account's of its own: the turn waits
+    behind one, and handing that on takes a while. It is stopped meanwhile. The number
+    is handed on whole, before anything else of the turn: the stop, which answers once
+    the turn is recorded, waits for it. Then the stream ends as a stopped turn's does,
+    with the number in it and nothing after, and nothing of the turn is left handing
+    anything on."""
+    assert migrated
+    handing_on, slow = handing_on_slowly(monkeypatch, 1)
+    gate = Gate(1)
+    model = lineup.add("standard", TextDelta("Never written."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    chat = Chat(browser)
+    async with asyncio.timeout(PATIENCE_S), gate.passing("this test"):
+        asked = chat.asking()
+        await handing_on.wait()
+        turn_id = await chat.running_turn()
+        stopping = asyncio.create_task(chat.stop(turn_id))
+        await until(lambda: gate.waiting == 0)  # the stop has reached the turn
+        at_once, _ = await asyncio.wait({stopping}, timeout=NOT_AT_ONCE_S)
+        slow.set()
+        stopped = await stopping
+        left_handing_on = named(f"waits-{turn_id}")
+        reader = await asked
+
+    assert at_once == set()
+    assert stopped.json()["status"] == "stopped"
+    assert kinds(reader) == [
+        "start",
+        "start-step",
+        "data-waits",
+        "finish-step",
+        "finish",
+        "[DONE]",
+    ]
+    assert waits_in(reader) == [1]
+    assert left_handing_on == []
+    assert model.requests == []
+
+
+async def test_a_turn_stopped_once_it_passed_says_its_number_and_that_its_turn_came_first(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One answer at a time, held by this test as an account's of its own: the turn waits
+    behind one, and handing that on takes a while. Meanwhile the place comes free: the
+    turn has passed, and waits for the number under way before it says that its turn
+    has come, and before its model is asked. It is stopped then. The number is handed on
+    whole, and then that its turn came, before anything else of the turn: the stop waits
+    for both, and its model isn't asked meanwhile. The turn ends as stopped, and gives
+    its place back."""
+    assert migrated
+    handing_on, slow = handing_on_slowly(monkeypatch, 1)
+    gate, never = Gate(1), asyncio.Event()
+    model = lineup.add("standard", never, TextDelta("Never written."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    chat = Chat(browser)
+    async with asyncio.timeout(PATIENCE_S):
+        async with gate.passing("this test"):
+            asked = chat.asking()
+            await handing_on.wait()
+            turn_id = await chat.running_turn()
+        # The place went on to the turn as the test left: it has passed.
+        passed = (gate.full, gate.waiting)
+        stopping = asyncio.create_task(chat.stop(turn_id))
+        at_once, _ = await asyncio.wait({stopping}, timeout=NOT_AT_ONCE_S)
+        asked_meanwhile = model.started.is_set()
+        slow.set()
+        stopped = await stopping
+        left_handing_on = named(f"waits-{turn_id}")
+        reader = await asked
+
+    assert passed == (True, 0)
+    assert at_once == set()
+    assert not asked_meanwhile
+    assert stopped.json()["status"] == "stopped"
+    assert kinds(reader) == [
+        "start",
+        "start-step",
+        "data-waits",
+        "data-waits",
+        "finish-step",
+        "finish",
+        "[DONE]",
+    ]
+    assert waits_in(reader) == [1, 0]
+    assert left_handing_on == []
+    assert said(reader) == ""
+    assert (gate.full, gate.waiting, gate.accounts) == (False, 0, 0)
+
+
+async def test_whoever_joins_a_turn_that_waits_reads_behind_how_many_from_the_first_number_on(
+    start_app: Any,
+    settings: Settings,
+    migrated: str,
+    lineup: Any,
+    appended: Any,
+    following: list[uuid.UUID],
+) -> None:
+    """The turn's stream holds what it said from its start: someone who joins it while it
+    waits behind one reads that it waited behind two first, as its own reader did."""
+    assert migrated
+    gate = Gate(1)
+    lineup.add("standard", TextDelta("At last."), DONE, gate=gate)
+    browser = await guest_on(start_app, settings, lineup)
+    chat = Chat(browser)
+    theirs_passed, theirs_go = asyncio.Event(), asyncio.Event()
+    async with asyncio.timeout(PATIENCE_S):
+        async with gate.passing("this test"):
+            theirs = asyncio.create_task(
+                holding_a_place(gate, "another account", theirs_passed, theirs_go)
+            )
+            await until(lambda: gate.waiting == 1)
+            asked = chat.asking()
+            await until(lambda: gate.waiting == 2)
+            turn_id = await chat.running_turn()
+            await until(lambda: appended.waits(turn_id) == [2])
+        await theirs_passed.wait()
+        await until(lambda: appended.waits(turn_id) == [2, 1])
+
+        joined = chat.reading_along(turn_id)
+        # Its own reader, and the one who joined.
+        await until(lambda: following.count(uuid.UUID(turn_id)) == 2)
+        theirs_go.set()
+        reader, joiner = await ended(asked, joined)
+        await theirs
+
+    assert joiner.status_code == 200
+    assert waits_in(joiner) == [2, 1, 0]
+    assert joiner.text == reader.text
+    assert said(joiner) == "At last."
 
 
 # --- Answers at once, per account -----------------------------------------------------

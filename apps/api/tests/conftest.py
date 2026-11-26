@@ -4,6 +4,7 @@ The Postgres and Valkey servers come from the conftest.py at the repository's ro
 """
 
 import asyncio
+import json
 import os
 import uuid
 from collections.abc import (
@@ -48,6 +49,7 @@ from actio.catalog import (
     budget_of,
 )
 from actio.chat import running as turn_runner
+from actio.chat.events import TurnEvents
 from actio.core import jobs, schema
 from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
@@ -751,6 +753,42 @@ def asks_ended() -> AsksEnded:
     catalog's task called `status-<the model's name>`. The test fails after five
     seconds."""
     return _asks_ended
+
+
+class Appended:
+    """What turns have added to their streams, each event once it is there, in the order
+    added: for a test that waits until a turn has said something before it goes on, such
+    as a number a turn waits behind at a gate, which it hands on from a task of its own.
+    The first event, `start`, is not among them: it opens the stream."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, bytes]] = []
+        """Each event, with the id of its turn."""
+
+    def waits(self, turn_id: object) -> list[int]:
+        """How many answers the turn called `turn_id` said it waits behind, in the order
+        said: each `data-waits` chunk of its stream so far."""
+        said = []
+        for turn, event in self.events:
+            if turn == str(turn_id) and b'"type":"data-waits"' in event:
+                said.append(json.loads(event.removeprefix(b"data: "))["data"]["behind"])
+        return said
+
+
+@pytest.fixture
+def appended(monkeypatch: pytest.MonkeyPatch) -> Appended:
+    """What turns add to their streams from now on (`Appended`), noted once Valkey has
+    taken each."""
+    noted = Appended()
+    append = TurnEvents.append
+
+    async def noting(events: TurnEvents, turn_id: uuid.UUID, event: bytes) -> bool:
+        added = await append(events, turn_id, event)
+        noted.events.append((str(turn_id), event))
+        return added
+
+    monkeypatch.setattr(TurnEvents, "append", noting)
+    return noted
 
 
 class Offer(Protocol):

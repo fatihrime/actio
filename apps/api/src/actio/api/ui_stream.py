@@ -1,10 +1,14 @@
 """The format a browser's chat library reads: the AI SDK's "UI message stream", version 1.
 
 It is a stream of server-sent events. Each event is one JSON object, a "chunk", on a
-`data:` line, and the stream ends with `data: [DONE]`. For an answer that reasons first:
+`data:` line, and the stream ends with `data: [DONE]`. For an answer that waited its
+turn at its model's gate, and reasons first:
 
     data: {"type":"start","messageId":"…","messageMetadata":{…}}
     data: {"type":"start-step"}
+    data: {"type":"data-waits","id":"waits","data":{"behind":2}}
+    data: {"type":"data-waits","id":"waits","data":{"behind":1}}
+    data: {"type":"data-waits","id":"waits","data":{"behind":0}}
     data: {"type":"reasoning-start","id":"reasoning-0"}
     data: {"type":"reasoning-delta","id":"reasoning-0","delta":"…"}
     data: {"type":"reasoning-end","id":"reasoning-0"}
@@ -16,9 +20,12 @@ It is a stream of server-sent events. Each event is one JSON object, a "chunk", 
     data: {"type":"finish","finishReason":"stop","messageMetadata":{…}}
     data: [DONE]
 
-The `data-usage-warning` line is there only when the answer took its account past a
-share of a usage limit. The names and fields were read from version 7.0.169 of the `ai`
-package. A test in
+The `data-waits` lines are there only for a turn that waited at a model's gate: how many
+answers have to end before it starts, each time that changed, and 0 once its turn has
+come. Each has the same `id`, so the library keeps one part of the message for them,
+whose `data` the next one replaces. The `data-usage-warning` line is there only when the
+answer took its account past a share of a usage limit. The names and fields were read
+from version 7.0.166 of the `ai` package. A test in
 `apps/web` parses recorded streams with that package itself, so a chunk it wouldn't
 accept fails there.
 
@@ -32,7 +39,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from actio.chat.answering import Closed, Opened, Step
+from actio.chat.answering import Closed, Opened, Step, Waits
 
 MEDIA_TYPE = "text/event-stream"
 
@@ -99,8 +106,26 @@ def usage_warning(window: str, percent: int) -> dict[str, Any]:
     }
 
 
-def for_step(step: Step) -> dict[str, str]:
-    """The chunk for one step of an answer: a part opens, grows, or closes."""
+WAITS_ID = "waits"
+"""The `id` of every `data-waits` chunk of a turn: one part of the message holds them."""
+
+
+def waits(behind: int) -> dict[str, Any]:
+    """The chunk that says how many answers have to end before the turn's answer starts:
+    `behind`, 1 or more while it waits at its model's gate, and 0 once its turn has come.
+
+    A data part of Actio's own, and not `transient`: the library keeps it in the message,
+    and with the same `id` each time it replaces the one part's `data`. So whoever reads
+    the stream, from its start whenever they began, ends with the newest.
+    """
+    return {"type": "data-waits", "id": WAITS_ID, "data": {"behind": behind}}
+
+
+def for_step(step: Step) -> dict[str, Any]:
+    """The chunk for one step of an answer: the turn waits at a gate, or a part opens,
+    grows, or closes."""
+    if isinstance(step, Waits):
+        return waits(step.behind)
     part = f"{step.kind}-{step.number}"
     if isinstance(step, Opened):
         return {"type": f"{step.kind}-start", "id": part}
