@@ -39,9 +39,12 @@ export interface Reached {
 
 /** What a refusal says about a usage limit, if it is about one.
  *
- * A 429 that names no window is the limit on how often something is tried. One that
- * names a window but no time to wait is a question too large for the plan: waiting
- * doesn't help it, so it is no limit to wait out. */
+ * A 429 that names no window is no usage limit. Of a question, it is one of three: too
+ * many messages in a short time, the limit on how often something is tried (ADR 0011);
+ * too many answers being written at once (ADR 0023); or no model with budget left for
+ * the question (ADR 0030), whose wait the chat counts down (`refusedForNow` in
+ * `lib/chat/outcomes.ts`). One that names a window but no time to wait is a question
+ * too large for the plan: waiting doesn't help it, so it is no limit to wait out. */
 export function reachedBy(error: unknown, now: number): Reached | null {
   if (!(error instanceof ApiProblem) || error.status !== 429) {
     return null;

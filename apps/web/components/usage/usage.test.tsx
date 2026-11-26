@@ -434,9 +434,9 @@ describe("a usage limit that is reached", () => {
 
   it("isn't taken for no model having budget left for the question", async () => {
     // What the API says then (`no_budget.json`): a time to wait and the model asked,
-    // and no window. The installation's providers are at their limits, not the plan.
-    const noBudget =
-      "No model can take this message right now: this installation has reached the limits of its models' providers. Try again in 60 seconds.";
+    // and no window. The installation's providers are at their limits, not the plan:
+    // the chat counts that wait down itself (components/chat/refused-for-now.test.tsx).
+    clockAt();
     const api = fakeApi()
       .on(TURNS, () => refused("no_budget.json"))
       .on(CONVERSATION, missing);
@@ -444,14 +444,14 @@ describe("a usage limit that is reached", () => {
 
     await ask(user, "Why is the sky blue?");
 
-    // In the API's words, as that question's own problem: nothing counts down, and
-    // the question can be sent again at once.
-    expect(await screen.findByText(noBudget)).toBeInTheDocument();
+    expect(
+      await screen.findByText("No model can take this message right now."),
+    ).toBeInTheDocument();
     await backInTheBox("Why is the sky blue?");
+    // Nothing of a usage limit is said, and the question can be sent again at once.
     expect(screen.queryByText(/usage limit/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("timer")).not.toBeInTheDocument();
     expect(send()).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    expect(send()).not.toHaveAttribute("title");
     expect(api.to(TURNS)).toHaveLength(1);
   });
 });

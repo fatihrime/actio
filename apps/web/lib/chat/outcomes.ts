@@ -1,4 +1,5 @@
-// How a turn ended, and what went wrong with a request, in words for a person.
+// How a turn ended, and what went wrong with a request, in words for a person, and how
+// long a question refused for now waits.
 import { ApiProblem } from "@/lib/api/client";
 import type { Model, Turn } from "@/lib/api/client";
 
@@ -120,6 +121,32 @@ export function explain(error: unknown): string {
     return error.message;
   }
   return "Actio's server can't be reached. Check that it is running, and your connection.";
+}
+
+/** When the wait that a refusal for now asks for is over, by this browser's clock, if
+ * `error` is one; nothing otherwise. That is the API's 429 of a question that no model
+ * with room for it has budget left for, by Actio's count of what its models' providers
+ * take (ADR 0030, revision of 2026-11-26): it names the model asked and how long to
+ * wait, and no window. A usage limit names a window, too many messages names no model,
+ * and too many answers at once no wait.
+ *
+ * `now` is the moment the refusal arrived, and the wait is counted from there, as a
+ * usage limit's is (`reachedBy` in `lib/usage.ts`): this browser's clock may be wrong by
+ * minutes, and the length of a wait is the same on every clock. */
+export function refusedForNow(error: unknown, now: number): number | null {
+  if (!(error instanceof ApiProblem) || error.status !== 429) {
+    return null;
+  }
+  const { window: named, model } = error.problem;
+  const wait = error.retryAfter;
+  if (
+    (named !== undefined && named !== null) ||
+    typeof model !== "string" ||
+    wait === undefined
+  ) {
+    return null;
+  }
+  return now + wait * 1000;
 }
 
 /** Whether an error means the session is gone, so nothing will work until a new one

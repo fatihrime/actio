@@ -25,6 +25,7 @@ import {
   isSessionEnd,
   notReady,
   outcomeOf,
+  refusedForNow,
 } from "@/lib/chat/outcomes";
 import { keepPlace, placeLeft } from "@/lib/chat/places";
 import type { Spot } from "@/lib/chat/places";
@@ -39,6 +40,7 @@ import { Composer } from "./composer";
 import { ContextMeter } from "./context-meter";
 import { useFollow } from "./follow";
 import { fetchRenderer, Message, ModelsOnOffer, Waiting } from "./message";
+import { RefusedForNow } from "./refused-for-now";
 import { useSettled } from "./settled";
 
 const SETUP_GUIDE = "https://fatihrime.github.io/actio/getting-started/#models";
@@ -165,6 +167,11 @@ async function readConversation(id: string): Promise<Conversation | null> {
  * meanwhile, unless a model that costs nothing was chosen to carry on with. And so is
  * how much of the model's window the conversation takes, which the line under the box
  * says of the model that answers, or of one that stands in for it (`ContextMeter`).
+ *
+ * A question refused for now, when no model that could answer it has budget left for
+ * it, is that question's own problem: the page counts its wait down above the box
+ * (`RefusedForNow`), and neither keeps a question from being sent meanwhile nor sends
+ * one by itself when the wait is over.
  */
 export function Chat({
   id,
@@ -269,6 +276,10 @@ export function Chat({
   const [exists, setExists] = useState(stored !== null);
   const [text, setText] = useState("");
   const [problem, setProblem] = useState<unknown>(null);
+  // A refusal for now, and when the wait it asks for is over, by this browser's clock.
+  // It is said for as long as that refusal is the `problem`: whatever takes the
+  // problem's place, or clears it, takes the wait's too.
+  const [wait, setWait] = useState<{ of: unknown; until: number } | null>(null);
   // The error that broke off a reading after it had begun. The server had the turn
   // by then, and the page reads along with it again (`resync`): once it does, the
   // notice of the break is no longer true.
@@ -409,6 +420,12 @@ export function Chat({
       ) {
         setProblem(error);
         reported.current = error;
+        // A refusal for now says how long to wait, counted from now, the moment it
+        // arrived. The newer wait takes the place of an older one.
+        const until = refusedForNow(error, Date.now());
+        if (until !== null) {
+          setWait({ of: error, until });
+        }
       }
     },
     onData: (part) => {
@@ -726,6 +743,10 @@ export function Chat({
         : unready !== null
           ? "The model can't answer right now."
           : null;
+  // The wait of the refusal for now that is the problem on the page, if it is one. A
+  // wait whose refusal another problem, or none, has taken the place of is no longer
+  // said, and its end changes nothing.
+  const waiting = wait !== null && wait.of === problem ? wait : null;
 
   return (
     // What an answer took names the model that wrote it by its title, when another than
@@ -855,27 +876,49 @@ export function Chat({
         </button>
       </div>
       <div className="mx-auto w-full max-w-3xl space-y-3 px-4 pb-4">
-        {problem !== null && (
-          <Notice
-            tone="warning"
-            actions={
-              isSessionEnd(problem) ? (
-                <NoticeButton onClick={onStartOver}>
-                  Start a new session
-                </NoticeButton>
-              ) : (
-                <NoticeButton
-                  onClick={() => {
-                    setProblem(null);
-                  }}
-                >
-                  Dismiss
-                </NoticeButton>
-              )
-            }
-          >
-            {explain(problem)}
-          </Notice>
+        {/* In the place of the problem's notice, and instead of the API's words, whose
+            "in 60 seconds" would stand still beside a time that counts down. */}
+        {waiting !== null ? (
+          <RefusedForNow
+            until={waiting.until}
+            onDismiss={() => {
+              setProblem(null);
+              // Where the refused question waits.
+              box.current?.focus();
+            }}
+            onOver={(hadKeyboard) => {
+              setProblem((current: unknown) =>
+                current === waiting.of ? null : current,
+              );
+              // The button the keyboard was on is gone with the notice.
+              if (hadKeyboard) {
+                box.current?.focus();
+              }
+            }}
+          />
+        ) : (
+          problem !== null && (
+            <Notice
+              tone="warning"
+              actions={
+                isSessionEnd(problem) ? (
+                  <NoticeButton onClick={onStartOver}>
+                    Start a new session
+                  </NoticeButton>
+                ) : (
+                  <NoticeButton
+                    onClick={() => {
+                      setProblem(null);
+                    }}
+                  >
+                    Dismiss
+                  </NoticeButton>
+                )
+              }
+            >
+              {explain(problem)}
+            </Notice>
+          )
         )}
         {usage.reached !== null && (
           <LimitReached

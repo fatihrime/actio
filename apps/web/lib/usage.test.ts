@@ -45,6 +45,15 @@ describe("reachedBy", () => {
     expect(reachedBy(tooOften, NOW)).toBeNull();
   });
 
+  it("takes no model having budget left for a question for no usage limit", () => {
+    // The API's refusal then: a wait and the model asked, and no window.
+    const noBudget = new ApiProblem(
+      JSON.parse(recorded("no_budget.json")) as Problem,
+    );
+
+    expect(reachedBy(noBudget, NOW)).toBeNull();
+  });
+
   it("doesn't wait out a question that is too large for the plan", () => {
     const tooLarge = refusal({ retry_after: undefined, resets_at: null });
 

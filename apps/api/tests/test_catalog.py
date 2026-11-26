@@ -196,14 +196,37 @@ def test_the_file_of_the_end_to_end_stack_offers_the_fake_under_the_same_name() 
     # A window of its own, so that the test tells whose window the page divides by.
     assert away.context_window != standard.context_window
     assert (nowhere.kind, nowhere.url) == ("openai-compatible", "http://fakellm:8101/v1")
+    # And the fake once more, with a budget of one request a minute, so that a test sees a
+    # question refused for now (apps/web/e2e/no-budget.spec.ts). On a provider of its own
+    # at the fake's address: on the fake's, it would share a budget with the models that
+    # are the same model there, and they would have to state the same figures.
+    rationed = file.models["rationed"]
+    assert rationed.model == standard.model
+    assert file.providers[rationed.provider].url == provider.url
+    assert rationed.provider not in {
+        model.provider for name, model in file.models.items() if name != "rationed"
+    }
+    assert rationed.stated == {
+        "requests_a_minute": 1,
+        "requests_a_day": None,
+        "tokens_a_minute": None,
+        "tokens_a_day": None,
+    }
     assert {
         name: (entry.answers_within_seconds, entry.timeouts.answer_s)
         for name, entry in file.providers.items()
-    } == {standard.provider: (None, 300), hurried.provider: (3, 3), away.provider: (None, 300)}
+    } == {
+        standard.provider: (None, 300),
+        hurried.provider: (3, 3),
+        away.provider: (None, 300),
+        rationed.provider: (None, 300),
+    }
     # The fake takes any number of tokens a minute: no model's room is less than its window.
-    # Nor does it limit anything else: no model has a budget.
+    # Nor does it limit anything else: no other model has a budget.
     assert {model.tokens_a_minute for model in file.models.values()} == {None}
-    assert {tuple(model.stated.values()) for model in file.models.values()} == {(None,) * 4}
+    assert {
+        tuple(model.stated.values()) for name, model in file.models.items() if name != "rationed"
+    } == {(None,) * 4}
 
 
 async def test_the_example_that_offers_free_cloud_models_opens_with_their_keys(

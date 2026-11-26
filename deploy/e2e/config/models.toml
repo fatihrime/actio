@@ -1,5 +1,6 @@
-# The models the end-to-end test stack offers (`make e2e`): the fake, under four names,
-# and a fifth model whose server isn't there, which the fake stands in for.
+# The models the end-to-end test stack offers (`make e2e`): the fake, under five names,
+# one of them with a budget of one request a minute, and a sixth model whose server
+# isn't there, which the fake stands in for.
 #
 # compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API and
 # the worker read this file in place of config/models.toml. "standard" is the same name
@@ -36,6 +37,14 @@ answers_within_seconds = 3
 [providers.nowhere]
 kind = "openai-compatible"
 url = "http://fakellm:8101/v1"
+
+# The same fakellm container once more, for the model with a budget below. A provider of
+# its own: on "fake", that model would share one budget with "standard" and "local",
+# which are the same model there, and the three would have to state the same figures.
+# Nothing else is asked here.
+[providers.fake-rationed]
+kind = "openai-compatible"
+url = "http://fakellm:8100/v1"
 
 [models.standard]
 title = "Fake model"
@@ -91,3 +100,19 @@ context_window = 4096
 max_output_tokens = 2048
 thinking = false
 then = ["standard"]
+
+# The fake on the provider above, with a budget of one request a minute, of which Actio
+# keeps the one: a question asked within a minute of the last one sent to it is refused
+# for now, and the page counts the wait down (apps/web/e2e/no-budget.spec.ts). The page
+# has no way to choose it: a test gives each of its questions this model's name on its
+# way out, as for "away". The count is kept in the stack's Valkey, for a minute, so a
+# test meets it as the last one left it. Priced like "standard" (plans.toml), so that it
+# isn't offered at a limit either.
+[models.rationed]
+title = "Rationed"
+provider = "fake-rationed"
+model = "fake-chat"
+context_window = 8192
+max_output_tokens = 2048
+thinking = false
+requests_a_minute = 1

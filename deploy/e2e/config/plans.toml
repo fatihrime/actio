@@ -45,6 +45,12 @@ output = 1_000_000
 input = 1_000_000
 output = 1_000_000
 
+# The fake with a budget of one request a minute (models.toml): priced like "standard",
+# for the same reason.
+[prices.rationed]
+input = 1_000_000
+output = 1_000_000
+
 # Two answers at once, as people get: apps/web/e2e/turns.spec.ts asks for a third.
 [plans.guest]
 title = "Guest"
