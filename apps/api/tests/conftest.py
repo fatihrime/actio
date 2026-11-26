@@ -46,7 +46,7 @@ from actio.core.settings import Settings
 from actio.identity.passwords import Passwords
 from actio.usage.plans import Plans, PlansFile
 from actio_fakellm.app import create_app as create_fake_llm
-from actio_llm import ChatProvider, ChatRequest, StreamEvent
+from actio_llm import Breaker, ChatProvider, ChatRequest, StreamEvent
 
 # For tests that never reach a database: nothing listens on port 1.
 NOWHERE_DATABASE = "postgresql://actio:unused@127.0.0.1:1/actio"
@@ -549,12 +549,17 @@ class Lineup:
 
     Each is on a provider called `scripted`, as `scripted-<its name>`, unless a test
     gives it another name there (`on_server`): two models with the same name there that
-    each have a budget share it, as two models of a models file do."""
+    each have a budget share it, as two models of a models file do, and they share one
+    breaker, whether or not they have a budget.
+
+    The models keep their breakers for as long as the lineup lives: every catalog it
+    gives has the same ones, which a test reads through `catalog().get(name).breaker`."""
 
     def __init__(self) -> None:
         self._offered: dict[str, OfferedModel] = {}
         self._thinking: dict[str, bool] = {}
         self._states: dict[str, State] = {}
+        self._breakers: dict[str, Breaker] = {}
 
     def add(
         self,
@@ -614,7 +619,8 @@ class Lineup:
         `budget` gives it a budget, from what a models file would state of its
         provider's limits, such as `{"requests_a_day": 10}`: each figure is kept as the
         catalog keeps it (`actio.catalog.budget_of`). `on_server` is its name on its
-        server, `scripted-<name>` unless given."""
+        server, `scripted-<name>` unless given, and the models with one name there share
+        one breaker."""
         model = on_server or f"scripted-{name}"
         self._offered[name] = OfferedModel(
             name=name,
@@ -628,6 +634,7 @@ class Lineup:
             then=tuple(then),
             tokens_a_minute=tokens_a_minute,
             budget=None if budget is None else budget_of(SCRIPTED, model, budget),
+            breaker=self._breakers.setdefault(model, Breaker()),
         )
         self._thinking[name] = thinking
         self._states[name] = state

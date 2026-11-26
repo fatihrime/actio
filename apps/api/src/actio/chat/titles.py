@@ -9,8 +9,10 @@ over the first line, unless a person has renamed the conversation meanwhile. Whe
 model can't answer, those that stand in for it are asked in its place, as for a turn,
 and as for a turn a model whose failure may be gone in a moment is asked once more
 first, one whose room is too small for the request is passed over while another's
-isn't, and one whose budget has nothing left for it is asked after those that have
-some. What a title's request takes of a model's budget counts as a turn's does.
+isn't, one whose budget has nothing left for it is asked after those that have some,
+and one that keeps failing is asked after those that don't. What a title's request
+takes of a model's budget counts as a turn's does, and so does what its tries say of
+whether a model keeps failing.
 
 Who named a conversation is on its row (`Conversation.title_by`): `question`, `model`,
 or `person`. Only `write` makes a `question` a `model`, and nothing writes over a
@@ -45,7 +47,7 @@ from functools import partial
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from actio.catalog import Catalog, OfferedModel, counted
+from actio.catalog import Catalog, OfferedModel, asked_through
 from actio.chat import tree
 from actio.chat.models import Conversation
 from actio.chat.parts import Part, TextPart, from_stored
@@ -390,7 +392,10 @@ async def _ask(
     is asked, the log names each with its wait, and the title is asked for again later,
     by the job's own waits. A look that can't be had refuses nothing, and has nobody
     asked last, and the log says that too. What each request takes of a model's budget
-    is counted there, as a turn's is (`actio.catalog.counted`)."""
+    is counted there, as a turn's is. Within each of those groups, a model whose breaker
+    says it keeps failing is asked after those that don't, and the log says each that
+    this moved, as a turn's does; it refuses nothing. Each try of a model is recorded in
+    its breaker, as a turn's is (`actio.catalog.asked_through`, ADR 0031)."""
     try:
         async with asyncio.timeout(WRITTEN_WITHIN_S):
             chain = await catalog.chain_status(offered.name, now=now)
@@ -424,7 +429,9 @@ async def _ask(
                 unread = None
             except BudgetsUnavailableError as error:
                 spent, unread = {}, type(error.__cause__).__name__
-            asked = chain.asked_with(tokens, spent)
+            # As for a turn: within each of those, one that keeps failing is asked after
+            # those that don't, by their breakers now, and that refuses nothing.
+            asked = chain.asked_with(tokens, spent, chain.failing(now))
             for passed in asked.too_small:
                 logger.warning(
                     "conversation %s: model %s has room for %d tokens, and the request is"
@@ -460,11 +467,27 @@ async def _ask(
                     short.seconds,
                     short.limit,
                 )
+            for passed, failing in asked.failing:
+                if failing.wait is None:
+                    logger.warning(
+                        "conversation %s: model %s is failing, and it is asked after models"
+                        " that aren't while one request tries it",
+                        conversation_id,
+                        passed.name,
+                    )
+                else:
+                    logger.warning(
+                        "conversation %s: model %s is failing, and for about %d s more it is"
+                        " asked after models that aren't",
+                        conversation_id,
+                        passed.name,
+                        failing.seconds,
+                    )
             walk = Walk(
                 [
                     Link(
                         model.name,
-                        counted(model, budgets, tokens, clock),
+                        asked_through(model, budgets, tokens, clock),
                         ChatRequest(
                             model=model.model,
                             messages=messages,

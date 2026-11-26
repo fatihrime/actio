@@ -158,7 +158,7 @@ class Walk:
                                     raise
                                 failed = error
                             else:
-                                if not answered and _hands_on(event):
+                                if not answered and hands_on(event):
                                     answered = True
                                     self.answered = link
                                 yield event
@@ -189,7 +189,7 @@ def _asked_again_after(error: LLMError) -> float | None:
     return None
 
 
-def _hands_on(event: StreamEvent) -> bool:
+def hands_on(event: StreamEvent) -> bool:
     """Whether an event gives a reader something: every event but a piece of text or of
     reasoning with no text in it."""
     if isinstance(event, TextDelta | ReasoningDelta):

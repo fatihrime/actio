@@ -16,9 +16,13 @@ what to call it at its provider, its limits, and the client to stream an answer 
   passed over while another has room (`OfferedModel.room`, ADR 0029), and then a model
   whose provider's plan has nothing left for the request, by what `Chain.look` read of
   its budget, is asked after those that have some (`OfferedModel.budget`, ADR 0030).
-  When none of those with room has any, the request is refused for now.
-- `counted` gives the client a model is asked through, which counts in its budget what
-  each request takes of it.
+  When none of those with room has any, the request is refused for now. Within each of
+  those two groups, a model that keeps failing, by what `Chain.failing` read of its
+  breaker, is asked after those that don't (`OfferedModel.breaker`, ADR 0031): that
+  never refuses anything.
+- `asked_through` gives the client a model is asked through: one that records each try
+  in the model's breaker, around the one `counted` gives, which counts in its budget
+  what each request takes of it.
 - `Catalog.load_ahead` has a model's server load it into memory before the first
   question to it, where the server can be asked to (ADR 0026): the model itself, never
   one that stands in for it.
@@ -34,9 +38,9 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import AsyncExitStack, aclosing, asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -57,9 +61,13 @@ from actio.core.budget import Bucket, Budgets, BudgetsUnavailableError, Counts, 
 from actio.core.config_file import Name
 from actio.core.settings import Settings
 from actio_llm import (
+    FOR_NOW,
+    Breaker,
+    Change,
     ChatProvider,
     ChatRequest,
     ConnectionFailedError,
+    Failing,
     Finish,
     LLMError,
     LoadsAhead,
@@ -70,8 +78,11 @@ from actio_llm import (
     StreamEvent,
     TextDelta,
     Timeouts,
+    TookTooLongError,
+    hands_on,
     tokens_in,
 )
+from actio_llm.breaker import Closed, Opened, OpenedAgain
 from actio_llm.openai_compatible import OWN_MEMBERS
 
 logger = logging.getLogger(__name__)
@@ -454,6 +465,13 @@ class OfferedModel:
     request is refused for now (`Chain.look`, `Chain.asked_with`). What each request to
     it takes is counted there (`counted`). `None`: the models file states none of its
     limits, and nothing is counted."""
+    breaker: Breaker = field(default_factory=Breaker, compare=False, repr=False)
+    """Whether it keeps failing, from each try of it that ended (ADR 0031): a ready model
+    whose breaker says so is asked after the models of its chain that aren't failing,
+    within each group of the budget's rule, and never refused for it (`Chain.failing`,
+    `Chain.asked_with`). Each try of it is recorded there (`asked_through`). Kept in the
+    process, and shared by two models of the file that are one model on one provider,
+    as a budget is. A new one for each model on offer unless given."""
 
     @property
     def room(self) -> int:
@@ -501,7 +519,8 @@ class Asked:
 
     models: tuple[tuple[OfferedModel, ModelStatus], ...]
     """Those to ask, in this order, each with its status: ready, all of them. Those
-    with budget first, then those without, each in the chain's order. Empty when the
+    with budget first, then those without; in each of the two, those that aren't
+    failing first and then those that are, each in the chain's order. Empty when the
     request is refused (`refused`), and when no model of the chain is ready."""
     too_small: tuple[OfferedModel, ...]
     """Those that are ready and are passed over, their room smaller than the request,
@@ -518,6 +537,13 @@ class Asked:
     of two as short, the first in the chain's order. `None` when it is asked, which it
     is too when no ready model has room for it, and also when no model of the chain is
     ready, which refuses nothing here."""
+    failing: tuple[tuple[OfferedModel, Failing], ...] = ()
+    """The models that are asked later than they would be if no model were failing, in
+    the order they are asked, each with what its breaker said: each failing model asked
+    after a model that the order without breakers has after it. A failing model left
+    where it was isn't named: a chain's only model, one of a chain whose every model
+    asked is failing, one that was last already, or one that its budget alone put last,
+    which `spent` names. Empty when the request is refused."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -568,11 +594,25 @@ class Chain:
                 spent[offered.name] = Spent(wait, limit)
         return spent
 
-    def asked_with(self, tokens: int, spent: Mapping[str, Spent]) -> Asked:
+    def failing(self, now: datetime) -> dict[str, Failing]:
+        """The ready models of the chain whose breaker says that they are failing at
+        `now`, by their names, each with what it says (ADR 0031). A model that isn't
+        ready is never among them. Asks nobody anything."""
+        found: dict[str, Failing] = {}
+        for offered, _ in self.ready:
+            said = offered.breaker.failing(now)
+            if said is not None:
+                found[offered.name] = said
+        return found
+
+    def asked_with(
+        self, tokens: int, spent: Mapping[str, Spent], failing: Mapping[str, Failing]
+    ) -> Asked:
         """Which of the ready models are asked for a request of about `tokens`, a guess
         at its prompt, in which order, and which are passed over for their room (ADR
         0029); or that the request is refused for now, when no model with room for it
-        has budget left for it, which `spent` says (`look`, ADR 0030).
+        has budget left for it, which `spent` says (`look`, ADR 0030). `failing` says
+        which models keep failing (`failing`, ADR 0031), and changes only the order.
 
         The room first. A model has room when `tokens` is no larger than its `room`.
         While at least one ready model has room, those that haven't are passed over;
@@ -592,6 +632,14 @@ class Chain:
           by the guess is asked all the same, and its model's own answer about its size
           is truer than a wait. A guess never refuses a request.
 
+        Then the breakers, within each group the budget's rule made: those with budget,
+        those without, or every ready model when none has room nor budget. Of each, the
+        models that `failing` doesn't name are asked first, and those it names after
+        them, each in the chain's order. A failing model with budget is asked before a
+        model without, whatever that one's breaker says. It never refuses a request,
+        and never keeps one from being refused: a failing model counts for the budget's
+        rule as any other does. `Asked.failing` names those it moved.
+
         A model passed over for its room is not also said to be without budget, and its
         wait is never the refusal's. A model that isn't ready is passed over whatever its
         room or its budget, and never counts as one that has either, nor as one whose
@@ -605,12 +653,41 @@ class Chain:
         unbudgeted = tuple((offered, status) for offered, status in left if offered.name in spent)
         over = tuple((offered, spent[offered.name]) for offered, _ in unbudgeted)
         if budgeted:
-            return Asked((*budgeted, *unbudgeted), too_small, over)
+            unmoved = (*budgeted, *unbudgeted)
+            asked = (*_failing_last(budgeted, failing), *_failing_last(unbudgeted, failing))
+            return Asked(asked, too_small, over, failing=_moved(unmoved, asked, failing))
         if roomy:
             # Of two as short, the first in the chain's order: `min` keeps the first.
             shortest = min((short for _, short in over), key=lambda short: short.wait)
             return Asked((), too_small, over, refused=shortest)
-        return Asked(tuple(left), too_small)
+        asked = _failing_last(left, failing)
+        return Asked(asked, too_small, failing=_moved(tuple(left), asked, failing))
+
+
+def _failing_last(
+    models: Sequence[tuple[OfferedModel, ModelStatus]], failing: Mapping[str, Failing]
+) -> tuple[tuple[OfferedModel, ModelStatus], ...]:
+    """`models` in their order, those that `failing` names moved after the others."""
+    return (
+        *(each for each in models if each[0].name not in failing),
+        *(each for each in models if each[0].name in failing),
+    )
+
+
+def _moved(
+    unmoved: Sequence[tuple[OfferedModel, ModelStatus]],
+    asked: Sequence[tuple[OfferedModel, ModelStatus]],
+    failing: Mapping[str, Failing],
+) -> tuple[tuple[OfferedModel, Failing], ...]:
+    """Each failing model of `asked`, in its order, that is asked after a model that
+    `unmoved`, the order without breakers, has after it: those the breakers moved."""
+    place = {offered.name: number for number, (offered, _) in enumerate(unmoved)}
+    return tuple(
+        (offered, failing[offered.name])
+        for number, (offered, _) in enumerate(asked)
+        if offered.name in failing
+        and any(place[before.name] > place[offered.name] for before, _ in asked[:number])
+    )
 
 
 class UnknownModelError(Exception):
@@ -855,6 +932,105 @@ class _Counted:
         return True
 
 
+def asked_through(
+    offered: OfferedModel, budgets: Budgets, tokens: int, clock: Callable[[], datetime]
+) -> ChatProvider:
+    """The client a turn or a title asks `offered` through, in a link of its walk: one
+    that records each try of it in its breaker (ADR 0031), around the one `counted`
+    gives, which counts what each request takes of its budget, from `tokens`, the guess
+    its caller made once (ADR 0030). One call gives both, so that no caller has one
+    without the other.
+
+    A try begins when its `stream` is called, which the walk does once the model's gate
+    is passed, and once for each try; and it ends when that stream is over, however it
+    ended, each by `clock`. It ends:
+
+    - **failed,** when the stream raised an error that another try may not meet again
+      (`FOR_NOW`), before anything was handed on or after it; or ended without its
+      `Finish`, whether or not anything was handed on;
+    - **answered,** otherwise, when something was handed on (`actio_llm.hands_on`): it
+      finished, or was closed before its end by a stop, a cut or a cancellation; and
+      when its answer was cut at its server's time (`TookTooLongError`) after something
+      was handed on, which anyone can ask for on purpose;
+    - **with nothing to say of the model,** otherwise: it was closed or cancelled before
+      anything was handed on, it raised an `LLMError` that is the request's own, such as
+      a request too large or refused, a model its server hasn't got or a server too old,
+      or it raised anything else.
+
+    The model's events are handed on as they come, and its errors as they came, the
+    same objects: the walk sorts them by kind, and the counted client inside reads them
+    too. What the end of a try changed of the breaker is said in the log, a warning, by
+    the model's name and numbers alone. `OfferedModel.chat` stays the bare client:
+    whether a server has a model, and a load ahead, are recorded nowhere."""
+    return _Recorded(offered.name, counted(offered, budgets, tokens, clock), offered.breaker, clock)
+
+
+class _Recorded:
+    """A model's client that records each try of it in its breaker: see
+    `asked_through`."""
+
+    def __init__(
+        self, name: str, chat: ChatProvider, breaker: Breaker, clock: Callable[[], datetime]
+    ) -> None:
+        self._name = name
+        self._chat = chat
+        self._breaker = breaker
+        self._clock = clock
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        call = self._breaker.begins(self._clock())
+        handed_on = False
+        finished = False
+        outcome: Literal["answered", "failed"] | None = None
+        try:
+            async with aclosing(self._chat.stream(request)) as events:
+                async for event in events:
+                    handed_on = handed_on or hands_on(event)
+                    finished = finished or isinstance(event, Finish)
+                    yield event
+            # An answer that ended without saying why is a failure, words or not.
+            outcome = "answered" if finished else "failed"
+        except FOR_NOW as error:
+            # Cut at its time after something was handed on, it is an answer.
+            cut = handed_on and isinstance(error, TookTooLongError)
+            outcome = "answered" if cut else "failed"
+            raise
+        except BaseException:
+            # A stop, a cut, a cancellation, the request's own refusal, or anything else:
+            # an answer if something of it was handed on, and otherwise nothing to say.
+            outcome = "answered" if handed_on else None
+            raise
+        finally:
+            # Every ending, once, and nothing awaited: a stop or a cancellation that
+            # closes the stream records it too.
+            self._said(call.ends(outcome, self._clock()))
+
+    def _said(self, change: Change | None) -> None:
+        """Say in the log what the end of a try changed of the breaker: names and
+        numbers alone."""
+        match change:
+            case Opened(failed=failed, calls=calls):
+                logger.warning(
+                    "model %s: %d of its last %d requests failed, and for %d s it is asked"
+                    " after models that aren't failing",
+                    self._name,
+                    failed,
+                    calls,
+                    change.seconds,
+                )
+            case OpenedAgain():
+                logger.warning(
+                    "model %s: it failed again, and for %d s more it is asked after models"
+                    " that aren't failing",
+                    self._name,
+                    change.seconds,
+                )
+            case Closed():
+                logger.warning("model %s: it answered, and is asked in its place again", self._name)
+            case None:
+                pass
+
+
 @asynccontextmanager
 async def build(
     file: CatalogFile,
@@ -913,6 +1089,9 @@ async def build(
                 thinking_on=entry.thinking_on,
             )
 
+        # One for each model on a provider: two models of the file that are one model on
+        # one provider fail together, as they share a budget.
+        breakers = {(entry.provider, entry.model): Breaker() for entry in file.models.values()}
         models = {
             name: OfferedModel(
                 name=name,
@@ -926,6 +1105,7 @@ async def build(
                 then=entry.then,
                 tokens_a_minute=entry.tokens_a_minute,
                 budget=budget_of(entry.provider, entry.model, entry.stated),
+                breaker=breakers[entry.provider, entry.model],
             )
             for name, entry in file.models.items()
         }

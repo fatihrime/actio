@@ -1848,6 +1848,148 @@ async def test_when_no_model_has_room_for_the_titles_request_they_are_asked_as_e
     assert said(caplog) == []
 
 
+def failing_line(conversation_id: uuid.UUID, model: str, seconds: int) -> tuple[int, str]:
+    """The job's line for a model that keeps failing, asked after those that aren't."""
+    return (
+        logging.WARNING,
+        f"conversation {conversation_id}: model {model} is failing, and for about {seconds} s"
+        " more it is asked after models that aren't",
+    )
+
+
+async def test_a_model_that_failed_turns_of_the_same_catalog_is_asked_last_for_a_title_too(
+    db: AsyncSession,
+    settings: Settings,
+    migrated: str,
+    clock: Any,
+    lineup: Any,
+    start_app: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Five questions fail at the model named for titles, through the API, and are
+    answered by its stand-in. The title is asked of the stand-in first, by the same
+    breaker, and the log says so by the conversation's id."""
+    assert migrated
+    named_one = lineup.add(
+        "standard", ProviderUnavailableError(f"busy: {QUESTION}"), then=["second"]
+    )
+    stand_in = lineup.add("second", TextDelta("Fixing a flat tyre"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    browser = await start_app(settings, catalog=catalog)
+    await browser.post("/api/session/guest")
+    for _ in range(5):
+        message = {"id": str(new_id()), "parts": [{"type": "text", "text": "Hello?"}]}
+        asking = browser.post(f"/api/conversations/{new_id()}/turns", json={"message": message})
+        assert (await asyncio.wait_for(asking, PATIENCE_S)).status_code == 200
+    begun = await started(db)
+    await ended(db, begun)
+
+    async with open_resources(settings) as resources:
+        await writes(resources, catalog, begun, clock)
+
+    assert (len(named_one.requests), len(stand_in.requests)) == (5, 6)
+    title, by, *_ = await named(db, begun.conversation.id)
+    assert (title, by) == ("Fixing a flat tyre", "model")
+    assert said(caplog) == [
+        failing_line(begun.conversation.id, "standard", 30),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
+    ]
+    assert "flat tyre on my bike" not in caplog.text
+
+
+async def test_a_titles_own_failures_are_recorded_and_the_sixth_title_asks_the_stand_in_first(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    named_one = lineup.add(
+        "standard", ProviderUnavailableError(f"busy: {QUESTION}"), then=["second"]
+    )
+    lineup.add("second", TextDelta("Fixing a flat tyre"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    conversations = []
+    for _ in range(6):
+        begun = await started(db)
+        await ended(db, begun)
+        conversations.append(begun.conversation.id)
+
+    async with open_resources(settings) as resources:
+        for conversation_id in conversations:
+            await titles.write(
+                resources.database,
+                catalog,
+                conversation_id,
+                now=clock.now,
+                budgets=resources.budgets,
+                clock=lambda: clock.now,
+            )
+
+    assert len(named_one.requests) == 5
+    assert (
+        "model standard: 5 of its last 5 requests failed, and for 30 s it is asked after models"
+        " that aren't failing"
+    ) in caplog.messages
+    assert said(caplog)[-2:] == [
+        failing_line(conversations[-1], "standard", 30),
+        (
+            logging.WARNING,
+            f"conversation {conversations[-1]}: model second answered in place of standard",
+        ),
+    ]
+    assert "flat tyre on my bike" not in caplog.text
+
+
+async def test_a_title_asked_while_one_request_tries_its_model_asks_the_stand_in_first(
+    db: AsyncSession,
+    settings: Settings,
+    clock: Any,
+    lineup: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The model's wait is over, and a request that tries it in its place is under way.
+    A title asked meanwhile is asked of the stand-in first, and its line says why, with
+    no wait to name."""
+    named_one = lineup.add("standard", TextDelta("Mine"), DONE, then=["second"])
+    stand_in = lineup.add("second", TextDelta("Fixing a flat tyre"), DONE)
+    catalog = lineup.catalog(titles="standard")
+    breaker = catalog.get("standard").breaker
+    for _ in range(5):
+        breaker.begins(clock.now).ends("failed", clock.now)
+    clock.advance(seconds=30)
+    trying = breaker.begins(clock.now)
+    begun = await started(db)
+    await ended(db, begun)
+
+    async with open_resources(settings) as resources:
+        await titles.write(
+            resources.database,
+            catalog,
+            begun.conversation.id,
+            now=clock.now,
+            budgets=resources.budgets,
+            clock=lambda: clock.now,
+        )
+    trying.ends(None, clock.now)
+
+    assert (len(named_one.requests), len(stand_in.requests)) == (0, 1)
+    assert said(caplog) == [
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model standard is failing, and it is asked"
+            " after models that aren't while one request tries it",
+        ),
+        (
+            logging.WARNING,
+            f"conversation {begun.conversation.id}: model second answered in place of standard",
+        ),
+    ]
+
+
 async def no_budget_left(settings: Settings, catalog: Catalog, *names: str) -> None:
     """Leave nothing in the budgets of the models called `names`, at noon, under the
     keys the worker and the API count under."""

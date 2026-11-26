@@ -9,8 +9,8 @@ import asyncio
 import json
 import tomllib
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import aclosing, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,8 @@ from typing import Any
 import anyio
 import httpx2
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from valkey.asyncio import Valkey
 from valkey.exceptions import ValkeyError
 
@@ -34,6 +36,7 @@ from actio.catalog import (
     OfferedModel,
     Spent,
     UnknownModelError,
+    asked_through,
     budget_of,
     counted,
     kept,
@@ -46,20 +49,34 @@ from actio_fakellm.app import create_app as create_fake_llm
 from actio_llm import (
     ChatProvider,
     ChatRequest,
+    ConnectionFailedError,
+    ContextOverflowError,
+    Failing,
     Finish,
     FinishReason,
+    Link,
+    LLMError,
+    ModelNotFoundError,
     Ollama,
     OpenAICompatible,
+    ProviderError,
     ProviderUnavailableError,
+    RateLimitedError,
     ReasoningDelta,
+    RequestRejectedError,
     StreamEvent,
+    StreamInterruptedError,
     TextDelta,
     Timeouts,
     TookTooLongError,
+    UnsupportedFeatureError,
+    UnsupportedServerError,
     Usage,
     User,
+    Walk,
     tokens_in,
 )
+from actio_llm.breaker import Opened, Outcome
 
 pytestmark = pytest.mark.anyio
 
@@ -833,6 +850,9 @@ AWAY = ModelStatus("unreachable", thinking=False)
 GONE = ModelStatus("missing", thinking=False)
 NONE_SPENT: dict[str, Spent] = {}
 """What a look said when no model's budget is spent for a request: every one has budget."""
+NONE_FAILING: dict[str, Failing] = {}
+"""What the breakers said when no model is failing: the order is the room's and the
+budget's alone."""
 
 
 def offered(
@@ -904,8 +924,10 @@ def test_a_request_as_large_as_a_models_room_is_asked_of_it_and_one_token_more_i
     small, large = offered("small", tokens_a_minute=8000), offered("large", context_window=131_072)
     chain = Chain(((small, READY), (large, READY)))
 
-    assert chain.asked_with(8000, NONE_SPENT) == Asked(((small, READY), (large, READY)), ())
-    assert chain.asked_with(8001, NONE_SPENT) == Asked(((large, READY),), (small,))
+    assert chain.asked_with(8000, NONE_SPENT, NONE_FAILING) == Asked(
+        ((small, READY), (large, READY)), ()
+    )
+    assert chain.asked_with(8001, NONE_SPENT, NONE_FAILING) == Asked(((large, READY),), (small,))
 
 
 def test_while_some_ready_models_have_room_only_those_are_asked_in_the_chains_order() -> None:
@@ -917,7 +939,7 @@ def test_while_some_ready_models_have_room_only_those_are_asked_in_the_chains_or
     fourth = offered("fourth", context_window=1_048_576, tokens_a_minute=250_000)
     chain = Chain(((first, READY), (second, REASONS), (third, READY), (fourth, READY)))
 
-    assert chain.asked_with(5000, NONE_SPENT) == Asked(
+    assert chain.asked_with(5000, NONE_SPENT, NONE_FAILING) == Asked(
         ((second, REASONS), (fourth, READY)), (first, third)
     )
 
@@ -927,18 +949,20 @@ def test_when_no_ready_model_has_room_each_is_asked_and_none_is_passed_over() ->
     alone is its own chain, and is asked whatever the request."""
     first, second = offered("first", tokens_a_minute=1000), offered("second", context_window=2000)
 
-    assert Chain(((first, READY), (second, REASONS))).asked_with(5000, NONE_SPENT) == Asked(
-        ((first, READY), (second, REASONS)), ()
+    assert Chain(((first, READY), (second, REASONS))).asked_with(
+        5000, NONE_SPENT, NONE_FAILING
+    ) == Asked(((first, READY), (second, REASONS)), ())
+    assert Chain(((first, READY),)).asked_with(5000, NONE_SPENT, NONE_FAILING) == Asked(
+        ((first, READY),), ()
     )
-    assert Chain(((first, READY),)).asked_with(5000, NONE_SPENT) == Asked(((first, READY),), ())
 
 
 def test_a_stand_in_without_room_is_passed_over_while_the_asked_model_is_asked() -> None:
     asked, stand_in = offered("standard"), offered("second", tokens_a_minute=1000)
 
-    assert Chain(((asked, READY), (stand_in, READY))).asked_with(5000, NONE_SPENT) == Asked(
-        ((asked, READY),), (stand_in,)
-    )
+    assert Chain(((asked, READY), (stand_in, READY))).asked_with(
+        5000, NONE_SPENT, NONE_FAILING
+    ) == Asked(((asked, READY),), (stand_in,))
 
 
 def test_a_model_that_isnt_ready_never_counts_as_one_with_room() -> None:
@@ -952,10 +976,10 @@ def test_a_model_that_isnt_ready_never_counts_as_one_with_room() -> None:
     roomy_but_not_ready = Chain(((small, READY), (away, AWAY), (smaller, READY), (gone, GONE)))
     tiny_and_away = Chain(((tiny, AWAY), (large, READY)))
 
-    assert roomy_but_not_ready.asked_with(5000, NONE_SPENT) == Asked(
+    assert roomy_but_not_ready.asked_with(5000, NONE_SPENT, NONE_FAILING) == Asked(
         ((small, READY), (smaller, READY)), ()
     )
-    assert tiny_and_away.asked_with(5000, NONE_SPENT) == Asked(((large, READY),), ())
+    assert tiny_and_away.asked_with(5000, NONE_SPENT, NONE_FAILING) == Asked(((large, READY),), ())
 
 
 # --- A model's budget, and who is asked for it ----------------------------------------
@@ -1111,7 +1135,7 @@ def test_a_model_with_no_budget_left_is_asked_after_those_that_have_some() -> No
     third, fourth = offered("third"), offered("fourth")
     chain = Chain(((first, READY), (second, REASONS), (third, READY), (fourth, READY)))
 
-    assert chain.asked_with(1000, {"first": SPENT, "third": LATER}) == Asked(
+    assert chain.asked_with(1000, {"first": SPENT, "third": LATER}, NONE_FAILING) == Asked(
         ((second, REASONS), (fourth, READY), (first, READY), (third, READY)),
         (),
         ((first, SPENT), (third, LATER)),
@@ -1124,10 +1148,10 @@ def test_when_no_model_with_room_has_budget_nobody_is_asked_and_the_request_is_r
     first, second, third = offered("first"), offered("second"), offered("third")
     chain = Chain(((first, READY), (second, REASONS), (third, READY)))
 
-    assert chain.asked_with(1000, {"first": LATER, "second": SOONER, "third": SPENT}) == Asked(
-        (), (), ((first, LATER), (second, SOONER), (third, SPENT)), refused=SOONER
-    )
-    assert Chain(((first, READY),)).asked_with(1000, {"first": SPENT}) == Asked(
+    assert chain.asked_with(
+        1000, {"first": LATER, "second": SOONER, "third": SPENT}, NONE_FAILING
+    ) == Asked((), (), ((first, LATER), (second, SOONER), (third, SPENT)), refused=SOONER)
+    assert Chain(((first, READY),)).asked_with(1000, {"first": SPENT}, NONE_FAILING) == Asked(
         (), (), ((first, SPENT),), refused=SPENT
     )
 
@@ -1137,10 +1161,12 @@ def test_of_two_waits_as_short_the_refusal_names_the_first_in_the_chain() -> Non
     as_soon = Spent(SPENT.wait, SOONER.limit)
     chain = Chain(((first, READY), (second, READY)))
 
-    asked = chain.asked_with(1000, {"first": SPENT, "second": as_soon})
+    asked = chain.asked_with(1000, {"first": SPENT, "second": as_soon}, NONE_FAILING)
 
     assert asked.refused == SPENT
-    assert chain.asked_with(1000, {"first": as_soon, "second": SPENT}).refused == as_soon
+    assert (
+        chain.asked_with(1000, {"first": as_soon, "second": SPENT}, NONE_FAILING).refused == as_soon
+    )
 
 
 def test_a_model_without_room_neither_shortens_the_wait_nor_keeps_the_refusal_away() -> None:
@@ -1150,8 +1176,8 @@ def test_a_model_without_room_neither_shortens_the_wait_nor_keeps_the_refusal_aw
     small, spent = offered("small", tokens_a_minute=500), offered("spent")
     chain = Chain(((small, READY), (spent, READY)))
 
-    with_budget = chain.asked_with(1000, {"spent": SPENT})
-    sooner_than_it = chain.asked_with(1000, {"small": SOONER, "spent": SPENT})
+    with_budget = chain.asked_with(1000, {"spent": SPENT}, NONE_FAILING)
+    sooner_than_it = chain.asked_with(1000, {"small": SOONER, "spent": SPENT}, NONE_FAILING)
 
     assert with_budget == Asked((), (small,), ((spent, SPENT),), refused=SPENT)
     assert sooner_than_it == Asked((), (small,), ((spent, SPENT),), refused=SPENT)
@@ -1161,7 +1187,7 @@ def test_the_room_comes_first_and_a_model_without_room_is_said_for_its_room_alon
     small, spent, fits = offered("small", tokens_a_minute=500), offered("spent"), offered("fits")
     chain = Chain(((small, READY), (spent, READY), (fits, READY)))
 
-    assert chain.asked_with(1000, {"small": SPENT, "spent": SPENT}) == Asked(
+    assert chain.asked_with(1000, {"small": SPENT, "spent": SPENT}, NONE_FAILING) == Asked(
         ((fits, READY), (spent, READY)), (small,), ((spent, SPENT),)
     )
 
@@ -1173,9 +1199,9 @@ def test_when_no_model_has_room_nor_budget_every_ready_one_is_asked_and_none_is_
     away = offered("away", context_window=500)
     chain = Chain(((first, READY), (away, AWAY), (second, REASONS)))
 
-    assert chain.asked_with(1000, {"first": SPENT, "second": SOONER, "away": SOONER}) == Asked(
-        ((first, READY), (second, REASONS)), ()
-    )
+    assert chain.asked_with(
+        1000, {"first": SPENT, "second": SOONER, "away": SOONER}, NONE_FAILING
+    ) == Asked(((first, READY), (second, REASONS)), ())
 
 
 def test_when_no_model_has_room_the_one_with_budget_is_asked_first_and_the_others_after() -> None:
@@ -1183,7 +1209,7 @@ def test_when_no_model_has_room_the_one_with_budget_is_asked_first_and_the_other
     third = offered("third", context_window=500)
     chain = Chain(((first, READY), (second, READY), (third, READY)))
 
-    assert chain.asked_with(1000, {"first": SPENT, "third": SOONER}) == Asked(
+    assert chain.asked_with(1000, {"first": SPENT, "third": SOONER}, NONE_FAILING) == Asked(
         ((second, READY), (first, READY), (third, READY)), (), ((first, SPENT), (third, SOONER))
     )
 
@@ -1195,14 +1221,14 @@ def test_a_model_that_isnt_ready_never_counts_as_one_with_budget_nor_for_its_wai
     spent, away, gone = offered("spent"), offered("away"), offered("gone")
     chain = Chain(((spent, READY), (away, AWAY)))
 
-    assert chain.asked_with(1000, {"spent": SPENT}) == Asked(
+    assert chain.asked_with(1000, {"spent": SPENT}, NONE_FAILING) == Asked(
         (), (), ((spent, SPENT),), refused=SPENT
     )
-    assert chain.asked_with(1000, {"spent": SPENT, "away": SOONER}) == Asked(
+    assert chain.asked_with(1000, {"spent": SPENT, "away": SOONER}, NONE_FAILING) == Asked(
         (), (), ((spent, SPENT),), refused=SPENT
     )
     assert Chain(((away, AWAY), (gone, GONE))).asked_with(
-        1000, {"away": SPENT, "gone": SOONER}
+        1000, {"away": SPENT, "gone": SOONER}, NONE_FAILING
     ) == Asked((), ())
 
 
@@ -1213,10 +1239,237 @@ def test_a_look_that_said_nothing_refuses_nothing() -> None:
     second = offered("second", budget={"requests_a_minute": 1})
     chain = Chain(((first, READY), (second, READY)))
 
-    asked = chain.asked_with(1000, NONE_SPENT)
+    asked = chain.asked_with(1000, NONE_SPENT, NONE_FAILING)
 
     assert asked == Asked(((first, READY), (second, READY)), ())
     assert asked.refused is None
+
+
+# --- A model that keeps failing, and who is asked then --------------------------------
+
+FAILING = Failing(timedelta(seconds=20))
+"""What a breaker says of a model that is failing, for 20 seconds more."""
+TRIED = Failing(None)
+"""What it says once the wait is over, while a request tries the model in its place."""
+
+
+def failing_now(model: OfferedModel, now: datetime = NOON) -> OfferedModel:
+    """`model`, with its breaker opened at `now`, for 30 seconds, by five failures."""
+    for _ in range(5):
+        model.breaker.begins(now).ends("failed", now)
+    assert model.breaker.failing(now) == Failing(timedelta(seconds=30))
+    return model
+
+
+def test_a_failing_model_is_asked_after_the_models_of_its_chain_that_arent() -> None:
+    """Each group in the chain's order: those that aren't failing, then those that are.
+    Each that was moved is named, in the order they are asked, with what its breaker
+    said."""
+    first, second = offered("first"), offered("second")
+    third, fourth = offered("third"), offered("fourth")
+    chain = Chain(((first, READY), (second, REASONS), (third, READY), (fourth, READY)))
+
+    assert chain.asked_with(1000, NONE_SPENT, {"first": FAILING, "third": TRIED}) == Asked(
+        ((second, REASONS), (fourth, READY), (first, READY), (third, READY)),
+        (),
+        failing=((first, FAILING), (third, TRIED)),
+    )
+
+
+def test_the_breakers_order_each_of_the_budgets_two_groups_and_never_mix_them() -> None:
+    """With budget and not failing, with budget and failing, without and not failing,
+    without and failing."""
+    a, b, c, d = offered("a"), offered("b"), offered("c"), offered("d")
+    chain = Chain(((a, READY), (b, READY), (c, READY), (d, READY)))
+
+    asked = chain.asked_with(1000, {"a": SPENT, "b": SOONER}, {"a": FAILING, "c": FAILING})
+
+    assert asked == Asked(
+        ((d, READY), (c, READY), (b, READY), (a, READY)),
+        (),
+        ((a, SPENT), (b, SOONER)),
+        failing=((c, FAILING), (a, FAILING)),
+    )
+
+
+def test_a_failing_model_with_budget_is_asked_before_one_without_whatever_its_breaker() -> None:
+    """And isn't named: the breaker didn't move it. Nor is one that its budget alone put
+    last, which `spent` names."""
+    failing, spent = offered("failing"), offered("spent")
+
+    assert Chain(((spent, READY), (failing, READY))).asked_with(
+        1000, {"spent": SPENT}, {"failing": FAILING}
+    ) == Asked(((failing, READY), (spent, READY)), (), ((spent, SPENT),))
+    assert Chain(((failing, READY), (spent, READY))).asked_with(
+        1000, {"failing": SPENT}, {"failing": FAILING}
+    ) == Asked(((spent, READY), (failing, READY)), (), ((failing, SPENT),))
+
+
+def test_a_failing_model_the_breakers_left_where_it_was_is_not_named() -> None:
+    """A chain's only model, a chain whose every model is failing, and one that was last
+    already: each asked in the chain's order, as if nobody were failing."""
+    alone, first, second = offered("alone"), offered("first"), offered("second")
+    both = Chain(((first, READY), (second, READY)))
+
+    assert Chain(((alone, READY),)).asked_with(1000, NONE_SPENT, {"alone": FAILING}) == Asked(
+        ((alone, READY),), ()
+    )
+    assert both.asked_with(1000, NONE_SPENT, {"first": FAILING, "second": TRIED}) == Asked(
+        ((first, READY), (second, READY)), ()
+    )
+    assert both.asked_with(1000, NONE_SPENT, {"second": FAILING}) == Asked(
+        ((first, READY), (second, READY)), ()
+    )
+
+
+def test_when_no_ready_model_has_room_every_one_is_asked_and_the_failing_ones_after() -> None:
+    """With budget or without: a guess never refuses, and the breakers only order."""
+    first, second = offered("first", context_window=500), offered("second", tokens_a_minute=500)
+    chain = Chain(((first, READY), (second, REASONS)))
+    moved = Asked(((second, REASONS), (first, READY)), (), failing=((first, FAILING),))
+
+    assert chain.asked_with(1000, NONE_SPENT, {"first": FAILING}) == moved
+    assert chain.asked_with(1000, {"first": SPENT, "second": SOONER}, {"first": FAILING}) == moved
+
+
+def test_a_breaker_never_refuses_a_request_nor_keeps_one_from_being_refused() -> None:
+    """The refusal for now is the budget's alone: a failing model with budget keeps it
+    away, and one without counts for its wait as any other does."""
+    failing, spent = offered("failing"), offered("spent")
+    chain = Chain(((failing, READY), (spent, READY)))
+
+    kept_away = chain.asked_with(1000, {"spent": SPENT}, {"failing": FAILING})
+    refused = chain.asked_with(1000, {"failing": SOONER, "spent": SPENT}, {"failing": FAILING})
+
+    assert kept_away == Asked(((failing, READY), (spent, READY)), (), ((spent, SPENT),))
+    assert refused == Asked((), (), ((failing, SOONER), (spent, SPENT)), refused=SOONER)
+
+
+def test_a_failing_model_passed_over_for_its_room_is_neither_asked_nor_named() -> None:
+    small, large, other = offered("small", tokens_a_minute=500), offered("large"), offered("other")
+    chain = Chain(((small, READY), (large, READY), (other, READY)))
+
+    assert chain.asked_with(1000, NONE_SPENT, {"small": FAILING, "large": FAILING}) == Asked(
+        ((other, READY), (large, READY)), (small,), failing=((large, FAILING),)
+    )
+
+
+ROOMS = (500, 1000, 4000)
+"""A model's room in the made-up chains, against requests of 1 to 4,500 tokens."""
+
+MADE_UP = st.lists(
+    st.tuples(
+        st.sampled_from(ROOMS),
+        st.sampled_from([READY, READY, REASONS, AWAY, GONE]),
+        st.sampled_from([None, SPENT, SOONER, LATER]),
+        st.sampled_from([None, None, FAILING, TRIED]),
+    ),
+    min_size=1,
+    max_size=6,
+)
+"""Chains of models, each with its room, its status, what a look said of its budget, and
+what its breaker said."""
+
+
+@given(made_up=MADE_UP, tokens=st.integers(1, 4_500))
+def test_the_breakers_change_who_is_asked_only_in_order(
+    made_up: list[tuple[int, ModelStatus, Spent | None, Failing | None]], tokens: int
+) -> None:
+    """Whatever the chain: the same models asked as with no model failing, the same
+    passed over, said without budget and refused; within each of the budget's groups the
+    models that aren't failing first; and each failing model named that a model which
+    isn't failing, of its group, followed in the chain's order."""
+    models = [
+        offered(f"m{number}", context_window=room) for number, (room, *_) in enumerate(made_up)
+    ]
+    each = list(zip(models, made_up, strict=True))
+    chain = Chain(tuple((model, status) for model, (_, status, _, _) in each))
+    spent = {model.name: said for model, (_, _, said, _) in each if said is not None}
+    failing = {model.name: said for model, (_, _, _, said) in each if said is not None}
+
+    plain = chain.asked_with(tokens, spent, NONE_FAILING)
+    broken = chain.asked_with(tokens, spent, failing)
+
+    assert (broken.too_small, broken.spent, broken.refused) == (
+        plain.too_small,
+        plain.spent,
+        plain.refused,
+    )
+    assert plain.failing == ()
+    # Stable: the chain's order, and the budget's, kept within each kind.
+    assert broken.models == tuple(
+        sorted(plain.models, key=lambda each: (each[0].name in spent, each[0].name in failing))
+    )
+    groups = [model.name in spent for model, _ in plain.models]
+    moved = {
+        model.name
+        for number, (model, _) in enumerate(plain.models)
+        if model.name in failing
+        and any(
+            later.name not in failing and groups[number + 1 + after] == groups[number]
+            for after, (later, _) in enumerate(plain.models[number + 1 :])
+        )
+    }
+    assert [model.name for model, _ in broken.failing] == [
+        model.name for model, _ in broken.models if model.name in moved
+    ]
+    assert all(said is failing[model.name] for model, said in broken.failing)
+
+
+def test_a_chain_says_which_of_its_ready_models_are_failing_and_for_how_long() -> None:
+    """By each model's breaker, at the moment it is given. A model that isn't ready is
+    never named, failing or not."""
+    away, failing, fine = (
+        failing_now(offered("away")),
+        failing_now(offered("failing")),
+        offered("fine"),
+    )
+    chain = Chain(((away, AWAY), (failing, READY), (fine, READY)))
+
+    assert chain.failing(NOON) == {"failing": Failing(timedelta(seconds=30))}
+    assert chain.failing(NOON + timedelta(seconds=10)) == {
+        "failing": Failing(timedelta(seconds=20))
+    }
+    assert chain.failing(NOON + timedelta(seconds=30)) == {}
+
+
+async def test_two_models_that_are_one_model_on_one_provider_share_a_breaker() -> None:
+    """Failures through one name have the other asked last too. The same model's name on
+    another provider has a breaker of its own, and so has each other model."""
+    text = (
+        GOOD
+        + AGAIN
+        + """
+[providers.lab2]
+kind = "openai-compatible"
+url = "http://lab2.internal:8000/v1"
+
+[models.elsewhere]
+title = "The other lab's large model"
+provider = "lab2"
+model = "fake-chat"
+context_window = 32768
+max_output_tokens = 4096
+"""
+    )
+
+    async with catalogs.build(parsed(text), ollama_url="http://ollama") as catalog:
+        standard, big, again, elsewhere = (
+            catalog.get(name) for name in ("standard", "big", "again", "elsewhere")
+        )
+
+    assert big.breaker is again.breaker
+    assert elsewhere.breaker is not big.breaker
+    assert standard.breaker is not big.breaker
+    assert standard.breaker is not elsewhere.breaker
+    failing_now(big)
+    chain = Chain(((again, READY), (elsewhere, READY), (standard, READY)))
+    assert chain.failing(NOON) == {"again": Failing(timedelta(seconds=30))}
+    assert chain.asked_with(10, NONE_SPENT, chain.failing(NOON)).models == (
+        (elsewhere, READY),
+        (standard, READY),
+        (again, READY),
+    )
 
 
 def model_budget(model: OfferedModel) -> Budget:
@@ -1523,6 +1776,394 @@ async def test_a_stream_whose_tokens_cant_be_put_right_fails_nothing(
         "requests a minute": 1,
         "tokens a minute": GUESS,
     }
+
+
+# --- Each try, recorded in the model's breaker ----------------------------------------
+
+SECRET = "my door code is 4471"
+"""What an error's text may quote: never in the log."""
+WORDS = TextDelta("A chain")
+THOUGHT = ReasoningDelta("Hm.")
+FINISHED = Finish(FinishReason.STOP, Usage(30, 3))
+
+
+async def to_its_end(chat: ChatProvider) -> None:
+    """Ask `chat` the request, and read its stream to its end or its error."""
+    with suppress(LLMError, RuntimeError):
+        await read(chat, into=[])
+
+
+async def closed_after_one(chat: ChatProvider) -> None:
+    """Ask `chat` the request, take its first event, and close its stream, as a reader
+    that is done with it does."""
+    async with aclosing(chat.stream(REQUEST)) as events:
+        await anext(events)
+
+
+async def ends_as(
+    chat: ChatProvider,
+    budgets: Budgets,
+    reading: Callable[[ChatProvider], Awaitable[None]] = to_its_end,
+) -> Outcome:
+    """What one try of a model whose client is `chat` ends as, through the client a link
+    asks it through, read from its breaker: one with four failures kept, which a failure
+    opens. Not opened by the try, it is opened by one failure more, of 6 calls when the
+    try was kept as an answer, and of 5 when it had nothing to say."""
+    model = offered("watched", chat=chat)
+    for _ in range(4):
+        model.breaker.begins(NOON).ends("failed", NOON)
+
+    await reading(asked_through(model, budgets, GUESS, lambda: NOON))
+
+    if model.breaker.failing(NOON) is not None:
+        return "failed"
+    opened = model.breaker.begins(NOON).ends("failed", NOON)
+    assert isinstance(opened, Opened)
+    assert model.breaker.trying == 0
+    return "answered" if opened.calls == 6 else None
+
+
+@pytest.mark.parametrize(
+    ("script", "outcome"),
+    [
+        pytest.param(lambda: Says(WORDS, FINISHED), "answered", id="it finished"),
+        pytest.param(lambda: Says(FINISHED), "answered", id="it finished with no words"),
+        pytest.param(lambda: Says(THOUGHT, FINISHED), "answered", id="it finished a thought"),
+        pytest.param(
+            lambda: Says(ProviderUnavailableError(SECRET)), "failed", id="too busy before a word"
+        ),
+        pytest.param(
+            lambda: Says(WORDS, ProviderUnavailableError(SECRET)), "failed", id="too busy after one"
+        ),
+        pytest.param(lambda: Says(ConnectionFailedError(SECRET)), "failed", id="refused"),
+        pytest.param(lambda: Says(RateLimitedError(SECRET, retry_after_s=1)), "failed", id="429"),
+        pytest.param(
+            lambda: Says(THOUGHT, StreamInterruptedError(SECRET)), "failed", id="broke off"
+        ),
+        pytest.param(lambda: Says(ProviderError(SECRET)), "failed", id="its provider failed"),
+        pytest.param(
+            lambda: Says(TextDelta(""), TookTooLongError(SECRET)),
+            "failed",
+            id="out of time with nothing handed on",
+        ),
+        pytest.param(
+            lambda: Says(WORDS, TookTooLongError(SECRET)), "answered", id="cut at its time"
+        ),
+        pytest.param(
+            lambda: Says(THOUGHT, TookTooLongError(SECRET)),
+            "answered",
+            id="cut at its time after a thought",
+        ),
+        pytest.param(lambda: Says(WORDS), "failed", id="no finish after a word"),
+        pytest.param(lambda: Says(TextDelta("")), "failed", id="no finish and nothing"),
+        pytest.param(lambda: Says(ContextOverflowError(SECRET)), None, id="too large"),
+        pytest.param(lambda: Says(RequestRejectedError(SECRET)), None, id="refused request"),
+        pytest.param(lambda: Says(UnsupportedFeatureError(SECRET)), None, id="no such feature"),
+        pytest.param(lambda: Says(ModelNotFoundError("m", SECRET)), None, id="no such model"),
+        pytest.param(lambda: Says(UnsupportedServerError(SECRET)), None, id="server too old"),
+        pytest.param(
+            lambda: Says(WORDS, RequestRejectedError(SECRET)), "answered", id="refused after a word"
+        ),
+        pytest.param(lambda: Says(RuntimeError(SECRET)), None, id="anything else"),
+        pytest.param(
+            lambda: Says(WORDS, RuntimeError(SECRET)), "answered", id="anything else after a word"
+        ),
+    ],
+)
+async def test_a_try_ends_answered_failed_or_with_nothing_to_say_by_how_its_stream_ended(
+    script: Callable[[], Says], outcome: Outcome, budgets: Budgets
+) -> None:
+    """Failed: an error another try may not meet again, before or after a word, but an
+    answer cut at its time after something was handed on; or a stream that ended
+    without its finish. Answered: otherwise, once something was handed on. Otherwise
+    nothing to say: the request's own refusal, or anything else."""
+    assert await ends_as(script(), budgets) == outcome
+
+
+@pytest.mark.parametrize(
+    ("script", "outcome"),
+    [
+        pytest.param((TextDelta(""), WORDS, FINISHED), None, id="after an empty piece"),
+        pytest.param((WORDS, FINISHED), "answered", id="after a word"),
+        pytest.param((THOUGHT, FINISHED), "answered", id="after a thought"),
+    ],
+)
+async def test_a_try_closed_before_its_end_has_answered_once_something_was_handed_on(
+    script: tuple[StreamEvent, ...], outcome: Outcome, budgets: Budgets
+) -> None:
+    assert await ends_as(Says(*script), budgets, closed_after_one) == outcome
+
+
+@pytest.mark.parametrize(
+    ("words", "outcome"), [((), None), ((WORDS,), "answered")], ids=["before a word", "after one"]
+)
+async def test_a_try_a_stop_cuts_off_is_recorded_and_the_stop_passes_on(
+    words: tuple[StreamEvent, ...], outcome: Outcome, budgets: Budgets
+) -> None:
+    """Cancelled through a scope, as a turn's halt does, while its model waits: its
+    breaker's call has ended, as an answer once something was handed on, and with
+    nothing to say before. The cancellation isn't swallowed: what waited for the stream
+    is cancelled with it."""
+    chat = HeldAfter(*words)
+    stop = anyio.CancelScope()
+    reached_the_end = False
+
+    async def turn(client: ChatProvider) -> None:
+        nonlocal reached_the_end
+        with stop:
+            await read(client, into=[])
+            reached_the_end = True
+
+    async def stopped(client: ChatProvider) -> None:
+        running = asyncio.create_task(turn(client))
+        await asyncio.wait_for(chat.waiting.wait(), 5)
+        stop.cancel()
+        await asyncio.wait_for(running, 5)
+
+    assert await ends_as(chat, budgets, stopped) == outcome
+    assert stop.cancelled_caught
+    assert not reached_the_end
+
+
+async def test_a_try_that_tries_a_model_once_its_wait_is_over_ends_however_it_is_stopped(
+    budgets: Budgets,
+) -> None:
+    """While it waits, it is the one request that tries the model; once a task cancelled
+    from outside has given up on it, the cancellation is the task's, and no try is left
+    under way."""
+    chat = HeldAfter()
+    model = failing_now(offered("watched", chat=chat))
+    after_the_wait = NOON + timedelta(seconds=30)
+    client = asked_through(model, budgets, GUESS, lambda: after_the_wait)
+    reading = asyncio.create_task(read(client, into=[]))
+    await asyncio.wait_for(chat.waiting.wait(), 5)
+
+    assert model.breaker.trying == 1
+    assert model.breaker.failing(after_the_wait) == Failing(None)
+    reading.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(reading, 5)
+    assert model.breaker.trying == 0
+    assert model.breaker.failing(after_the_wait) is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        pytest.param(lambda: Says(ContextOverflowError(SECRET)), id="too large"),
+        pytest.param(lambda: Says(RequestRejectedError(SECRET)), id="refused"),
+        pytest.param(lambda: Says(UnsupportedFeatureError(SECRET)), id="no such feature"),
+        pytest.param(lambda: Says(ModelNotFoundError("m", SECRET)), id="no such model"),
+        pytest.param(lambda: Says(UnsupportedServerError(SECRET)), id="server too old"),
+        pytest.param(lambda: Says(WORDS, TookTooLongError(SECRET)), id="cut at its time"),
+        pytest.param(lambda: HeldAfter(), id="stopped before a word"),
+        pytest.param(lambda: HeldAfter(WORDS), id="stopped after one"),
+    ],
+)
+async def test_nobody_has_a_model_asked_last_with_requests_of_their_own_ten_times_running(
+    script: Callable[[], ChatProvider], budgets: Budgets
+) -> None:
+    """A request too large or refused, a model or a feature the server hasn't got, an
+    answer cut at its time on purpose, a turn stopped: none is the model's failure. The
+    same ten times over a model that is too busy opens its breaker at the fifth."""
+    model = offered("watched", chat=script())
+    busy = offered("busy", chat=Says(ProviderUnavailableError(SECRET)))
+
+    for _ in range(10):
+        for each in (model, busy):
+            client = asked_through(each, budgets, GUESS, lambda: NOON)
+            if isinstance(each.chat, HeldAfter):
+                reading = asyncio.create_task(to_its_end(client))
+                await asyncio.wait_for(each.chat.waiting.wait(), 5)
+                each.chat.waiting.clear()
+                reading.cancel()
+                with suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(reading, 5)
+            else:
+                await to_its_end(client)
+
+    assert model.breaker.failing(NOON) is None
+    assert busy.breaker.failing(NOON) == Failing(timedelta(seconds=30))
+
+
+async def test_the_recording_client_hands_on_the_models_events_and_its_error_as_they_came(
+    budgets: Budgets,
+) -> None:
+    """The same objects, through the counted client too: the walk sorts the error by
+    its kind, and what the budget takes is as before."""
+    thought, words, error = ReasoningDelta("Hm."), TextDelta("A chain"), ProviderError(SECRET)
+    model = counted_model(Says(thought, words, error))
+    received: list[StreamEvent] = []
+
+    with pytest.raises(ProviderError) as raised:
+        await read(asked_through(model, budgets, GUESS, lambda: NOON), into=received)
+
+    assert [a is b for a, b in zip(received, (thought, words), strict=True)] == [True, True]
+    assert raised.value is error
+    assert await taken(budgets, model_budget(model)) == {
+        "requests a minute": 1,
+        "tokens a minute": GUESS + tokens_in("Hm." + "A chain"),
+    }
+
+
+async def test_a_refused_connection_is_a_failure_and_its_request_is_given_back_all_the_same(
+    budgets: Budgets,
+) -> None:
+    """The counted client inside is handed the error as it came, and gives back what it
+    took: nothing reached the server. Another failure keeps the request and the guess."""
+    refused = counted_model(Says(ConnectionFailedError(SECRET)))
+    busy = offered(
+        "busy",
+        chat=Says(ProviderUnavailableError(SECRET)),
+        budget={"requests_a_minute": 10, "tokens_a_minute": 1_000},
+    )
+
+    for model in (refused, busy):
+        for _ in range(5):
+            await to_its_end(asked_through(model, budgets, GUESS, lambda: NOON))
+
+    assert await taken(budgets, model_budget(refused)) == {
+        "requests a minute": 0,
+        "tokens a minute": 0,
+    }
+    assert await taken(budgets, model_budget(busy)) == {
+        "requests a minute": 5,
+        "tokens a minute": 5 * GUESS,
+    }
+    assert refused.breaker.failing(NOON) == Failing(timedelta(seconds=30))
+    assert busy.breaker.failing(NOON) == Failing(timedelta(seconds=30))
+
+
+class Tries:
+    """A model whose every try follows the next of its scripts, and the last for each
+    try after them."""
+
+    def __init__(self, *scripts: tuple[StreamEvent | Exception, ...]) -> None:
+        self.scripts = scripts
+        self.tries = 0
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        assert request.messages
+        script = self.scripts[min(self.tries, len(self.scripts) - 1)]
+        self.tries += 1
+        for item in script:
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+
+async def test_the_log_says_what_each_try_changed_by_the_models_name_and_numbers_alone(
+    budgets: Budgets, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Opened by its fifth failure, for 30 seconds; failed again once they were over,
+    for a minute; and closed by an answer. Then opened again by three failures after two
+    answers, which the line counts apart: three of five. Never an error's text, nor its
+    kind."""
+    busy = (ProviderUnavailableError(SECRET),)
+    answers = (WORDS, FINISHED)
+    model = offered("watched", chat=Tries(*[busy] * 6, answers, answers, busy))
+    now = NOON
+    client = asked_through(model, budgets, GUESS, lambda: now)
+
+    for _ in range(5):
+        await to_its_end(client)
+    now += timedelta(seconds=30)
+    await to_its_end(client)
+    now += timedelta(minutes=1)
+    for _ in range(2):
+        await to_its_end(client)
+    for _ in range(3):
+        await to_its_end(client)
+
+    assert caplog.messages == [
+        "model watched: 5 of its last 5 requests failed, and for 30 s it is asked after"
+        " models that aren't failing",
+        "model watched: it failed again, and for 60 s more it is asked after models that"
+        " aren't failing",
+        "model watched: it answered, and is asked in its place again",
+        "model watched: 3 of its last 5 requests failed, and for 30 s it is asked after"
+        " models that aren't failing",
+    ]
+    assert SECRET not in caplog.text
+    assert "ProviderUnavailableError" not in caplog.text
+
+
+class Noting:
+    """A model that notes in `log` when it is asked, and when its stream is closed."""
+
+    def __init__(self, name: str, log: list[str], *script: StreamEvent | Exception) -> None:
+        self.name = name
+        self.log = log
+        self.script = script
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[StreamEvent]:
+        assert request.messages
+        self.log.append(f"{self.name} asked")
+        try:
+            for item in self.script:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            self.log.append(f"{self.name} closed")
+
+
+class NotedHold:
+    """What a link holds while it is asked, as a gate: it notes in `log` when it is held
+    and given back."""
+
+    def __init__(self, name: str, log: list[str]) -> None:
+        self.name = name
+        self.log = log
+
+    async def __aenter__(self) -> None:
+        self.log.append(f"{self.name} held")
+
+    async def __aexit__(self, *_: object) -> None:
+        self.log.append(f"{self.name} given back")
+
+
+async def test_through_a_walk_each_try_is_recorded_and_closed_in_the_walks_own_order(
+    budgets: Budgets,
+) -> None:
+    """A model whose connection is refused is asked once more, and fails again: two
+    failures, each try's stream closed before the next begins, and its gate given back
+    once the second's is, before the next model's is held."""
+    log: list[str] = []
+    first = offered("first", chat=Noting("first", log, ConnectionFailedError(SECRET)))
+    second = offered("second", chat=Noting("second", log, WORDS, FINISHED))
+    walk = Walk(
+        [
+            Link(model.name, asked_through(model, budgets, GUESS, lambda: NOON), REQUEST, hold)
+            for model, hold in (
+                (first, NotedHold("gate 1", log)),
+                (second, NotedHold("gate 2", log)),
+            )
+        ]
+    )
+
+    async with asyncio.timeout(5), aclosing(walk.stream()) as events:
+        received = [event async for event in events]
+
+    assert received == [WORDS, FINISHED]
+    assert log == [
+        "gate 1 held",
+        "first asked",
+        "first closed",
+        "first asked",
+        "first closed",
+        "gate 1 given back",
+        "gate 2 held",
+        "second asked",
+        "second closed",
+        "gate 2 given back",
+    ]
+    # Two failures kept: the fifth is three more away.
+    assert [first.breaker.begins(NOON).ends("failed", NOON) for _ in range(3)] == [
+        None,
+        None,
+        Opened(5, 5, timedelta(seconds=30)),
+    ]
 
 
 # --- How many answers a server writes at once -----------------------------------------

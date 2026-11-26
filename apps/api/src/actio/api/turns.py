@@ -250,12 +250,16 @@ async def start_turn(
         unread = None
     except BudgetsUnavailableError as error:
         spent, unread = {}, type(error.__cause__).__name__
+    # Which ready models keep failing, by their breakers, now (ADR 0031): decided here
+    # once, and never again while the turn runs.
+    failing = chain.failing(now)
     # Who is asked, in which order: a ready model whose room is smaller than the guess is
     # passed over while another has room, and one whose budget has nothing left for the
     # request is asked after those that have some. When no model with room has budget,
     # the turn is refused for now; when none has room, every one is asked: a guess never
-    # refuses a turn.
-    asked = chain.asked_with(tokens, spent)
+    # refuses a turn. Within each of those, one that keeps failing is asked after those
+    # that don't, which refuses nothing.
+    asked = chain.asked_with(tokens, spent, failing)
     if asked.refused is not None:
         # Before anything is committed or held: nothing of the turn is left behind, and
         # the credits are never touched. By the conversation's id: the turn's row is
@@ -325,6 +329,22 @@ async def start_turn(
             short.seconds,
             short.limit,
         )
+    for passed, said in asked.failing:
+        if said.wait is None:
+            logger.warning(
+                "turn %s: model %s is failing, and it is asked after models that aren't while"
+                " one request tries it",
+                turn.id,
+                passed.name,
+            )
+        else:
+            logger.warning(
+                "turn %s: model %s is failing, and for about %d s more it is asked after models"
+                " that aren't",
+                turn.id,
+                passed.name,
+                said.seconds,
+            )
     asking = [
         answering.Asking(
             model,
