@@ -216,6 +216,15 @@ async def test_a_rate_limit_says_how_long_to_wait(fake: Fake) -> None:
     assert isinstance(caught.value, ProviderUnavailableError)  # so a router can fall back
 
 
+async def test_a_rate_limit_says_the_wait_the_fake_was_told_to_name(fake: Fake) -> None:
+    """Longer than a walk waits out itself: what a test of a provider's own wait asks
+    the fake for."""
+    with pytest.raises(RateLimitedError) as caught:
+        await collect(fake().stream(ask("[[fail: 429]] [[retry-after: 30]] hello")))
+
+    assert caught.value.retry_after_s == 30.0
+
+
 async def test_an_answer_that_ends_early_is_an_interruption(fake: Fake) -> None:
     received: list[StreamEvent] = []
     stream = fake().stream(ask("[[drop: 2]] hello there"))

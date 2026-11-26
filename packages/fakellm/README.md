@@ -35,6 +35,7 @@ Put directives in the last user message to change what the fake does. They are l
 | `[[call: get_weather {"city": "Izmir"}]]` | Call a tool instead of answering. Repeat it for several calls. The arguments stream in fragments, as OpenAI's format allows |
 | `[[fail: 503]]` | Answer with this HTTP status, in OpenAI's error format. A 429 adds `Retry-After: 1` |
 | `[[fail: 400 context_length_exceeded]]` | The same, with this error code |
+| `[[retry-after: 30]]` | With `[[fail: 429]]`, the seconds its `Retry-After` says, in the place of 1: a whole number, 0 or more. With another status, or without `[[fail: ...]]`, it changes nothing. For a test of a provider that names a wait longer than Actio waits out itself |
 | `[[drop: 2]]` | Stream 2 tokens, then end the stream without a finish reason or `[DONE]` |
 | `[[delay: 0.5]]` | Wait this many seconds before answering (30 at most) |
 | `[[pace: 0.05]]` | Wait this many seconds between the pieces of a streamed reply (5 at most), as a real model takes its time. For tests that stop an answer half-way, or watch a page follow it |

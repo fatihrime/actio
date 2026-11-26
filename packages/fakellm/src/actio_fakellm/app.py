@@ -15,6 +15,9 @@ A test can also script the reply, with directives in the last user message:
     [[call: name {"a": 1}]]   call a tool instead of answering; repeat for several calls
     [[fail: 503]]             answer with this HTTP status (a 429 adds `Retry-After: 1`)
     [[fail: 400 some_code]]   the same, with this error code in the body
+    [[retry-after: 30]]       the seconds a scripted 429's `Retry-After` says, a whole
+                              number, 0 or more; with any other status, or without
+                              `[[fail: ...]]`, it changes nothing
     [[drop: 2]]               stream 2 tokens, then end the stream without finishing it
     [[delay: 0.5]]            wait this many seconds before answering
     [[pace: 0.05]]            wait this many seconds between the pieces of a streamed reply
@@ -74,7 +77,9 @@ MAX_PACE_S = 5.0
 
 # One token: a word plus the whitespace after it. Joining the tokens restores the text.
 _TOKEN = re.compile(r"\S+\s*")
-_DIRECTIVE = re.compile(r"\[\[(\w+):\s*(.*?)\]\]", re.DOTALL)
+_DIRECTIVE = re.compile(r"\[\[([\w-]+):\s*(.*?)\]\]", re.DOTALL)
+_WHOLE = re.compile(r"[0-9]+")
+"""A whole number of 0 or more, in digits alone."""
 _FRAGMENT = 12
 """How many characters of a tool call's arguments each stream chunk carries."""
 
@@ -94,6 +99,8 @@ class Script:
     calls: list[tuple[str, str]] = field(default_factory=list)
     """Tool calls, each a name and its arguments as JSON text."""
     fail: tuple[int, str | None] | None = None
+    retry_after_s: int = 1
+    """What a scripted 429's `Retry-After` says. Nothing else reads it."""
     drop_after: int | None = None
     delay_s: float = 0.0
     pace_s: float = 0.0
@@ -136,7 +143,7 @@ def create_app(
             return _error(400, f"fakellm: {error}", param="messages")
         if script.fail is not None:
             await asyncio.sleep(script.delay_s)
-            return _scripted_failure(*script.fail)
+            return _scripted_failure(*script.fail, retry_after_s=script.retry_after_s)
 
         completion_id = f"chatcmpl-fake-{next(ids):06d}"
         created = int(clock())
@@ -250,6 +257,10 @@ def _apply(script: Script, name: str, value: str) -> None:
             if not 400 <= int(status) <= 599:
                 raise ValueError(value)
             script.fail = (int(status), code.strip() or None)
+        case "retry-after":
+            if _WHOLE.fullmatch(value) is None:
+                raise ValueError(value)
+            script.retry_after_s = int(value)
         case "drop":
             script.drop_after = int(value)
             if script.drop_after < 0:
@@ -328,11 +339,11 @@ async def _sse(
         yield "data: [DONE]\n\n"
 
 
-def _scripted_failure(status: int, code: str | None) -> JSONResponse:
+def _scripted_failure(status: int, code: str | None, *, retry_after_s: int) -> JSONResponse:
     kind = "invalid_request_error" if status < 500 else "server_error"
     response = _error(status, f"fakellm: scripted failure ({status})", code=code, kind=kind)
     if status == 429:
-        response.headers["Retry-After"] = "1"
+        response.headers["Retry-After"] = str(retry_after_s)
     return response
 
 

@@ -291,6 +291,38 @@ async def test_a_scripted_429_says_when_to_retry(client: httpx.AsyncClient) -> N
     assert response.headers["retry-after"] == "1"
 
 
+@pytest.mark.parametrize(
+    ("directives", "seconds"),
+    [
+        ("[[fail: 429]] [[retry-after: 30]]", "30"),
+        ("[[retry-after: 83280]] [[fail: 429]]", "83280"),
+        ("[[fail: 429]] [[retry-after: 0]]", "0"),
+    ],
+    ids=["30 seconds", "23 hours, named first", "none at all"],
+)
+async def test_retry_after_says_how_long_a_scripted_429_asks_to_wait(
+    client: httpx.AsyncClient, directives: str, seconds: str
+) -> None:
+    response = await client.post(URL, json=asking(f"{directives} hello", stream=True))
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == seconds
+    assert response.json()["error"]["message"] == "fakellm: scripted failure (429)"
+
+
+async def test_retry_after_changes_nothing_but_a_scripted_429(client: httpx.AsyncClient) -> None:
+    """With another status there is no `Retry-After`, and without `[[fail: ...]]` the
+    reply is an echo, without the directive."""
+    failed = await client.post(URL, json=asking("[[fail: 503]] [[retry-after: 30]] hello"))
+    answered = await client.post(URL, json=asking("[[retry-after: 30]] hello"))
+
+    assert failed.status_code == 503
+    assert "retry-after" not in failed.headers
+    assert answered.status_code == 200
+    assert "retry-after" not in answered.headers
+    assert answered.json()["choices"][0]["message"]["content"] == "Echo: hello"
+
+
 async def test_drop_ends_the_stream_without_finishing_it(client: httpx.AsyncClient) -> None:
     events = await stream_events(client, asking("[[drop: 2]] hello there"))
 
@@ -344,6 +376,11 @@ async def test_pace_changes_nothing_in_a_reply_that_is_not_streamed(
         "[[pace: 60]]",
         "[[pace: slowly]]",
         "[[say: ]]",
+        "[[retry-after: -1]]",
+        "[[retry-after: 1.5]]",
+        "[[retry-after: +30]]",
+        "[[retry-after: soon]]",
+        "[[retry-after: ]]",
     ],
 )
 async def test_a_directive_that_cannot_be_read_is_a_400(
