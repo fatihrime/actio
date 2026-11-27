@@ -1,8 +1,11 @@
 // Under an answer that has ended, one quiet line says what it took (ADR 0015, revision
-// "an answer says what it took"). What only the whole stack shows: the server's own
-// clock and counts behind the line, a page that keeps it in view, and the same words
-// once the conversation is read again. The rules and their words are the component
-// tests' (lib/chat/figures.test.ts, components/chat/figures.test.tsx).
+// "an answer says what it took"), and, where more than one model is on offer, as on this
+// stack, which model wrote it (ADR 0032, revision "an answer says which model wrote it,
+// where there is a choice"). What only the whole stack shows: the server's own clock and
+// counts behind the line, a page that keeps it in view, and the same words once the
+// conversation is read again. The rules and their words are the component tests'
+// (lib/chat/figures.test.ts, components/chat/figures.test.tsx,
+// components/chat/answered-by.test.tsx).
 import { expect, test } from "./chat";
 
 // A screen small enough that the conversation runs past its end.
@@ -14,7 +17,7 @@ test.use({ viewport: { width: 1000, height: 600 } });
  * the worker's title job as long. */
 const QUESTION = `[[pace: 0.035]] ${Array.from({ length: 30 }, (_, index) => `line${String(index)}`).join("\n\n")}`;
 
-test("an answer that has ended says how fast, how soon and what it cost, in view, and the same once read again", async ({
+test("an answer that has ended says how fast, how soon, what it cost and which model wrote it, in view, and the same once read again", async ({
   chat,
   page,
 }) => {
@@ -30,6 +33,8 @@ test("an answer that has ended says how fast, how soon and what it cost, in view
     /^(\d\.\d|\d[\d,]*) tokens a second$/,
     /^first word after (\d+ ms|\d\.\d s|\d+ s)$/,
     /^\d[\d,]* credits?$/,
+    // The default model, which nobody chose: the stack offers six more.
+    "answered by Fake model",
   ]);
   // The conversation is longer than the screen, and the page followed its end.
   expect(await chat.hidden()).toBeGreaterThan(0);

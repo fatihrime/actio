@@ -81,8 +81,11 @@ test("an answer written in the place of a model whose server isn't there says wh
   expect([turn.model, turn.answered_by]).toEqual(["away", "standard"]);
   expect(turn.context_tokens).not.toBeNull();
   const tokens = new Intl.NumberFormat("en").format(turn.context_tokens ?? 0);
-  // Last in the line under the answer, by its title in the models file.
-  await expect(figures.last()).toHaveText("answered by Fake model");
+  // Last in the line under the answer, by its title in the models file, and the model
+  // asked by its own.
+  await expect(figures.last()).toHaveText(
+    "answered by Fake model in place of Away",
+  );
   // The figure the model that answered counted, in its own window.
   await expect(meter).toHaveAttribute(
     "aria-valuetext",

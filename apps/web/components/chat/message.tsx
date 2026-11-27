@@ -160,11 +160,12 @@ export function useWaitsForRenderer(words: boolean): boolean {
 }
 
 /** The models on offer, as the page last read them, or `null` until it has: what an
- * answer took names the model that wrote it by its title there, when that wasn't the
- * one asked (`figuresOf`). Given to the conversation's messages by `Chat`, and read by
- * `Took` alone. A context, and no property of `Message`: the models are read again
- * while the model that answers can't, and that draws `Took` again, never the answers'
- * words. */
+ * answer took names the model that wrote it by its title there, and the one asked when
+ * another wrote it, and says nothing of the asked model's own answer where it is the
+ * one model on offer (`figuresOf`). Given to the conversation's messages by `Chat`, and
+ * read by `Took` alone. A context, and no property of `Message`: the models are read
+ * again while the model that answers can't, and that draws `Took` again, never the
+ * answers' words. */
 export const ModelsOnOffer = createContext<readonly Model[] | null>(null);
 
 /** One message of a conversation: a question, or a model's answer.
@@ -291,9 +292,8 @@ function Answer({
  * and, for an answer that arrived on this page, the frame with its last words has been
  * painted (`useSettled`, which says why). That wait is kept here, and not in `Answer`:
  * a frame later this is drawn again, and the answer's words are not. So are the models
- * on offer, which name the model that wrote the answer when another than the one asked
- * did (`ModelsOnOffer`): read here, they draw this again when they come, and nothing
- * else of the answer. */
+ * on offer, which name the model that wrote the answer (`ModelsOnOffer`): read here,
+ * they draw this again when they come, and nothing else of the answer. */
 function Took({
   turn,
   writing,
@@ -311,12 +311,18 @@ function Took({
 }
 
 /** What an answer took, in one quiet line under it: how fast its model wrote, how long
- * its first word took, what it cost, and which model wrote it when another than the one
- * asked did (`figuresOf`). There for everyone, not on hover,
+ * its first word took, what it cost, and which model wrote it, where a reader could
+ * take it for another's (`figuresOf`). There for everyone, not on hover,
  * which a phone and a keyboard don't have. A list a screen reader names, with an item a
  * figure; the dots between them are drawn, and have nothing to say. It is the answer's
  * next sibling in the log, which puts `gap-6` between its children: a margin of less
- * than nothing brings it to 8 px under its answer, so that it reads as that answer's. */
+ * than nothing brings it to 8 px under its answer, so that it reads as that answer's.
+ *
+ * An item goes to the next row whole when it doesn't fit beside the one before it. One
+ * wider than the whole row, as a model's long title can make it, shrinks to the row,
+ * and its words fold there, inside a word when one word alone is wider than the row:
+ * never wider than the conversation, which would scroll sideways. `wrap-anywhere`,
+ * unlike `wrap-break-word`, lets the item's smallest width shrink with it. */
 function Figures({ figures }: { figures: string[] }) {
   return (
     <ul
@@ -329,7 +335,7 @@ function Figures({ figures }: { figures: string[] }) {
       className="-mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"
     >
       {figures.map((figure, index) => (
-        <li key={figure} className="flex items-center gap-2">
+        <li key={figure} className="flex items-center gap-2 wrap-anywhere">
           {index > 0 && (
             <span
               aria-hidden="true"

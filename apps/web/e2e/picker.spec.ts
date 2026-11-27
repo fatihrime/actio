@@ -232,5 +232,55 @@ test("a model whose server isn't there, chosen, is answered for by the one that 
   expect(asked(await turn).model).toBe("away");
   await expect(chat.answers).toHaveText("Echo: Name a bike part.");
   await chat.answered();
-  await expect(figuresOf(page).last()).toHaveText("answered by Fake model");
+  await expect(figuresOf(page).last()).toHaveText(
+    "answered by Fake model in place of Away",
+  );
+});
+
+test("two answers of one conversation, by the default model and by one chosen after it, each say which model wrote it, also after a reload", async ({
+  chat,
+  page,
+}) => {
+  const picker = pickerOf(page);
+  const lines = page.getByRole("list", { name: "What this answer took" });
+  /** What each item of the line under the answer `index` says, from the top. */
+  const itemsOf = (index: number) => lines.nth(index).getByRole("listitem");
+  await chat.open();
+  await expect(picker.button).toHaveAccessibleName("Model: Fake model");
+
+  // Nobody chose: the question names no model, and the default answers.
+  const first = nextTurn(page);
+  await chat.ask("Name a bike part.");
+  expect(asked(await first).model).toBeUndefined();
+  await expect(chat.answers).toHaveText("Echo: Name a bike part.");
+  await chat.answered();
+  await picker.button.click();
+  await picker.row("Local").click();
+  await expect(picker.button).toHaveAccessibleName("Model: Local");
+  const second = nextTurn(page);
+  await chat.ask("Name another.");
+  expect(asked(await second).model).toBe("local");
+  await expect(chat.answers).toHaveText([
+    "Echo: Name a bike part.",
+    "Echo: Name another.",
+  ]);
+  await chat.answered();
+
+  await expect(lines).toHaveCount(2);
+  await expect(itemsOf(0).last()).toHaveText("answered by Fake model");
+  await expect(itemsOf(1).last()).toHaveText("answered by Local");
+  const said = [
+    await itemsOf(0).allTextContents(),
+    await itemsOf(1).allTextContents(),
+  ];
+
+  await page.reload();
+
+  await expect(chat.answers).toHaveText([
+    "Echo: Name a bike part.",
+    "Echo: Name another.",
+  ]);
+  await expect(lines).toHaveCount(2);
+  await expect(itemsOf(0)).toHaveText(said[0] ?? []);
+  await expect(itemsOf(1)).toHaveText(said[1] ?? []);
 });

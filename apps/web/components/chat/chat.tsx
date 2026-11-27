@@ -206,8 +206,9 @@ export function Chat({
    * whoever holds the choice: this places it in the box's row, and its own state never
    * draws this conversation again (`ModelPicker`). */
   picker: ReactElement | null;
-  /** The models on offer, once read: which say the title of a model that answered in
-   * another's place, and the window of one that stands in for `model`. */
+  /** The models on offer, once read: which say the title of the model that wrote an
+   * answer, and of the one asked when another wrote it, and the window of one that
+   * stands in for `model`. */
   models: readonly Model[] | null;
   /** The models that cost nothing, to offer when a usage limit is reached. */
   offers: Model[];
@@ -763,9 +764,9 @@ export function Chat({
   const waiting = wait !== null && wait.of === problem ? wait : null;
 
   return (
-    // What an answer took names the model that wrote it by its title, when another than
-    // the one asked did: the models are read by that alone, and no answer's words are
-    // drawn again when they come, or are read again (message.tsx).
+    // What an answer took names the model that wrote it by its title, where a reader
+    // could take it for another's: the models are read by that alone, and no answer's
+    // words are drawn again when they come, or are read again (message.tsx).
     <ModelsOnOffer value={models}>
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto">

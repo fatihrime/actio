@@ -1,8 +1,10 @@
 // What an answer took, in words: how fast its model wrote, how long its first word
-// took, what it cost, and which model wrote it when that wasn't the one asked. The
-// server counts the tokens and the credits, notes the moments and names the model; the
-// page only divides, and words the numbers (ADR 0015, revision "an answer says what it
-// took"; ADR 0028, revision "a turn says which model answered, and the page says so").
+// took, what it cost, and which model wrote it, where a reader could take it for
+// another's. The server counts the tokens and the credits, notes the moments and names
+// the model; the page only divides, and words the numbers (ADR 0015, revision "an answer
+// says what it took"; ADR 0028, revision "a turn says which model answered, and the page
+// says so"; ADR 0032, revision "an answer says which model wrote it, where there is a
+// choice").
 import type { Model, Turn } from "@/lib/api/client";
 import { timeTaken } from "@/lib/time";
 
@@ -33,11 +35,10 @@ export function answeredInPlace(turn: Turn): boolean {
 
 /** What a turn took, as the words to show under its answer, in this order: how fast
  * its model wrote, how long its first word took, what it cost, and, last, which model
- * wrote it, when a model asked in the place of the one asked did: by its title among
- * `models`, the models on offer, or by its name in the record when they no longer have
- * it. That one waits for the models, `null` until they are read: last, so that nothing
- * else in the list moves when it comes. Only the figures its record holds and that can
- * be right; none while it is still being written. */
+ * wrote it (`writtenBy`). That one waits for `models`, the models on offer, `null`
+ * until they are read: last, so that nothing else in the list moves when it comes. Only
+ * the figures its record holds and that can be right; none while it is still being
+ * written. */
 export function figuresOf(
   turn: Turn,
   models: readonly Model[] | null,
@@ -63,12 +64,36 @@ export function figuresOf(
       `${WHOLE.format(credits)} ${credits === 1 ? "credit" : "credits"}`,
     );
   }
-  if (models !== null && answeredInPlace(turn)) {
-    const by = answeredBy(turn);
-    const title = models.find((model) => model.id === by)?.title ?? by;
-    figures.push(`answered by ${title}`);
+  const writer = models === null ? null : writtenBy(turn, models);
+  if (writer !== null) {
+    figures.push(writer);
   }
   return figures;
+}
+
+/** Which model wrote a turn's answer, in words, wherever a reader could take it for
+ * another's: "answered by" the model that wrote it, and "in place of" the one asked
+ * when that wasn't the one that wrote it, each by its title among `models`, or by its
+ * name in the record when they no longer have it. Not said of the asked model's own
+ * answer where it is the one model on offer: there it would say the same under each
+ * such answer, what the empty conversation says already. Nor of a turn whose record
+ * names no model that wrote it, however many are on offer: one given up on may hold a
+ * stand-in's words, so such a turn isn't taken for the asked model's here, as
+ * `answeredBy` takes it. */
+function writtenBy(turn: Turn, models: readonly Model[]): string | null {
+  const writer = turn.answered_by;
+  if (writer === null) {
+    return null;
+  }
+  const titled = (id: string) =>
+    models.find((model) => model.id === id)?.title ?? id;
+  if (writer !== turn.model) {
+    return `answered by ${titled(writer)} in place of ${titled(turn.model)}`;
+  }
+  const [only, ...others] = models;
+  return others.length === 0 && only?.id === writer
+    ? null
+    : `answered by ${titled(writer)}`;
 }
 
 /** How many tokens a second the model wrote: over the time its server says it took to

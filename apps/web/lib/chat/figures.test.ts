@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Turn } from "@/lib/api/client";
-import { chained, model, turn } from "@/tests/fake-api";
+import { chained, model, secondModel, turn } from "@/tests/fake-api";
 
 import { figuresOf, SHORTEST_WRITING_MS } from "./figures";
 
@@ -235,57 +235,138 @@ describe("figuresOf", () => {
 
   // Since ADR 0028 a model may name others that are asked in its place, and the turn is
   // the asked one's whoever answered: its record names the one that wrote the answer
-  // (ADR 0028, revision "a turn says which model answered, and the page says so").
+  // (ADR 0028, revision "a turn says which model answered, and the page says so"). And
+  // since ADR 0032 the reader chooses the model that answers, so that two answers of one
+  // conversation can be two models' own: the line names the model that wrote each,
+  // wherever a reader could take it for another's (ADR 0032, revision "an answer says
+  // which model wrote it, where there is a choice").
   describe("which model wrote it", () => {
     /** The models of an installation whose default one names a second to stand in for
-     * it. */
+     * it: "Qwen 3.5 4B" and "Second model". */
     const CHAINED = chained().models;
-    /** A turn of the default model that the second answered, with a credit or two. */
-    const stoodIn = (changes: Partial<Turn> = {}) =>
-      ended({ answered_by: "second", credits: 2, ...changes });
+    /** A turn that `asked` was asked, and whose record says `by` wrote its answer, with
+     * a credit or two. */
+    const answered = (
+      asked: string,
+      by: string | null,
+      changes: Partial<Turn> = {},
+    ) => ended({ model: asked, answered_by: by, credits: 2, ...changes });
 
-    it("is said last, by the title of the model that wrote it in the place of the one asked", () => {
-      const took = stoodIn({
+    it.each([
+      {
+        asked: "standard",
+        by: "standard",
+        offered: "it alone",
+        models: OFFERED,
+        said: [],
+      },
+      {
+        asked: "standard",
+        by: "standard",
+        offered: "it and another",
+        models: CHAINED,
+        said: ["answered by Qwen 3.5 4B"],
+      },
+      {
+        asked: "local",
+        by: "local",
+        offered: "another alone",
+        models: OFFERED,
+        said: ["answered by local"],
+      },
+      {
+        asked: "standard",
+        by: "second",
+        offered: "both",
+        models: CHAINED,
+        said: ["answered by Second model in place of Qwen 3.5 4B"],
+      },
+      {
+        asked: "standard",
+        by: "second",
+        offered: "the one asked alone",
+        models: OFFERED,
+        said: ["answered by second in place of Qwen 3.5 4B"],
+      },
+      {
+        asked: "gone",
+        by: "standard",
+        offered: "the one that wrote it alone",
+        models: OFFERED,
+        said: ["answered by Qwen 3.5 4B in place of gone"],
+      },
+    ])(
+      "asked of $asked and written by $by, with $offered on offer, says $said",
+      ({ asked, by, models, said }) => {
+        expect(figuresOf(answered(asked, by), models)).toEqual([
+          "2 credits",
+          ...said,
+        ]);
+      },
+    );
+
+    it("is said last, after every other figure, and alone when the record has no other", () => {
+      const took = {
         output_tokens: 34,
         generation_ms: 4 * SECOND,
         first_word_at: at(1.2 * SECOND),
         finished_at: at(3.2 * SECOND),
-      });
+      };
+      const figures = ["8.5 tokens a second", "first word after 1.2 s"];
 
-      expect(figuresOf(took, CHAINED)).toEqual([
-        "8.5 tokens a second",
-        "first word after 1.2 s",
+      expect(figuresOf(answered("standard", "second", took), CHAINED)).toEqual([
+        ...figures,
         "2 credits",
-        "answered by Second model",
+        "answered by Second model in place of Qwen 3.5 4B",
       ]);
-      expect(figuresOf(stoodIn({ credits: null }), CHAINED)).toEqual([
-        "answered by Second model",
-      ]);
+      expect(
+        figuresOf(answered("standard", "standard", took), CHAINED),
+      ).toEqual([...figures, "2 credits", "answered by Qwen 3.5 4B"]);
+      expect(
+        figuresOf(answered("standard", "second", { credits: null }), CHAINED),
+      ).toEqual(["answered by Second model in place of Qwen 3.5 4B"]);
+      expect(
+        figuresOf(answered("standard", "standard", { credits: null }), CHAINED),
+      ).toEqual(["answered by Qwen 3.5 4B"]);
     });
 
-    it("is said by the record's name for it, when the models no longer have it", () => {
-      expect(figuresOf(stoodIn(), OFFERED)).toEqual([
-        "2 credits",
-        "answered by second",
-      ]);
-    });
-
-    it("is not said of an answer the model asked wrote itself, nor of a turn whose record names no model", () => {
-      expect(figuresOf(stoodIn({ answered_by: "standard" }), CHAINED)).toEqual([
-        "2 credits",
-      ]);
-      // Recorded before the record named one: taken for the asked model's.
-      expect(figuresOf(stoodIn({ answered_by: null }), CHAINED)).toEqual([
-        "2 credits",
-      ]);
-    });
+    it.each([
+      { offered: "one model", models: OFFERED },
+      { offered: "two models", models: CHAINED },
+      { offered: "no model it names", models: [secondModel()] },
+    ])(
+      "is not said of a turn whose record names no model that wrote it, with $offered on offer",
+      ({ models }) => {
+        // Given up on, it may hold a stand-in's draft; or recorded before the record
+        // named one. Either way the record doesn't say it was the asked model's.
+        expect(figuresOf(answered("standard", null), models)).toEqual([
+          "2 credits",
+        ]);
+      },
+    );
 
     it("is not said before the models are read, and the rest is said as ever", () => {
-      expect(figuresOf(stoodIn(), null)).toEqual(["2 credits"]);
+      expect(figuresOf(answered("standard", "second"), null)).toEqual([
+        "2 credits",
+      ]);
+      expect(figuresOf(answered("standard", "standard"), null)).toEqual([
+        "2 credits",
+      ]);
     });
 
     it("is not said while the answer is still being written", () => {
-      expect(figuresOf(stoodIn({ status: "running" }), CHAINED)).toEqual([]);
+      expect(
+        figuresOf(
+          answered("standard", "second", { status: "running" }),
+          CHAINED,
+        ),
+      ).toEqual([]);
+      expect(
+        figuresOf(
+          answered("standard", "standard", { status: "running" }),
+          CHAINED,
+        ),
+      ).toEqual([]);
     });
   });
 });
