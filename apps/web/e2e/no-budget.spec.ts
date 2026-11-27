@@ -63,8 +63,9 @@ test("a question no model has budget left for is refused for now, and the page c
 
   // The model's one request a minute is counted in the stack's Valkey, which keeps the
   // count between tests: a fresh stack has the request, and a stack kept running, or a
-  // run that repeats this test, finds it as the last run left it. So the test asks
-  // until a question is refused with enough of its wait left to look at:
+  // run that repeats this test, finds it as the last run left it, and a test of the
+  // picker that asks it beside this one may take it (e2e/picker.spec.ts). So the test
+  // asks until a question is refused with enough of its wait left to look at:
   //
   // - a question that is answered has just taken the minute's request, and the next,
   //   asked right after, is refused for about a minute;

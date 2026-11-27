@@ -57,6 +57,15 @@ export function timeLeft(ms: number): string {
   return both(Math.floor(hours / 24), "day", hours % 24, "hour");
 }
 
+/** How long a wait of `ms` milliseconds is, roughly: for a wait that is said once, as it
+ * was known when it was read, and not counted down. "under a minute" where `timeLeft`
+ * says seconds, and otherwise "about" and its words: "about 1 minute", "about 4 hours
+ * 12 minutes". */
+export function timeLeftRoughly(ms: number): string {
+  const seconds = Math.max(1, Math.ceil(ms / 1000));
+  return seconds < 60 ? "under a minute" : `about ${timeLeft(ms)}`;
+}
+
 /** How long something took that lasted `ms` milliseconds: "240 ms" under a second, to
  * the nearest ten and "10 ms" at the least; "1.2 s" under ten seconds; "42 s" under a
  * minute; then "1 min 5 s". A time that rounds up to the next step is said in that

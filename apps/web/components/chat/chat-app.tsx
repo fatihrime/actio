@@ -444,10 +444,20 @@ function Current({
   const { model: answers, named } = answering(models, usage.standIn, chosen);
   // The model that answers is loaded at its server ahead of the first question, once
   // the page knows it and it is ready: also when it becomes ready, and when another
-  // model answers. Nothing on the page waits for it, or says so (ADR 0026).
+  // model answers. Nothing on the page waits for it, or says so (ADR 0026). By its id
+  // and its status, and not by the list's object for it: a read of the list brings a
+  // new one whenever anything in the list changed, as the wait of a model at its
+  // provider's limit does at every read, and none of that is a reason to ask again.
+  const answersId = answers?.id ?? null;
+  const answersStatus = answers?.status ?? null;
   useEffect(() => {
-    warmUp(holder, answers);
-  }, [holder, answers]);
+    warmUp(
+      holder,
+      answersId === null || answersStatus === null
+        ? null
+        : { id: answersId, status: answersStatus },
+    );
+  }, [holder, answersId, answersStatus]);
   // Made here, whole, and placed by the conversation: what the picker does on its own
   // never draws the conversation again, and the conversation's renders, one for each
   // piece of an answer, leave the picker alone (`ModelPicker`). With one model on offer

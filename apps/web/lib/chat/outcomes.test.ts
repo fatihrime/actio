@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiProblem } from "@/lib/api/client";
-import type { Problem } from "@/lib/api/client";
+import type { Model, Problem } from "@/lib/api/client";
+import { freeModel, model, secondModel } from "@/tests/fake-api";
 import { recorded } from "@/tests/recorded";
 
-import { refusedForNow } from "./outcomes";
+import { meetsInShort, refusedForNow } from "./outcomes";
 
 const NOW = Date.parse("2026-11-10T12:00:00Z");
 
@@ -120,5 +121,109 @@ describe("refusedForNow", () => {
     ).toBeNull();
     expect(refusedForNow(new TypeError("fetch failed"), NOW)).toBeNull();
     expect(refusedForNow(null, NOW)).toBeNull();
+  });
+});
+
+describe("meetsInShort", () => {
+  /** The models on offer: the default, which names "Second model" to stand in for it,
+   * Local, and "Second model". */
+  const OFFERED = [model({ then: ["second"] }), freeModel(), secondModel()];
+
+  /** What the row of the default says, the list having said `changes` of it. */
+  function said(changes: Partial<Model>): string | null {
+    return meetsInShort(model({ then: ["second"], ...changes }), OFFERED);
+  }
+
+  it.each<[string, Partial<Model>, string | null]>([
+    ["isn't downloaded", { status: "missing" }, "Isn't downloaded yet"],
+    ["can't be reached", { status: "unreachable" }, "Can't be reached"],
+    [
+      "is refused for a second",
+      { asked_first: null, retry_after: 1 },
+      "At its provider's limit for under a minute",
+    ],
+    [
+      "is refused for 59 seconds",
+      { asked_first: null, retry_after: 59 },
+      "At its provider's limit for under a minute",
+    ],
+    [
+      "is refused for 60 seconds",
+      { asked_first: null, retry_after: 60 },
+      "At its provider's limit for about 1 minute",
+    ],
+    [
+      "is refused for an hour",
+      { asked_first: null, retry_after: 3600 },
+      "At its provider's limit for about 1 hour",
+    ],
+    [
+      "is refused for a day",
+      { asked_first: null, retry_after: 86_400 },
+      "At its provider's limit for about 24 hours",
+    ],
+    ["is given to it, which keeps failing", { failing: true }, "Keeps failing"],
+    [
+      "is given to another model first",
+      { asked_first: "second" },
+      "Second model answers for now",
+    ],
+    [
+      "is given first to a model the list doesn't have",
+      { asked_first: "elsewhere" },
+      "elsewhere answers for now",
+    ],
+    [
+      "is given to another model first, which keeps failing",
+      { asked_first: "second", failing: true },
+      "Second model answers for now, and keeps failing",
+    ],
+    ["is given to it, and nothing is in the way", {}, null],
+    // The list says no such thing of a model: nothing of it is made up.
+    ["is given to nobody, and nothing says why", { asked_first: null }, null],
+  ])("says of a model whose shortest question %s: %s", (_, changes, words) => {
+    expect(said(changes)).toBe(words);
+  });
+
+  it("says why a model can't answer before anything else", () => {
+    expect(said({ status: "unreachable", retry_after: 60 })).toBe(
+      "Can't be reached",
+    );
+    expect(said({ status: "missing", failing: true })).toBe(
+      "Isn't downloaded yet",
+    );
+    expect(said({ status: "missing", asked_first: "second" })).toBe(
+      "Isn't downloaded yet",
+    );
+  });
+
+  it("says a wait before a model that keeps failing, and before another model that answers", () => {
+    expect(said({ retry_after: 30, failing: true })).toBe(
+      "At its provider's limit for under a minute",
+    );
+    expect(said({ retry_after: 30, asked_first: "second" })).toBe(
+      "At its provider's limit for under a minute",
+    );
+  });
+
+  it("says that a model keeps failing of the model that does: the row's own, or the other by its title", () => {
+    expect(said({ failing: true })).toBe("Keeps failing");
+    expect(said({ failing: true, asked_first: "second" })).toBe(
+      "Second model answers for now, and keeps failing",
+    );
+    expect(said({ failing: true, asked_first: "elsewhere" })).toBe(
+      "elsewhere answers for now, and keeps failing",
+    );
+  });
+
+  it("names the other model by its title, from the models it is given", () => {
+    const renamed = [model(), secondModel({ title: "Renamed" })];
+
+    expect(meetsInShort(model({ asked_first: "second" }), renamed)).toBe(
+      "Renamed answers for now",
+    );
+    expect(meetsInShort(model({ asked_first: "second" }), [])).toBe(
+      "second answers for now",
+    );
   });
 });

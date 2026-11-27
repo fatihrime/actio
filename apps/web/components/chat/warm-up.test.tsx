@@ -234,6 +234,46 @@ describe("a model that is asked to be loaded", () => {
     expect(loaded(api.to(WARM_UP))).toEqual([`POST ${STANDARD}`, LOCAL]);
   });
 
+  it("isn't asked again because the list, read anew, says another wait of a model at its provider's limit", async () => {
+    const clock = clockAt();
+    // Another model's wait, shorter at each read: the list is a new one each time,
+    // and nothing of the model that answers has changed in it.
+    const listing = (wait: number) => () =>
+      json(200, {
+        default: "standard",
+        models: [model(), freeModel({ asked_first: null, retry_after: wait })],
+      });
+    const api = fakeApi().on(MODELS, listing(600), listing(539));
+    const { open } = await newPage();
+    const user = open();
+    await waitFor(() => {
+      expect(loaded(api.to(WARM_UP))).toEqual([`POST ${STANDARD}`]);
+    });
+
+    // The minute is over: whatever asked now would be sent.
+    clock.advance(61 * SECOND);
+    await user.click(await screen.findByRole("button", { name: /^Model: / }));
+
+    // The list that was read as the menu opened is on the page.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("menuitemradio", { name: "Local" }),
+      ).toHaveAccessibleDescription(
+        "At its provider's limit for about 9 minutes Free",
+      );
+    });
+    expect(loaded(api.to(WARM_UP))).toEqual([`POST ${STANDARD}`]);
+    // And something written is a reason to ask, as ever, the minute being over.
+    await user.keyboard("{Escape}");
+    await user.type(screen.getByLabelText("Message"), "Hello");
+    await waitFor(() => {
+      expect(loaded(api.to(WARM_UP))).toEqual([
+        `POST ${STANDARD}`,
+        `POST ${STANDARD}`,
+      ]);
+    });
+  });
+
   it("is asked for anew in a new session, also within the minute", async () => {
     clockAt();
     const api = fakeApi().on(LOG_IN, () => json(200, account()));

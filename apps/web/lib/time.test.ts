@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { atTime, timeLeft, timeTaken } from "./time";
+import { atTime, timeLeft, timeLeftRoughly, timeTaken } from "./time";
 
 // The tests' time zone is UTC (vitest.config.mts). Between a time and its "AM" or
 // "PM" the browser puts a space that doesn't break, which `\s` matches.
@@ -64,6 +64,36 @@ describe("timeLeft", () => {
   it("never says that no time is left", () => {
     expect(timeLeft(0)).toBe("1 second");
     expect(timeLeft(-5000)).toBe("1 second");
+  });
+});
+
+describe("timeLeftRoughly", () => {
+  const SECOND = 1000;
+  const MINUTE = 60 * SECOND;
+  const HOUR = 60 * MINUTE;
+  const DAY = 24 * HOUR;
+
+  it.each([
+    // Where `timeLeft` says seconds.
+    [SECOND, "under a minute"],
+    [59 * SECOND, "under a minute"],
+    // From a minute on, what `timeLeft` says, rounded up as it rounds: a millisecond
+    // past 59 seconds is a minute to it.
+    [59 * SECOND + 1, "about 1 minute"],
+    [MINUTE, "about 1 minute"],
+    [MINUTE + SECOND, "about 2 minutes"],
+    [59 * MINUTE + SECOND, "about 1 hour"],
+    [HOUR, "about 1 hour"],
+    [90 * MINUTE, "about 1 hour 30 minutes"],
+    // The longest wait a provider may name that is kept as it was named.
+    [DAY, "about 24 hours"],
+  ])("says %d ms as %s", (ms, words) => {
+    expect(timeLeftRoughly(ms)).toBe(words);
+  });
+
+  it("says a wait that is over, or less than a second, as under a minute", () => {
+    expect(timeLeftRoughly(0)).toBe("under a minute");
+    expect(timeLeftRoughly(1)).toBe("under a minute");
   });
 });
 

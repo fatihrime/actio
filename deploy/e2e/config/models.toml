@@ -118,10 +118,12 @@ then = ["standard"]
 # The fake on the provider above, with a budget of one request a minute, of which Actio
 # keeps the one: a question asked within a minute of the last one sent to it is refused
 # for now, and the page counts the wait down (apps/web/e2e/no-budget.spec.ts). That
-# test gives each of its questions this model's name on its way out, as for "away".
-# The count is kept in the stack's Valkey, for a minute, so a test meets it as the last
-# one left it. Priced like "standard" (plans.toml), so that it isn't offered at a limit
-# either.
+# test gives each of its questions this model's name on its way out, as for "away", and
+# a test of the picker chooses it in the page, and asks it until its row says that it
+# is at its provider's limit (apps/web/e2e/picker.spec.ts). The count is kept in the
+# stack's Valkey, for a minute, so a test meets it as the last one left it, or as the
+# other, running beside it, does. Priced like "standard" (plans.toml), so that it isn't
+# offered at a limit either.
 [models.rationed]
 title = "Rationed"
 provider = "fake-rationed"

@@ -818,6 +818,175 @@ describe("the model picker's rows, of what each model costs", () => {
   });
 });
 
+describe("the model picker's rows, of what a question to each model would meet now", () => {
+  /** What the list says of a model that the shortest question to is refused for now,
+   * for `seconds`. */
+  const atItsLimit = (seconds: number) => ({
+    asked_first: null,
+    retry_after: seconds,
+  });
+
+  it("say it under the title, before what each costs, each a line of its own, and are named by their titles alone", async () => {
+    fakeApi().on(MODELS, () =>
+      json(200, {
+        default: "standard",
+        models: [
+          model(),
+          freeModel(atItsLimit(42)),
+          secondModel({ failing: true }),
+          model({
+            id: "away",
+            title: "Away",
+            then: ["standard"],
+            asked_first: "standard",
+          }),
+        ],
+      }),
+    );
+    const user = open();
+
+    await user.click(await picker());
+
+    const limit = "At its provider's limit for under a minute";
+    const answers = `${DEFAULT} answers for now`;
+    expect(row("Local")).toHaveAccessibleName("Local");
+    expect(row("Local")).toHaveAccessibleDescription(`${limit} Free`);
+    expect(linesNamedBy(row("Local"))).toEqual([limit, "Free"]);
+    expect(row("Local").textContent).toBe(`Local${limit}Free`);
+    expect(row("Second model")).toHaveAccessibleName("Second model");
+    expect(row("Second model")).toHaveAccessibleDescription(
+      `Keeps failing ${SHIPPED}`,
+    );
+    expect(linesNamedBy(row("Second model"))).toEqual([
+      "Keeps failing",
+      SHIPPED,
+    ]);
+    expect(row("Second model").textContent).toBe(
+      `Second modelKeeps failing${SHIPPED}`,
+    );
+    expect(row("Away")).toHaveAccessibleName("Away");
+    expect(row("Away")).toHaveAccessibleDescription(`${answers} ${SHIPPED}`);
+    expect(linesNamedBy(row("Away"))).toEqual([answers, SHIPPED]);
+    expect(row("Away").textContent).toBe(`Away${answers}${SHIPPED}`);
+    expect(within(row("Away")).getByText(answers)).toBeVisible();
+    // The model that is given its own question says nothing of it.
+    expect(row(DEFAULT)).toHaveAccessibleDescription(SHIPPED);
+    expect(linesNamedBy(row(DEFAULT))).toEqual([SHIPPED]);
+  });
+
+  it("say it alone where no cost is said", async () => {
+    fakeApi().on(MODELS, () =>
+      json(200, {
+        default: "standard",
+        models: [
+          model(),
+          secondModel(atItsLimit(600)),
+          model({ id: "third", title: "Third", failing: true }),
+          model({
+            id: "away",
+            title: "Away",
+            then: ["second"],
+            asked_first: "second",
+          }),
+        ],
+      }),
+    );
+    const user = open();
+
+    await user.click(await picker());
+
+    const limit = "At its provider's limit for about 10 minutes";
+    expect(row("Second model")).toHaveAccessibleDescription(limit);
+    expect(linesNamedBy(row("Second model"))).toEqual([limit]);
+    expect(row("Second model").textContent).toBe(`Second model${limit}`);
+    expect(row("Third")).toHaveAccessibleDescription("Keeps failing");
+    expect(linesNamedBy(row("Third"))).toEqual(["Keeps failing"]);
+    expect(row("Away")).toHaveAccessibleDescription(
+      "Second model answers for now",
+    );
+    expect(linesNamedBy(row("Away"))).toEqual(["Second model answers for now"]);
+    expect(row(DEFAULT)).not.toHaveAttribute("aria-describedby");
+    expect(row(DEFAULT).textContent).toBe(DEFAULT);
+    expect(within(menu()).queryByText(/credit|Free/)).not.toBeInTheDocument();
+  });
+
+  it("say what the list says each time the menu is opened", async () => {
+    const atLimit = later(() => twoModels(atItsLimit(60)));
+    const api = fakeApi().on(
+      MODELS,
+      () => twoModels(),
+      () => twoModels({ failing: true }),
+      atLimit.answer,
+    );
+    const user = open();
+    const button = await picker();
+
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(row("Local")).toHaveAccessibleDescription("Keeps failing Free");
+    });
+    expect(api.to(MODELS)).toHaveLength(2);
+
+    await user.keyboard("{Escape}");
+    await user.click(button);
+
+    // What was known is shown at once, and the row changes when the answer comes.
+    await waitFor(() => {
+      expect(api.to(MODELS)).toHaveLength(3);
+    });
+    expect(row("Local")).toHaveAccessibleDescription("Keeps failing Free");
+    atLimit.release();
+    await waitFor(() => {
+      expect(row("Local")).toHaveAccessibleDescription(
+        "At its provider's limit for about 1 minute Free",
+      );
+    });
+    // Said as the list said it: no clock is read for it.
+    expect(within(menu()).queryByRole("timer")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["is at its provider's limit", atItsLimit(600)],
+    ["keeps failing", { failing: true }],
+  ])(
+    "has nothing else on the page follow a model that answers and %s",
+    async (_, changes) => {
+      const api = fakeApi().on(MODELS, () =>
+        json(200, {
+          default: "standard",
+          models: [model(changes), freeModel()],
+        }),
+      );
+      const user = open();
+      const button = await picker();
+      await user.type(box(), "Hello");
+
+      // The button names the model as ever, Send is open, and nothing is said of it
+      // anywhere but in its row.
+      expect(button).toHaveAccessibleName(`Model: ${DEFAULT}`);
+      expect(send()).toBeEnabled();
+      expect(send()).not.toHaveAttribute("title");
+      expect(screen.queryAllByRole("status")).toEqual([]);
+      expect(screen.queryByRole("timer")).not.toBeInTheDocument();
+      // The menu is on the page, hidden, from when its button is.
+      expect(
+        screen
+          .queryAllByText(/provider's limit|Keeps failing/)
+          .filter((said) => !menu().contains(said)),
+      ).toEqual([]);
+      // And the list isn't read again and again, as it is while the model that answers
+      // can't: it looks every five seconds then.
+      await new Promise((resolve) => {
+        setTimeout(resolve, 6 * SECOND);
+      });
+      expect(api.to(MODELS)).toHaveLength(1);
+      expect(send()).toBeEnabled();
+    },
+    15_000,
+  );
+});
+
 describe("the model picker at a usage limit", () => {
   it("names the model that stands in, and a choice in it ends the standing in", async () => {
     clockAt();

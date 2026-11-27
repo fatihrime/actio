@@ -27,8 +27,13 @@ const asked = new Map<string, number>();
  * held under (`Session.holder`): a new session asks anew.
  *
  * It says nothing of how that went. A refusal, or a request that fails, changes
- * nothing on the page: nobody asked for this, and the question will be asked anyway. */
-export function warmUp(holder: string | null, model: Model | null): void {
+ * nothing on the page: nobody asked for this, and the question will be asked anyway.
+ *
+ * It reads the model's id and its status, and nothing else the list says of it. */
+export function warmUp(
+  holder: string | null,
+  model: Pick<Model, "id" | "status"> | null,
+): void {
   if (holder === null || model?.status !== "ready") {
     return;
   }

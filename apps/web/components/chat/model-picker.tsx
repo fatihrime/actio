@@ -5,7 +5,7 @@ import type { KeyboardEvent } from "react";
 
 import { CheckIcon, ChevronUpIcon } from "@/components/icons";
 import type { Model } from "@/lib/api/client";
-import { notReadyInShort } from "@/lib/chat/outcomes";
+import { meetsInShort } from "@/lib/chat/outcomes";
 import { pricesSaid } from "@/lib/chat/prices";
 
 /** The room kept between the menu and the button under it, and between the menu and
@@ -72,7 +72,9 @@ export function ModelPicker({
   const menu = useRef<HTMLDivElement>(null);
   const menuId = useId();
   // What each row says of its model's cost, from the list as it was read last: where
-  // the models' words differ, and nowhere when they are all the same.
+  // the models' words differ, and nowhere when they are all the same. What a question
+  // to each would meet is said from the same list, and never counted down: it is as old
+  // as the read, which opening the menu makes anew.
   const prices = pricesSaid(models);
 
   function show() {
@@ -226,6 +228,7 @@ export function ModelPicker({
           <Choice
             key={model.id}
             model={model}
+            why={meetsInShort(model, models)}
             price={prices.get(model.id) ?? null}
             checked={model.id === answering.id}
             onChoose={() => {
@@ -239,26 +242,32 @@ export function ModelPicker({
   );
 }
 
-/** One model of the menu: its title, and under it, when it can't answer right now, why,
- * in a few words, then what it costs, when the menu says that (`pricesSaid`), each a
+/** One model of the menu: its title, and under it what a question to it would meet
+ * right now, when anything is in its way, in a few words (`meetsInShort`): why it can't
+ * answer, that it is at its provider's limit, that it keeps failing, or which model
+ * answers for now; then what it costs, when the menu says that (`pricesSaid`), each a
  * line of its own. The title alone names the row; the other two, in that order, are its
- * description. It can be chosen all the same: chosen, the page says what to do about
- * it. The one that answers has a tick, in the colour of the words, which shows where a
- * system's own few colours take the place of the page's too. */
+ * description. It can be chosen all the same: chosen, a model that can't answer has the
+ * page say what to do about it. The one that answers has a tick, in the colour of the
+ * words, which shows where a system's own few colours take the place of the page's
+ * too. */
 function Choice({
   model,
+  why,
   price,
   checked,
   onChoose,
 }: {
   model: Model;
+  /** What a question to it would meet right now, in words, or nothing where nothing is
+   * in its way. */
+  why: string | null;
   /** What it costs, in words, or nothing where the menu says no cost. */
   price: string | null;
   checked: boolean;
   onChoose: () => void;
 }) {
   const id = useId();
-  const why = notReadyInShort(model);
   const described = [
     ...(why === null ? [] : [`${id}why`]),
     ...(price === null ? [] : [`${id}price`]),

@@ -1,7 +1,8 @@
-// How a turn ended, and what went wrong with a request, in words for a person, and how
-// long a question refused for now waits.
+// How a turn ended, and what went wrong with a request, in words for a person, how long
+// a question refused for now waits, and what a question to a model would meet now.
 import { ApiProblem } from "@/lib/api/client";
 import type { Model, Turn } from "@/lib/api/client";
+import { timeLeftRoughly } from "@/lib/time";
 
 import { answeredInPlace } from "./figures";
 
@@ -155,18 +156,46 @@ export function isSessionEnd(error: unknown): boolean {
   return error instanceof ApiProblem && error.status === 401;
 }
 
-/** Why a model can't answer right now, in a few words: what the menu of models says
- * under its title (`ModelPicker`). Nothing when it can. The whole of it, with what to
- * do about it, is `notReady`'s, which the page says once that model answers. */
-export function notReadyInShort(model: Model): string | null {
-  switch (model.status) {
-    case "ready":
-      return null;
-    case "missing":
-      return "Isn't downloaded yet";
-    case "unreachable":
-      return "Can't be reached";
+/** What a question to a model would meet right now, in a few words: what the menu of
+ * models says under its title (`ModelPicker`), from what the list said of the shortest
+ * question to it (ADR 0032, revision "the list says what a question to a model would
+ * meet now, and the menu's rows say it"). Nothing when nothing is in its way. The first
+ * of these that applies:
+ *
+ * - why it can't answer: the whole of it, with what to do about it, is `notReady`'s,
+ *   which the page says once that model answers;
+ * - that it is at its provider's limit, and for how long, as the list said it: the
+ *   row is no countdown, and the list is read again each time the menu opens;
+ * - that it keeps failing, when it is given its own question all the same;
+ * - which other model answers for now, by its title in `models`, or by its id where
+ *   they have no model of that id, and that that one keeps failing, when it does: a
+ *   row never says of its own model what is so of another. */
+export function meetsInShort(
+  model: Model,
+  models: readonly Model[],
+): string | null {
+  if (model.status === "missing") {
+    return "Isn't downloaded yet";
   }
+  if (model.status === "unreachable") {
+    return "Can't be reached";
+  }
+  if (model.retry_after !== null) {
+    return `At its provider's limit for ${timeLeftRoughly(model.retry_after * 1000)}`;
+  }
+  const first = model.asked_first;
+  if (first === null) {
+    // Nobody is given the question, and nothing above says why: the list says no such
+    // thing of a model, and the row says nothing of it.
+    return null;
+  }
+  if (first === model.id) {
+    return model.failing ? "Keeps failing" : null;
+  }
+  const title = models.find((each) => each.id === first)?.title ?? first;
+  return model.failing
+    ? `${title} answers for now, and keeps failing`
+    : `${title} answers for now`;
 }
 
 /** Why a model can't answer right now, and what to do about it. Nothing when it can. */
