@@ -112,7 +112,7 @@ def limits(counters: Counters) -> UsageLimits:
 
 @pytest.fixture
 def guest() -> Account:
-    return Account(new_id(), is_guest=True)
+    return Account(new_id(), is_guest=True, own_plan=None)
 
 
 async def reserve(
@@ -197,7 +197,7 @@ async def test_a_new_account_has_its_plans_windows_and_nothing_used(
 async def test_an_account_has_another_plan_than_a_guest(
     limits: UsageLimits, db: AsyncSession
 ) -> None:
-    status = await limits.status(db, Account(new_id(), is_guest=False), now=NOON)
+    status = await limits.status(db, Account(new_id(), is_guest=False, own_plan=None), now=NOON)
 
     assert status.plan.name == "member"
     assert [w.limit for w in status.windows] == [10_000, 30_000]
@@ -425,7 +425,10 @@ async def test_when_both_are_full_the_refusal_names_the_one_that_starts_over_las
     one_session_a_week = {"title": "Guest", "session_credits": 1_000, "week_credits": 1_000}
     limits.plans = plans(accounts="guest", plans={"guest": one_session_a_week})
     sunday_evening = WEEK_ENDS - timedelta(hours=2)
-    on_sunday, guest = Account(new_id(), is_guest=True), Account(new_id(), is_guest=True)
+    on_sunday, guest = (
+        Account(new_id(), is_guest=True, own_plan=None),
+        Account(new_id(), is_guest=True, own_plan=None),
+    )
     for account, now in ((guest, NOON), (on_sunday, sunday_evening)):
         reserved = await reserve(limits, db, account, now=now)
         await finish(limits, db, reserved, read=100, written=800, now=now)
@@ -459,7 +462,7 @@ async def test_a_free_model_is_never_refused_and_uses_nothing_up(
 
 async def test_a_plan_without_limits_limits_nothing(limits: UsageLimits, db: AsyncSession) -> None:
     limits.plans = plans(accounts="staff")
-    staff = Account(new_id(), is_guest=False)
+    staff = Account(new_id(), is_guest=False, own_plan=None)
 
     reserved = await reserve(limits, db, staff, prompt=400_000, answer=4_000)
     credits = await finish(limits, db, reserved, read=400_000, written=4_000)

@@ -1,5 +1,6 @@
 """The plans file: reading it, and what the rest of Actio asks of it."""
 
+import logging
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -76,7 +77,9 @@ def test_the_files_in_the_repository_price_the_models_beside_them(folder: str) -
 
     loaded = plans.load(ROOT / folder / "plans.toml", models=offered)
 
-    assert loaded.plan_for(is_guest=True) != loaded.plan_for(is_guest=False)
+    assert loaded.plan_for(is_guest=True, own_plan=None) != loaded.plan_for(
+        is_guest=False, own_plan=None
+    )
     assert loaded.price_of("standard").output > 0
 
 
@@ -90,10 +93,10 @@ def test_the_end_to_end_stack_has_a_limit_within_reach_and_a_model_that_costs_no
     loaded = plans.load(folder / "plans.toml", models=offered)
 
     assert loaded.free_models() == ["local"]
-    assert loaded.plan_for(is_guest=False).session_credits == 500
-    assert loaded.plan_for(is_guest=True).session_credits == 100_000
+    assert loaded.plan_for(is_guest=False, own_plan=None).session_credits == 500
+    assert loaded.plan_for(is_guest=True, own_plan=None).session_credits == 100_000
     # A guest has two answers written at once, and a third is refused: turns.spec.ts.
-    assert loaded.plan_for(is_guest=True).answers_at_once == 2
+    assert loaded.plan_for(is_guest=True, own_plan=None).answers_at_once == 2
 
 
 def test_the_end_to_end_stack_names_conversations_with_a_model_that_isnt_free() -> None:
@@ -121,8 +124,38 @@ def test_a_guest_has_two_answers_written_at_once_and_an_account_three(folder: st
 
     loaded = plans.load(ROOT / folder / "plans.toml", models=offered)
 
-    assert loaded.plan_for(is_guest=True).answers_at_once == 2
-    assert loaded.plan_for(is_guest=False).answers_at_once == 3
+    assert loaded.plan_for(is_guest=True, own_plan=None).answers_at_once == 2
+    assert loaded.plan_for(is_guest=False, own_plan=None).answers_at_once == 3
+
+
+@pytest.mark.parametrize(
+    "folder",
+    ["config", "config/examples/free-cloud"],
+    ids=["make up", "the example of free cloud models"],
+)
+def test_the_shipped_files_have_a_plan_for_developers_that_no_account_has_by_itself(
+    folder: str,
+) -> None:
+    """What `make plan email=… plan=dev` puts an account on: no limit of it is smaller
+    than the accounts' plan's."""
+    file = read_file(ROOT / folder / "plans.toml")
+    loaded = Plans(file)
+
+    dev = loaded.named("dev")
+    accounts = loaded.plan_for(is_guest=False, own_plan=None)
+
+    assert dev is not None
+    assert "dev" not in (file.guests, file.accounts)
+    assert dev.title == "Developer"
+    limits = [
+        (dev.session_credits, accounts.session_credits),
+        (dev.week_credits, accounts.week_credits),
+        (dev.answers_at_once, accounts.answers_at_once),
+    ]
+    for its, theirs in limits:
+        assert its is not None
+        assert theirs is not None
+        assert its >= theirs
 
 
 def test_a_file_says_what_models_cost_and_what_each_plan_allows(tmp_path: Path) -> None:
@@ -300,11 +333,69 @@ def test_asking_the_price_of_a_model_without_one_is_an_error_not_a_free_ride() -
 def test_a_guest_has_one_plan_and_an_account_another() -> None:
     loaded = parsed(GOOD)
 
-    guest, account = loaded.plan_for(is_guest=True), loaded.plan_for(is_guest=False)
+    guest, account = (
+        loaded.plan_for(is_guest=True, own_plan=None),
+        loaded.plan_for(is_guest=False, own_plan=None),
+    )
 
     assert (guest.name, guest.title, guest.session_credits) == ("guest", "Guest", 25_000)
     assert (account.name, account.title, account.week_credits) == ("free", "Free", 600_000)
     assert (guest.answers_at_once, account.answers_at_once) == (2, None)
+
+
+def test_an_account_on_a_plan_of_its_own_has_it_and_a_guest_never_does(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loaded = parsed(GOOD)
+    caplog.set_level(logging.WARNING, logger="actio.usage.plans")
+
+    had = [
+        loaded.plan_for(is_guest=False, own_plan="staff"),
+        loaded.plan_for(is_guest=False, own_plan=None),
+        loaded.plan_for(is_guest=True, own_plan="staff"),
+        loaded.plan_for(is_guest=True, own_plan="gold"),
+    ]
+
+    assert [plan.name for plan in had] == ["staff", "free", "guest", "guest"]
+    assert had[0] == loaded.named("staff")
+    assert caplog.records == []  # nothing to say of a plan the file has, nor of a guest
+
+
+def test_an_account_on_a_plan_the_file_does_not_have_has_the_accounts_plan_and_the_log_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """As after the file was changed, and the account's row was not: no error, and no
+    account named. Once for each such name, for as long as the plans live: an API that
+    starts again reads them anew, and says it anew."""
+    loaded = parsed(GOOD)
+    caplog.set_level(logging.WARNING, logger="actio.usage.plans")
+
+    had = [
+        loaded.plan_for(is_guest=False, own_plan=name)
+        for name in ("gold", "gold", "silver", "gold", "silver")
+    ]
+    read_anew = parsed(GOOD).plan_for(is_guest=False, own_plan="gold")
+
+    assert {plan.name for plan in [*had, read_anew]} == {"free"}
+
+    def missing(name: str) -> tuple[int, str]:
+        return (
+            logging.WARNING,
+            f'an account is on the plan "{name}", which the plans file doesn\'t have: it has'
+            f' "free" instead, the plan the file names for accounts, and so does any other'
+            f' account on "{name}"',
+        )
+
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "actio.usage.plans"]
+    assert said == [missing("gold"), missing("silver"), missing("gold")]
+
+
+def test_a_plan_is_found_by_the_name_the_file_gives_it() -> None:
+    loaded = parsed(GOOD)
+
+    assert loaded.names() == ["guest", "free", "staff"]
+    assert loaded.named("free") == loaded.plan_for(is_guest=False, own_plan=None)
+    assert loaded.named("gold") is None
 
 
 def test_a_plan_has_a_session_that_opens_when_used_and_a_week_by_the_calendar() -> None:
@@ -315,7 +406,7 @@ def test_a_plan_has_a_session_that_opens_when_used_and_a_week_by_the_calendar() 
         ms(datetime(2026, 11, 8, 21, 0, tzinfo=UTC)), ms(datetime(2026, 11, 15, 21, 0, tzinfo=UTC))
     )
 
-    windows = loaded.windows(loaded.plan_for(is_guest=True), now_ms=ms(tuesday_noon))
+    windows = loaded.windows(loaded.plan_for(is_guest=True, own_plan=None), now_ms=ms(tuesday_noon))
 
     assert windows == [
         Bucket("session", 25_000, Rolling(5 * HOUR_MS)),
@@ -325,7 +416,7 @@ def test_a_plan_has_a_session_that_opens_when_used_and_a_week_by_the_calendar() 
 
 def test_the_week_starts_over_at_the_moment_the_file_names() -> None:
     loaded = parsed(GOOD)
-    guest = loaded.plan_for(is_guest=True)
+    guest = loaded.plan_for(is_guest=True, own_plan=None)
     reset = datetime(2026, 11, 15, 21, 0, tzinfo=UTC)
 
     [_, before] = loaded.windows(guest, now_ms=ms(reset) - 1)
@@ -341,6 +432,10 @@ def test_a_plan_limits_only_the_windows_it_names() -> None:
     loaded = parsed(weekly_only.replace('accounts = "free"', 'accounts = "staff"'))
     now = ms(datetime(2026, 11, 10, 12, 0, tzinfo=UTC))
 
-    assert loaded.windows(loaded.plan_for(is_guest=False), now_ms=now) == []  # staff: no limits
-    [week] = parsed(weekly_only).windows(parsed(weekly_only).plan_for(is_guest=False), now_ms=now)
+    assert (
+        loaded.windows(loaded.plan_for(is_guest=False, own_plan=None), now_ms=now) == []
+    )  # staff: no limits
+    [week] = parsed(weekly_only).windows(
+        parsed(weekly_only).plan_for(is_guest=False, own_plan=None), now_ms=now
+    )
     assert (week.name, week.limit) == ("week", 600_000)

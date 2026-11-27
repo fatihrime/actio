@@ -9,7 +9,8 @@
 # stops it from starting, with a message that says what is wrong.
 # See docs/adr/0020-usage-limits-on-turns.md.
 
-# Which of the plans below a visitor who hasn't signed up gets, and which an account.
+# Which of the plans below a visitor who hasn't signed up gets, and which an account,
+# unless the account was put on another of its own (see the plans).
 guests = "guest"
 accounts = "free"
 
@@ -73,3 +74,19 @@ title = "Free"
 session_credits = 100_000
 week_credits = 600_000
 answers_at_once = 3
+
+# A plan that neither guests nor accounts names, above, is given to no account by
+# itself. An account is put on one, taken off it again, and asked which it is on with
+#
+#   make plan email=you@example.com plan=dev
+#   make plan email=you@example.com args=--default
+#   make plan email=you@example.com
+#
+# which holds from the account's next question, and keeps what it has used in a
+# session or a week that is still open. This one is for an account that uses much more
+# than a chat does.
+[plans.dev]
+title = "Developer"
+session_credits = 1_500_000
+week_credits = 8_000_000
+answers_at_once = 4

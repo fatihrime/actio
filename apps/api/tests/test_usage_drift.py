@@ -86,7 +86,7 @@ async def nowhere() -> AsyncIterator[Valkey]:
 
 @pytest.fixture
 def guest() -> Account:
-    return Account(new_id(), is_guest=True)
+    return Account(new_id(), is_guest=True, own_plan=None)
 
 
 @pytest.fixture
@@ -459,7 +459,7 @@ async def test_an_answer_that_ends_after_the_runs_first_statement_is_not_apart_i
     may be compared second."""
     being_written: dict[str, Reserved] = {}
     for _ in range(2):
-        account = Account(new_id(), is_guest=True)
+        account = Account(new_id(), is_guest=True, own_plan=None)
         await answered(counters, db, account, written=50)
         being_written[str(account.user_id)] = await held(counters, db, account)
     ended_now: list[str] = []
@@ -525,7 +525,7 @@ async def test_a_window_that_opened_anew_between_the_two_reads_is_not_said_to_be
     user = str(guest.user_id)
     a_minute_on = to_ms(NOON) + 60_000
     plans = counters.limits.plans
-    windows = plans.windows(plans.plan_for(is_guest=True), now_ms=a_minute_on)
+    windows = plans.windows(plans.plan_for(is_guest=True, own_plan=None), now_ms=a_minute_on)
 
     async def opens_anew(_user: str) -> None:
         if len(watched.read) == 1:
@@ -598,7 +598,7 @@ async def test_an_account_whose_plan_has_no_limits_is_compared_and_nothing_is_ap
     counters: Counters, plans_with: Any, db: AsyncSession
 ) -> None:
     counters.limits.plans = plans_with(account=None)
-    staff = Account(new_id(), is_guest=False)
+    staff = Account(new_id(), is_guest=False, own_plan=None)
     await answered(counters, db, staff, written=50)
 
     with statements(db) as sent:
@@ -614,7 +614,7 @@ async def test_another_installations_counters_on_the_same_valkey_are_not_compare
 ) -> None:
     """Those of another prefix, whose account is over by 77 credits there."""
     another = counters_under(valkey, f"{counters.prefix}-other", plans_with())
-    theirs = Account(new_id(), is_guest=True)
+    theirs = Account(new_id(), is_guest=True, own_plan=None)
     never_recorded = await held(another, db, theirs)
     await another.engine.settle(str(theirs.user_id), str(never_recorded.id), 77, now_ms=to_ms(NOON))
     await answered(counters, db, guest, written=50)
@@ -635,7 +635,7 @@ async def test_a_run_compares_as_many_accounts_as_it_is_given_and_says_whether_t
 ) -> None:
     """Three here. By default, 2,000."""
     for _ in range(3):
-        await answered(counters, db, Account(new_id(), is_guest=True), written=50)
+        await answered(counters, db, Account(new_id(), is_guest=True, own_plan=None), written=50)
 
     compared = await drift.compare(db, counters.engine, now=NOON, limit=limit)
 
@@ -688,7 +688,7 @@ async def test_when_valkey_stops_answering_at_the_second_account_what_the_first_
 ) -> None:
     """Each account's counters are over by 77 credits."""
     for _ in range(2):
-        account = Account(new_id(), is_guest=True)
+        account = Account(new_id(), is_guest=True, own_plan=None)
         never_recorded = await held(counters, db, account)
         await counters.engine.settle(
             str(account.user_id), str(never_recorded.id), 77, now_ms=to_ms(NOON)
@@ -770,7 +770,7 @@ async def test_a_run_writes_nothing(
     after the other's counters were lost. The keys are made to expire at a moment that
     no write would set."""
     await written_while_lost(counters, db, guest)
-    await answered(counters, db, Account(new_id(), is_guest=True), written=50)
+    await answered(counters, db, Account(new_id(), is_guest=True, own_plan=None), written=50)
     seconds, microseconds = await valkey.time()
     at = seconds * 1000 + microseconds // 1000 + DAY_MS + 1
     keys = sorted(await valkey.keys(f"{counters.prefix}:*"))

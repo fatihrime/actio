@@ -39,6 +39,7 @@ from actio.chat.parts import ReasoningPart, TextPart
 from actio.core.ids import new_id
 from actio.core.resources import open_resources
 from actio.core.settings import Settings
+from actio.identity import accounts
 from actio.usage.models import UsageEntry
 from actio.usage.plans import Plans
 from actio_llm import (
@@ -2122,6 +2123,36 @@ async def test_an_answer_that_has_ended_makes_room_for_the_next(
         "once. Wait for one to finish, or stop one."
     )
     assert said(answered) == "Now there is room."
+
+
+async def test_an_account_on_a_plan_of_its_own_has_as_many_answers_at_once_as_that_plan_allows(
+    scripted: Any, plans_with: Any, db: AsyncSession
+) -> None:
+    """The accounts' plan allows one answer at a time, and the account's own two. Put on
+    it while its first answer is being written, it has the second at its next question,
+    and a third is refused by its own plan."""
+    hold = asyncio.Event()
+    plans = plans_with(
+        answers_at_once=1, plans={"dev": {"title": "Developer", "answers_at_once": 2}}
+    )
+    model, browser = await scripted(TextDelta("An answer."), hold, DONE, plans=plans)
+    ada = {"email": "ada@example.com", "password": "a long password"}
+    assert (await browser.post("/api/account", json=ada)).status_code == 201
+    asked = [Chat(browser).asking()]
+    await held(model)
+
+    on_the_accounts_plan = await asyncio.wait_for(Chat(browser).asking("A second?"), PATIENCE_S)
+    await accounts.put_on_plan(db, email=ada["email"], plan="dev")
+    await db.commit()
+    asked.append(Chat(browser).asking("A second?"))
+    await until(lambda: len(model.requests) == 2)
+    on_its_own = await asyncio.wait_for(Chat(browser).asking("A third?"), PATIENCE_S)
+    hold.set()
+    answered = await ended(*asked)
+
+    assert (on_the_accounts_plan.status_code, on_the_accounts_plan.json()["at_once"]) == (429, 1)
+    assert [said(answer) for answer in answered] == ["An answer.", "An answer."]
+    assert (on_its_own.status_code, on_its_own.json()["at_once"]) == (429, 2)
 
 
 async def test_an_account_at_its_limit_keeps_no_other_account_from_asking(

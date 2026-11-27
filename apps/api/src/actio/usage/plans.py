@@ -4,7 +4,8 @@ Both are read from a TOML file, `config/plans.toml`:
 
 - a **price** for each model on offer, in credits per million tokens;
 - **plans:** how many credits a session and a week allow, and how many answers may be
-  written at once. Guests get one plan, and accounts another.
+  written at once. Guests get one plan, and accounts another, unless an account is on
+  one of the others of its own.
 
 `load` reads and checks the file. A mistake raises `PlansError`, which says where the
 file is and what is wrong in it. `Plans` is what the rest of Actio asks: which plan an
@@ -14,6 +15,7 @@ Nothing here counts anything, or reads a clock: the engine in `packages/quota` c
 and is told the time.
 """
 
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,8 @@ from actio.core import config_file
 from actio.core.config_file import Name
 from actio_quota import Bucket, CalendarReset, Fixed, Rates, Rolling
 from actio_quota.cost import MAX_CREDITS
+
+logger = logging.getLogger(__name__)
 
 type WindowName = Literal["session", "week"]
 
@@ -117,7 +121,7 @@ class PlansFile(BaseModel):
     guests: Name
     """The plan of someone who hasn't signed up."""
     accounts: Name
-    """The plan of an account."""
+    """The plan of an account, unless it is on another of its own."""
     session_hours: int = Field(ge=1, le=7 * 24)
     """How long a session lasts, from the first request that opens it."""
     week_resets: str
@@ -170,7 +174,7 @@ def read_file(path: Path) -> PlansFile:
 
 @dataclass(frozen=True, slots=True)
 class Plan:
-    """What one kind of account may use."""
+    """What an account on it may use."""
 
     name: str
     title: str
@@ -192,6 +196,9 @@ class Plans:
         }
         self._guests = self._plans[file.guests]
         self._accounts = self._plans[file.accounts]
+        self._missing: set[str] = set()
+        """The plans of their own that accounts were found on and the file doesn't
+        have, each said once in the log."""
         self._prices = {
             name: Rates(entry.input, entry.output, entry.cached_input)
             for name, entry in file.prices.items()
@@ -200,9 +207,43 @@ class Plans:
         self._week = CalendarReset.parse(file.week_resets)
         self.min_answer_tokens = file.min_answer_tokens
 
-    def plan_for(self, *, is_guest: bool) -> Plan:
-        """The plan of a guest, or of an account."""
-        return self._guests if is_guest else self._accounts
+    def plan_for(self, *, is_guest: bool, own_plan: str | None) -> Plan:
+        """The plan of a guest, or of an account that is on `own_plan` of its own, by its
+        name, or on none of its own (`None`).
+
+        A guest has the guests' plan, whatever else it is told. An account has its own
+        plan when the file has one of that name, and otherwise the one the file names
+        for accounts: when it has none of its own, and when the file has no plan of that
+        name, as after the file was changed and the account's row was not. That is no
+        error, and nobody is refused for it: the log says it, as a warning, once for
+        each such name for as long as these plans live, by the two plans' names alone.
+        """
+        if is_guest:
+            return self._guests
+        if own_plan is None:
+            return self._accounts
+        plan = self._plans.get(own_plan)
+        if plan is not None:
+            return plan
+        if own_plan not in self._missing:
+            self._missing.add(own_plan)
+            logger.warning(
+                'an account is on the plan "%s", which the plans file doesn\'t have: it has'
+                ' "%s" instead, the plan the file names for accounts, and so does any other'
+                ' account on "%s"',
+                own_plan,
+                self._accounts.name,
+                own_plan,
+            )
+        return self._accounts
+
+    def named(self, name: str) -> Plan | None:
+        """The plan the file calls `name`, or `None` when it has none of that name."""
+        return self._plans.get(name)
+
+    def names(self) -> list[str]:
+        """The names of the file's plans, in the file's order."""
+        return list(self._plans)
 
     def price_of(self, model: str) -> Rates:
         """What the model called `model` costs. Every model on offer has a price:

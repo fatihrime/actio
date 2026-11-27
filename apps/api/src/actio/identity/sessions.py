@@ -42,6 +42,10 @@ class Principal:
     email: str | None
     session_id: uuid.UUID
     session_expires_at: datetime
+    own_plan: str | None
+    """The plan the account is on of its own, by its name in the plans file, or `None`
+    for the one the file names for its kind: read with the session, from the account's
+    row, so a change holds from its next request."""
 
 
 def hash_token(token: str) -> bytes:
@@ -156,4 +160,6 @@ async def _held(db: AsyncSession, batch: Select[uuid.UUID]) -> list[uuid.UUID]:
 
 
 def _principal(user: User, session: BrowserSession) -> Principal:
-    return Principal(user.id, user.is_guest, user.email, session.id, session.expires_at)
+    return Principal(
+        user.id, user.is_guest, user.email, session.id, session.expires_at, own_plan=user.plan
+    )

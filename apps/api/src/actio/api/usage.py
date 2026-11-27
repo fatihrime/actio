@@ -57,7 +57,7 @@ class UsageOut(Described):
 )
 async def get_usage(principal: CurrentPrincipal, db: Database, usage: Usage, now: Now) -> UsageOut:
     """Your plan, and how much of each of its limits you have used."""
-    account = Account(principal.user_id, is_guest=principal.is_guest)
+    account = Account(principal.user_id, is_guest=principal.is_guest, own_plan=principal.own_plan)
     try:
         status = await usage.status(db, account, now=now)
     except UsageUnavailableError:

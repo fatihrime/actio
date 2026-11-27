@@ -1,4 +1,5 @@
-"""Lasting accounts: signing up, logging in, changing the password.
+"""Lasting accounts: signing up, logging in, changing the password, and the plan an
+account is on of its own.
 
 There is no email sending here, so no "confirm your address" and no "forgot my
 password" link: whoever knows the password owns the account.
@@ -32,6 +33,10 @@ class NotAGuestError(Exception):
 
 class WrongPasswordError(Exception):
     """The current password, given in order to change it, was wrong."""
+
+
+class NoSuchAccountError(Exception):
+    """No account has this email address. A guest has none, so it is never found by one."""
 
 
 def normalize_email(email: str) -> str:
@@ -114,3 +119,40 @@ async def change_password(
     await db.flush()
     await sessions.end_all_sessions(db, user.id)
     return await sessions.start_session(db, user, now=now)
+
+
+async def own_plan(db: AsyncSession, *, email: str) -> str | None:
+    """The plan the account with this address is on of its own, by its name, or `None`
+    when it has the plan the plans file names for accounts. Raises `NoSuchAccountError`.
+
+    Whether the file has a plan of that name is the plans' to say: nothing here reads
+    the file."""
+    return (await _account(db, email)).plan
+
+
+async def put_on_plan(db: AsyncSession, *, email: str, plan: str | None) -> str | None:
+    """Put the account with this address on the plan called `plan`, of its own, or with
+    `None` take its own plan away, so that it has the one the plans file names for
+    accounts. Returns the plan it was on of its own before, as `own_plan` says it: when
+    that is `plan` already, nothing is written. Raises `NoSuchAccountError`.
+
+    The row is held until the transaction ends, so that what is returned is what was
+    there. Whether the file has `plan` is the caller's to check: nothing here reads the
+    file. The change holds from the account's next request, which reads the row anew
+    with its session; what its usage limits have counted stays as it is."""
+    user = await _account(db, email, held=True)
+    before = user.plan
+    if before != plan:
+        user.plan = plan
+        await db.flush()
+    return before
+
+
+async def _account(db: AsyncSession, email: str, *, held: bool = False) -> User:
+    """The account with this address, however it was typed, held until the transaction
+    ends if `held`."""
+    found = select(User).where(User.email == normalize_email(email))
+    user = await db.scalar(found.with_for_update() if held else found)
+    if user is None:
+        raise NoSuchAccountError
+    return user

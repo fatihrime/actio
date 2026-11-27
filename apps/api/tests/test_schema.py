@@ -136,6 +136,40 @@ def test_the_conversations_there_were_are_taken_as_named_by_a_person(database_ur
         assert named.fetchall() == [("Bike repair", "person")]
 
 
+def test_going_back_before_a_plan_of_its_own_keeps_the_account_without_it(
+    database_url: str,
+) -> None:
+    """Migration 0015 gave an account a plan of its own. Undoing it keeps the account,
+    which then has the accounts' plan, as every account had before. Going forward again
+    gives it none of its own, and the database refuses one for a guest again."""
+    schema.upgrade(database_url)
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            "INSERT INTO users (id, is_guest, created_at, email, password_hash, plan)"
+            " VALUES (gen_random_uuid(), false, now(), 'deniz@example.com', 'a hash', 'dev')"
+        )
+
+    schema.downgrade(database_url, "0014")
+
+    with psycopg.connect(database_url) as connection:
+        columns = connection.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name = 'users' AND column_name = 'plan'"
+        )
+        assert columns.fetchall() == []
+        assert connection.execute("SELECT email FROM users").fetchall() == [("deniz@example.com",)]
+    assert schema.upgrade(database_url) == schema.head()
+    with psycopg.connect(database_url) as connection:
+        kept = connection.execute("SELECT email, plan FROM users")
+        assert kept.fetchall() == [("deniz@example.com", None)]
+        with pytest.raises(psycopg.errors.CheckViolation, match="only_an_account_has_a_plan"):
+            connection.execute(
+                "INSERT INTO users (id, is_guest, created_at, expires_at, plan)"
+                " VALUES (gen_random_uuid(), true, now(), now(), 'dev')"
+            )
+        connection.rollback()
+
+
 def test_the_models_and_the_migrations_agree(database_url: str) -> None:
     """Fails when a table model changes and no migration was written for it. The job
     queue's tables are in the database too, and no model describes them: the

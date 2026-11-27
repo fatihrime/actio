@@ -26,6 +26,8 @@ class User(Base):
             " AND expires_at IS NULL)",
             name="guest_or_account",
         ),
+        # Only a lasting account is put on a plan of its own: a guest has the guests'.
+        CheckConstraint("plan IS NULL OR NOT is_guest", name="only_an_account_has_a_plan"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
@@ -38,6 +40,10 @@ class User(Base):
     """In lower case, so that one address is one account however it was typed."""
     password_hash: Mapped[str | None]
     """An Argon2id hash, which names its own parameters and salt."""
+    plan: Mapped[str | None]
+    """The plan the account is on of its own, by its name in the plans file. Empty: the
+    plan the file names for accounts. Whether the file has it is the plans' to say
+    (`actio.usage.plans`), when a request is counted: nothing here reads the file."""
 
 
 class BrowserSession(Base):

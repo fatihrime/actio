@@ -537,7 +537,7 @@ async def test_the_worker_says_what_it_counted_that_the_counters_had_missed(
     for. A second run finds nothing, and says nothing."""
     async with open_resources(settings) as resources:
         limits = UsageLimits(resources.quota, plans_with())
-        guest = Account(new_id(), is_guest=True)
+        guest = Account(new_id(), is_guest=True, own_plan=None)
         never_heard_of, counted_already = [
             await limits.reserve(
                 db,
@@ -685,7 +685,7 @@ async def test_the_worker_says_how_many_accounts_it_compared_when_nothing_is_apa
     async with open_resources(settings) as resources:
         limits = UsageLimits(resources.quota, plans_with())
         for _ in range(accounts):
-            account = Account(new_id(), is_guest=True)
+            account = Account(new_id(), is_guest=True, own_plan=None)
             await ended(limits, db, await held(limits, db, account, now=clock.now), now=clock.now)
 
         await comparing_usage(worker.listed(resources, NO_MODELS, clock=lambda: clock.now)).run()
@@ -714,7 +714,10 @@ async def test_the_worker_names_the_accounts_whose_usage_counters_are_apart_from
     now = clock.now
     async with open_resources(settings) as resources:
         limits = UsageLimits(resources.quota, plans_with())
-        agrees, short = Account(new_id(), is_guest=True), Account(new_id(), is_guest=True)
+        agrees, short = (
+            Account(new_id(), is_guest=True, own_plan=None),
+            Account(new_id(), is_guest=True, own_plan=None),
+        )
         await ended(limits, db, await held(limits, db, agrees, now=now), now=now)
         await ended(limits, db, await held(limits, db, short, now=now), now=now)
         being_written = await held(limits, db, short, now=now)
@@ -722,7 +725,7 @@ async def test_the_worker_names_the_accounts_whose_usage_counters_are_apart_from
         await resources.valkey.delete(*keys)  # lost, as at a restart
         await held(limits, db, short, now=now)  # rebuilds them, from the first answer
         await ended(limits, db, being_written, now=now)
-        over = [Account(new_id(), is_guest=True) for _ in range(5)]
+        over = [Account(new_id(), is_guest=True, own_plan=None) for _ in range(5)]
         for account in over:
             never_recorded = await held(limits, db, account, now=now)
             await resources.quota.settle(
@@ -772,7 +775,7 @@ async def test_the_worker_says_when_there_were_more_accounts_than_a_run_compares
     async with open_resources(settings) as resources:
         limits = UsageLimits(resources.quota, plans_with())
         for _ in range(3):
-            account = Account(new_id(), is_guest=True)
+            account = Account(new_id(), is_guest=True, own_plan=None)
             await ended(limits, db, await held(limits, db, account, now=clock.now), now=clock.now)
 
         await comparing_usage(worker.listed(resources, NO_MODELS, clock=lambda: clock.now)).run()

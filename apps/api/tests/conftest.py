@@ -381,6 +381,7 @@ def plans_for_tests(
     answers_at_once: int | None = None,
     credits_a_token: int = 1,
     prices: Mapping[str, Mapping[str, int]] | None = None,
+    plans: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Plans:
     """Prices and plans for the app under test.
 
@@ -394,6 +395,9 @@ def plans_for_tests(
     `prices` states models' prices as a plans file would, such as `{"standard":
     {"input": 250_000, "output": 1_000_000, "cached_input": 25_000}}`: each in the place
     of the price the rest would give it, or beside them for a model they don't name.
+    `plans` states plans beside `guest` and `member` as a plans file would, such as
+    `{"dev": {"title": "Developer", "session_credits": 5_000, "week_credits": 50_000}}`:
+    plans that no account has unless it is put on one (`accounts.put_on_plan`).
     """
 
     def plan(title: str, allowance: tuple[int, int] | None) -> dict[str, Any]:
@@ -417,7 +421,8 @@ def plans_for_tests(
                 "week_resets": "MON 00:00 UTC",
                 "min_answer_tokens": min_answer_tokens,
                 "prices": priced,
-                "plans": {"guest": plan("Guest", guest), "member": plan("Member", account)},
+                "plans": {"guest": plan("Guest", guest), "member": plan("Member", account)}
+                | {name: dict(stated) for name, stated in (plans or {}).items()},
             }
         )
     )
@@ -436,6 +441,7 @@ class PlansWith(Protocol):
         answers_at_once: int | None = ...,
         credits_a_token: int = ...,
         prices: Mapping[str, Mapping[str, int]] | None = ...,
+        plans: Mapping[str, Mapping[str, Any]] | None = ...,
     ) -> Plans: ...
 
 
@@ -443,8 +449,9 @@ class PlansWith(Protocol):
 def plans_with() -> PlansWith:
     """Call it for plans with limits a test can reach: `plans_with(guest=(1_000, 10_000))`
     lets a guest use 1,000 credits a session and 10,000 a week, and
-    `plans_with(answers_at_once=1)` lets it have one answer written at a time. See
-    `plans_for_tests`."""
+    `plans_with(answers_at_once=1)` lets it have one answer written at a time.
+    `plans_with(plans={"dev": {...}})` offers a plan beside the two, that an account is
+    put on. See `plans_for_tests`."""
     return plans_for_tests
 
 

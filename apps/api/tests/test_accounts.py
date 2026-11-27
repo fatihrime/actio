@@ -9,7 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from actio.identity import accounts, sessions
-from actio.identity.accounts import EmailTakenError, NotAGuestError, WrongPasswordError
+from actio.identity.accounts import (
+    EmailTakenError,
+    NoSuchAccountError,
+    NotAGuestError,
+    WrongPasswordError,
+)
 from actio.identity.models import BrowserSession, User
 from actio.identity.passwords import Passwords
 from actio.identity.sessions import ACCOUNT_IDLE_LIFETIME
@@ -60,6 +65,7 @@ async def test_a_guest_who_signs_up_stays_the_same_account(
 
     assert principal.user_id == guest.user_id
     assert (principal.is_guest, principal.email) == (False, EMAIL)
+    assert (guest.own_plan, principal.own_plan) == (None, None)  # the accounts' plan
     assert principal.session_id != guest.session_id
     # The guest's token is dead: what its holder may do has changed, so the session is new.
     assert await sessions.authenticate(db, guest_token, now=NOON) is None
@@ -267,3 +273,81 @@ async def test_the_database_refuses_a_row_that_is_half_guest_half_account(
     """Whatever code writes the table, a row is wholly one kind or the other."""
     with pytest.raises(IntegrityError, match="ck_users_guest_or_account"):
         await db.execute(text(broken_row))
+
+
+# --- A plan of its own ----------------------------------------------------------------
+
+
+async def test_an_account_is_put_on_a_plan_of_its_own_by_its_address_and_taken_off_it(
+    db: AsyncSession, passwords: Passwords
+) -> None:
+    """Whether the plans file has the plan is the plans' to say, not the account's: any
+    name is kept. The session reads it with the account's row."""
+    token, principal = await sign_up(db, passwords)
+    await db.commit()
+
+    was = await accounts.put_on_plan(db, email="  Deniz@EXAMPLE.com ", plan="dev")
+    await db.commit()
+    db.expunge_all()  # as the account's next request: its row read anew
+    seen = await sessions.authenticate(db, token, now=NOON)
+    on_dev = await accounts.own_plan(db, email=EMAIL)
+    was_then = await accounts.put_on_plan(db, email=EMAIL, plan=None)
+    await db.commit()
+
+    assert (principal.own_plan, was) == (None, None)
+    assert seen is not None
+    assert (seen.own_plan, on_dev, was_then) == ("dev", "dev", "dev")
+    assert await accounts.own_plan(db, email=EMAIL) is None
+
+
+async def test_putting_an_account_on_a_plan_commits_nothing(
+    db: AsyncSession, passwords: Passwords
+) -> None:
+    """The caller decides when it is done, as everywhere here."""
+    await sign_up(db, passwords)
+    await db.commit()
+
+    await accounts.put_on_plan(db, email=EMAIL, plan="dev")
+    await db.rollback()
+
+    assert await accounts.own_plan(db, email=EMAIL) is None
+
+
+async def test_no_account_is_found_at_an_address_nobody_has_and_no_guest_at_any(
+    db: AsyncSession, passwords: Passwords
+) -> None:
+    await sessions.start_guest_session(db, now=NOON)
+    await sign_up(db, passwords)
+
+    for email in ("nobody@example.com", ""):
+        with pytest.raises(NoSuchAccountError):
+            await accounts.own_plan(db, email=email)
+        with pytest.raises(NoSuchAccountError):
+            await accounts.put_on_plan(db, email=email, plan="dev")
+    assert await db.scalar(select(func.count()).where(User.plan.is_not(None))) == 0
+
+
+async def test_the_database_refuses_a_plan_of_its_own_for_a_guest(
+    db: AsyncSession, passwords: Passwords
+) -> None:
+    """Only a lasting account is put on a plan: a guest has the guests'. Alembic doesn't
+    compare check constraints, so this one is written by hand into its migration, and
+    this database was built by the migrations."""
+    _, guest = await sessions.start_guest_session(db, now=NOON)
+    await sign_up(db, passwords)
+    await db.commit()
+
+    await db.execute(text("UPDATE users SET plan = 'dev' WHERE NOT is_guest"))
+    await db.commit()
+    with pytest.raises(IntegrityError, match="ck_users_only_an_account_has_a_plan"):
+        await db.execute(
+            text("UPDATE users SET plan = 'dev' WHERE id = :id"), {"id": guest.user_id}
+        )
+    await db.rollback()
+    with pytest.raises(IntegrityError, match="ck_users_only_an_account_has_a_plan"):
+        await db.execute(
+            text(
+                "INSERT INTO users (id, is_guest, created_at, expires_at, plan)"
+                " VALUES (gen_random_uuid(), true, now(), now(), 'dev')"
+            )
+        )

@@ -29,6 +29,7 @@ from actio.chat import turns
 from actio.chat.models import Conversation, Message, Turn
 from actio.core.ids import new_id
 from actio.core.settings import Settings
+from actio.identity import accounts
 from actio.usage.limits import UsageLimits, held_for_prompt
 from actio.usage.models import Uncounted, UsageEntry
 from actio.usage.plans import Plans
@@ -467,6 +468,147 @@ def test_a_long_wait_is_said_in_days() -> None:
         "2 days",
         "7 days",  # rounded up: nobody should come back too early
     ]
+
+
+# --- An account's own plan ------------------------------------------------------------
+
+
+@pytest.fixture
+def with_dev(plans_with: Any) -> Plans:
+    """An account may use 1,000 credits a session and 10,000 a week, and one on the plan
+    `dev` of its own 5,000 and 50,000."""
+    plans: Plans = plans_with(
+        account=(1_000, 10_000),
+        plans={"dev": {"title": "Developer", "session_credits": 5_000, "week_credits": 50_000}},
+    )
+    return plans
+
+
+async def put_on(db: AsyncSession, plan: str | None) -> None:
+    """Put the test's account on `plan` of its own, as `actio plan` does, or with `None`
+    take its own plan away."""
+    await accounts.put_on_plan(db, email=DENIZ["email"], plan=plan)
+    await db.commit()
+
+
+async def test_an_account_put_on_a_larger_plan_has_its_next_question_admitted_with_what_it_used(
+    scripted: Any, with_dev: Plans, db: AsyncSession
+) -> None:
+    """The session's limit, reached on the accounts' plan, is no longer reached on the
+    account's own: from its next request, with what it used in the session that is open."""
+    _, browser = await scripted(
+        TextDelta("A long answer."), used(read=600, written=390), plans=with_dev
+    )
+    await browser.post("/api/account", json=DENIZ)
+    chat = Chat(browser)
+    await chat.ask()  # 990 of the session's 1,000
+    refused = await chat.ask("And then?")
+
+    await put_on(db, "dev")
+    on_its_own = await usage(browser)
+    admitted = await chat.ask("And then?")
+
+    assert refused.status_code == 429
+    assert on_its_own == {
+        "plan": {"id": "dev", "title": "Developer"},
+        "windows": [
+            {
+                "name": "session",
+                "limit": 5_000,
+                "used": 990,
+                "reserved": 0,
+                "resets_at": "2026-11-10T17:00:00Z",  # the session that opened at noon
+            },
+            {
+                "name": "week",
+                "limit": 50_000,
+                "used": 990,
+                "reserved": 0,
+                "resets_at": "2026-11-16T00:00:00Z",
+            },
+        ],
+    }
+    assert admitted.status_code == 200
+    assert (await windows(browser))["session"] == (1_980, 0, "2026-11-10T17:00:00Z")
+
+
+async def test_an_account_put_back_on_a_smaller_plan_is_refused_by_the_window_it_has_open(
+    scripted: Any, with_dev: Plans, db: AsyncSession, clock: Any
+) -> None:
+    """The other way: it used more on its own plan, in the session that is open, than
+    the accounts' plan allows. Its next question is refused until that session starts
+    over, not one that would open now."""
+    _, browser = await scripted(
+        TextDelta("A long answer."), used(read=600, written=390), plans=with_dev
+    )
+    await browser.post("/api/account", json=DENIZ)
+    await put_on(db, "dev")
+    chat = Chat(browser)
+    answered = [await chat.ask(), await chat.ask("And then?")]  # 1,980 of 5,000
+    clock.advance(hours=1)
+
+    await put_on(db, None)
+    back = await usage(browser)
+    refused = await chat.ask("And then?")
+
+    assert [answer.status_code for answer in answered] == [200, 200]
+    assert back["plan"] == {"id": "member", "title": "Member"}
+    assert [(w["limit"], w["used"], w["resets_at"]) for w in back["windows"]] == [
+        (1_000, 1_980, "2026-11-10T17:00:00Z"),
+        (10_000, 1_980, "2026-11-16T00:00:00Z"),
+    ]
+    assert refused.status_code == 429
+    assert refused.headers["retry-after"] == str(4 * 3600)
+    body = refused.json()
+    assert (
+        body["detail"] == "You've reached your usage limit for this session. It resets in 4 hours."
+    )
+    assert (body["window"], body["resets_at"]) == ("session", "2026-11-10T17:00:00Z")
+
+
+async def test_an_account_on_a_plan_the_file_does_not_have_is_held_to_the_accounts_plan(
+    scripted: Any, with_dev: Plans, db: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The file was changed, and the account's row was not: its answers go by the
+    accounts' plan, as if it had none of its own, and the log says so once."""
+    _, browser = await scripted(
+        TextDelta("A long answer."), used(read=600, written=390), plans=with_dev
+    )
+    await browser.post("/api/account", json=DENIZ)
+    await put_on(db, "gold")  # nothing below the plans knows which plans the file has
+    chat = Chat(browser)
+
+    read = await usage(browser)
+    answers = [await chat.ask(), await chat.ask("And then?")]
+
+    assert read["plan"] == {"id": "member", "title": "Member"}
+    assert [answer.status_code for answer in answers] == [200, 429]  # 990 of 1,000, then 990
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "actio.usage.plans"]
+    assert said == [
+        (
+            logging.WARNING,
+            'an account is on the plan "gold", which the plans file doesn\'t have: it has'
+            ' "member" instead, the plan the file names for accounts, and so does any other'
+            ' account on "gold"',
+        )
+    ]
+
+
+async def test_a_guest_who_signs_up_has_no_plan_of_its_own_and_has_the_accounts_plan(
+    scripted: Any, with_dev: Plans, db: AsyncSession
+) -> None:
+    """The guest's row becomes the account, and a guest has no plan of its own: the
+    database refuses one (`test_accounts.py`). So the account has none either, beside a
+    plan in the file that no account has by itself, until it is put on one."""
+    _, browser = await scripted(
+        TextDelta("A derailleur."), used(read=40, written=3), plans=with_dev
+    )
+
+    signed_up = await browser.post("/api/account", json=DENIZ)
+
+    assert signed_up.status_code == 201
+    assert await accounts.own_plan(db, email=DENIZ["email"]) is None
+    assert (await usage(browser))["plan"] == {"id": "member", "title": "Member"}
 
 
 # --- What each way of ending costs ----------------------------------------------------

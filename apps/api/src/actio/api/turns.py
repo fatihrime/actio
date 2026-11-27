@@ -236,7 +236,7 @@ async def start_turn(
     if body.thinking and not chain.ready[0][1].thinking:
         raise Problem(422, "This model can't reason before it answers.", model=offered.name)
 
-    plan = usage.plans.plan_for(is_guest=principal.is_guest)
+    plan = usage.plans.plan_for(is_guest=principal.is_guest, own_plan=principal.own_plan)
     begun = await _begin(
         db, body, conversation_id, principal.user_id, offered, new_id(), now, plan.answers_at_once
     )
@@ -599,7 +599,7 @@ async def _reserve(
     try:
         return await usage.reserve(
             db,
-            Account(principal.user_id, is_guest=principal.is_guest),
+            Account(principal.user_id, is_guest=principal.is_guest, own_plan=principal.own_plan),
             begun.turn.id,
             model=offered.name,
             prompt_tokens=prompt,

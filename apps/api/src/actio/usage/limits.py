@@ -130,6 +130,9 @@ class Account:
 
     user_id: uuid.UUID
     is_guest: bool
+    own_plan: str | None
+    """The plan the account is on of its own, by its name in the plans file, or `None`
+    for the one the file names for its kind (`Plans.plan_for`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +208,8 @@ class UsageLimits:
         """
         price = self.plans.price_of(model)
         now_ms = to_ms(now)
-        windows = self.plans.windows(self.plans.plan_for(is_guest=account.is_guest), now_ms=now_ms)
+        plan = self.plans.plan_for(is_guest=account.is_guest, own_plan=account.own_plan)
+        windows = self.plans.windows(plan, now_ms=now_ms)
         estimate = Estimate.tokens(
             price,
             input_tokens=held_for_prompt(prompt_tokens),
@@ -378,7 +382,7 @@ class UsageLimits:
 
         `db` is read as in `reserve`. Raises `UsageUnavailableError`.
         """
-        plan = self.plans.plan_for(is_guest=account.is_guest)
+        plan = self.plans.plan_for(is_guest=account.is_guest, own_plan=account.own_plan)
         now_ms = to_ms(now)
         windows = self.plans.windows(plan, now_ms=now_ms)
         user = str(account.user_id)
