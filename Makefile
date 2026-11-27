@@ -6,7 +6,7 @@ export NEXT_TELEMETRY_DISABLED := 1
 # `make dev` layers the development overlay on top of compose.yaml.
 DEV_COMPOSE := docker compose --file compose.yaml --file compose.dev.yaml
 
-.PHONY: help doctor bootstrap install up dev down smoke migration openapi docs check lint fmt test test-live test-cloud e2e build demo-record preflight
+.PHONY: help doctor bootstrap install up dev down smoke migration plan openapi docs check lint fmt test test-live test-cloud e2e build demo-record preflight
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -53,6 +53,19 @@ migration: .env ## Write a new database migration from the table models: make mi
 	./scripts/with-dev-env.sh uv run alembic --config apps/api/alembic.ini revision --autogenerate \
 	    --rev-id "$$(printf '%04d' $$(( $$(ls apps/api/src/actio/migrations/versions/*.py | wc -l) + 1 )))" \
 	    --message "$(name)"
+
+# Says which plan of the plans file an account is on, puts it on another (plan=NAME), or
+# takes its own plan away (args=--default), where the API runs: in the API's container
+# while `make up` runs it, with the plans file that container reads, and otherwise
+# natively, on the database and the plans file of `make dev`. Connects to the database
+# alone; a change holds from the account's next request.
+plan: ## Say which plan an account is on, or put it on another: make plan email=you@example.com plan=dev
+	@test -n "$(email)" || { echo 'Usage: make plan email=ADDRESS [plan=NAME | args=--default]'; exit 1; }
+	@if [ -n "$$(docker compose ps --quiet --status running api 2>/dev/null)" ]; then \
+	    docker compose exec -T api python -m actio plan "$(email)" $(plan) $(args); \
+	else \
+	    ./scripts/with-dev-env.sh uv run actio plan "$(email)" $(plan) $(args); \
+	fi
 
 # The API's description of itself is kept as a file, and the web app's types are
 # generated from it. Tests on both sides fail when either is out of date (ADR 0015).

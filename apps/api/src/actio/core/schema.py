@@ -41,6 +41,22 @@ def knows(revision: str) -> bool:
         return False
 
 
+def mismatch(revision: str | None, needed: str) -> str | None:
+    """What keeps code that needs the migration `needed` from working on a database at
+    `revision`, in one line that says what to do about it, or `None` when nothing does.
+    `revision` is `None` for a database that was never migrated."""
+    if revision == needed:
+        return None
+    if revision is None:
+        at, to_do = "was never migrated", 'run "actio --role migrate" first'
+    elif knows(revision):
+        at, to_do = f"is at migration {revision}", 'run "actio --role migrate" first'
+    else:
+        # Applied by newer code than this. Migrating with this code would not help.
+        at, to_do = f"is at migration {revision}", "the database is ahead of this code"
+    return f"the database {at}, and this code needs {needed}: {to_do}"
+
+
 def upgrade(database_url: str) -> str:
     """Apply every migration that is still missing. Returns the revision reached.
 

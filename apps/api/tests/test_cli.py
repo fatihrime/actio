@@ -2,7 +2,10 @@ import asyncio
 import copy
 import functools
 import logging
+import os
 import re
+import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
@@ -631,3 +634,285 @@ def test_migrate_role_upgrades_the_database_and_exits(
     with psycopg.connect(database_url) as connection:
         applied = connection.execute("SELECT version_num FROM alembic_version").fetchall()
     assert applied == [(schema.head(),)]
+
+
+# --- actio plan -----------------------------------------------------------------------
+
+ADA = "ada@example.com"
+ON_THE_ACCOUNTS_PLAN = '"free" (Free), the one the plans file names for accounts'
+"""How the command says the plan the shipped file names for accounts."""
+ON_DEV = '"dev" (Developer), its own'
+"""How it says the shipped file's plan for developers, as an account's own."""
+
+
+def plan_within_ten_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the command ten seconds with its database. One that waited for ever would
+    hang the test run: so the test fails instead."""
+    run = cli.plan
+
+    async def within_ten_seconds(*args: Any, **kwargs: Any) -> str:
+        async with asyncio.timeout(10):
+            return await run(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "plan", within_ten_seconds)
+
+
+@pytest.fixture
+def account(migrated: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
+    """A migrated database that the command is pointed at, with one account on it, at
+    `ADA`, on no plan of its own, and a guest. No models file is there to read: the
+    command reads none."""
+    with psycopg.connect(migrated) as connection:
+        connection.execute(
+            "INSERT INTO users (id, is_guest, created_at, email, password_hash)"
+            " VALUES (gen_random_uuid(), false, now(), %s, 'a hash')",
+            (ADA,),
+        )
+        connection.execute(
+            "INSERT INTO users (id, is_guest, created_at, expires_at)"
+            " VALUES (gen_random_uuid(), true, now(), now() + interval '1 day')"
+        )
+    monkeypatch.setenv("ACTIO_DATABASE_URL", migrated)
+    monkeypatch.setenv("ACTIO_MODELS_FILE", str(tmp_path / "missing.toml"))
+    plan_within_ten_seconds(monkeypatch)
+    return migrated
+
+
+def adas_row(database_url: str) -> tuple[str | None, str]:
+    """The plan the account at `ADA` is on of its own, as its row says, and the
+    transaction that last wrote the row."""
+    with psycopg.connect(database_url) as connection:
+        row = connection.execute(
+            "SELECT plan, xmin::text FROM users WHERE email = %s", (ADA,)
+        ).fetchone()
+    assert row is not None
+    return row[0], row[1]
+
+
+def plan(capsys: pytest.CaptureFixture[str], *args: str) -> tuple[int | str | None, str, str]:
+    """Run `actio plan` with `args`, as `python -m actio plan` runs it: the status it ends
+    with, and what it wrote on stdout and on stderr."""
+    status: int | str | None = 0
+    try:
+        cli.main(["plan", *args])
+    except SystemExit as stopped:
+        status = stopped.code
+    out, err = capsys.readouterr()
+    return status, out, err
+
+
+@pytest.mark.usefixtures("account")
+def test_plan_says_which_plan_an_account_is_on_with_no_models_file_to_read(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert plan(capsys, ADA) == (0, f"{ADA} is on the plan {ON_THE_ACCOUNTS_PLAN}.\n", "")
+
+
+def test_plan_puts_an_account_on_a_plan_of_its_own_and_says_which_it_was_on(
+    account: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    put = plan(capsys, ADA, "dev")
+    said = plan(capsys, ADA)
+
+    assert put == (
+        0,
+        f"{ADA} is now on the plan {ON_DEV}. Before, it was on {ON_THE_ACCOUNTS_PLAN}.\n",
+        "",
+    )
+    assert said == (0, f"{ADA} is on the plan {ON_DEV}.\n", "")
+    assert adas_row(account)[0] == "dev"
+
+
+def test_plan_takes_an_accounts_own_plan_away(
+    account: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plan(capsys, ADA, "dev")
+
+    taken = plan(capsys, ADA, "--default")
+
+    assert taken == (
+        0,
+        f"{ADA} is now on the plan {ON_THE_ACCOUNTS_PLAN}. Before, it was on {ON_DEV}.\n",
+        "",
+    )
+    assert adas_row(account)[0] is None
+
+
+@pytest.mark.parametrize(
+    ("first", "again", "where"),
+    [([], ["--default"], ON_THE_ACCOUNTS_PLAN), (["dev"], ["dev"], ON_DEV)],
+    ids=["on the accounts' plan", "on a plan of its own"],
+)
+def test_an_account_already_where_it_is_asked_to_be_is_told_so_and_nothing_is_written(
+    first: list[str],
+    again: list[str],
+    where: str,
+    account: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan(capsys, ADA, *first)
+    before = adas_row(account)
+
+    already = plan(capsys, ADA, *again)
+
+    assert already == (0, f"{ADA} is already on the plan {where}: nothing was changed.\n", "")
+    assert adas_row(account) == before  # not even the same value written again
+
+
+def test_plan_finds_an_account_however_its_address_is_typed(
+    account: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    put = plan(capsys, "  ADA@Example.COM ", "dev")
+
+    assert put == (
+        0,
+        f"{ADA} is now on the plan {ON_DEV}. Before, it was on {ON_THE_ACCOUNTS_PLAN}.\n",
+        "",
+    )
+    assert adas_row(account)[0] == "dev"
+
+
+def test_plan_says_an_accounts_own_plan_that_the_file_does_not_have_and_what_it_has_meanwhile(
+    account: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The file was changed, and the account's row was not."""
+    with psycopg.connect(account) as connection:
+        connection.execute("UPDATE users SET plan = 'gold' WHERE email = %s", (ADA,))
+
+    assert plan(capsys, ADA) == (
+        0,
+        f'{ADA} is on the plan "gold", its own, which the plans file doesn\'t have:'
+        f" meanwhile it has {ON_THE_ACCOUNTS_PLAN}.\n",
+        "",
+    )
+
+
+@pytest.mark.parametrize("asked", [[], ["dev"], ["--default"]], ids=["say", "put", "take away"])
+def test_plan_finds_no_account_at_an_address_nobody_has(
+    asked: list[str], account: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = adas_row(account)
+
+    nobody = plan(capsys, "nobody@example.com", *asked)
+
+    assert nobody == (1, "", "actio: no account has the address nobody@example.com\n")
+    assert adas_row(account) == before
+
+
+def test_plan_puts_no_account_on_a_plan_the_file_does_not_have(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Said from the file alone: the database is nowhere, and isn't tried."""
+    assert plan(capsys, ADA, "gold") == (
+        2,
+        "",
+        f'actio: {PLANS} has no plan "gold": its plans are "guest", "free" and "dev"\n',
+    )
+
+
+def test_plan_says_a_mistake_in_the_plans_file_in_one_line(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    broken = tmp_path / "plans.toml"
+    broken.write_text(PLANS.read_text().replace('guests = "guest"', 'guests = "visitor"'))
+    monkeypatch.setenv("ACTIO_PLANS_FILE", str(broken))
+
+    assert plan(capsys, ADA) == (
+        2,
+        "",
+        f'actio: {broken}: guests = "visitor" is not one of the plans\n',
+    )
+
+
+def test_plan_says_in_one_line_that_it_cant_connect_to_its_database(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing listens where the settings point. The rest of the line is the driver's,
+    which says it in its own words on each system."""
+    plan_within_ten_seconds(monkeypatch)
+
+    status, out, err = plan(capsys, ADA)
+
+    assert (status, out) == (1, "")
+    assert err.startswith(
+        "actio: couldn't connect to the database: connection failed:"
+        ' connection to server at "127.0.0.1", port 1 failed: '
+    )
+    assert err.count("\n") == 1
+
+
+@pytest.mark.parametrize("at", [None, "0014"], ids=["never migrated", "an older migration"])
+def test_plan_on_a_database_that_isnt_migrated_says_so_in_one_line(
+    at: str | None,
+    database_url: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At 0014 the account's row has no plan to be read: the line says what to do, and
+    not that a column is missing."""
+    if at is not None:
+        schema.upgrade(database_url)
+        schema.downgrade(database_url, at)
+    monkeypatch.setenv("ACTIO_DATABASE_URL", database_url)
+    plan_within_ten_seconds(monkeypatch)
+
+    where = "was never migrated" if at is None else f"is at migration {at}"
+    assert plan(capsys, ADA) == (
+        1,
+        "",
+        f"actio: the database {where}, and this code needs {schema.head()}:"
+        ' run "actio --role migrate" first\n',
+    )
+
+
+def test_plan_on_a_database_that_newer_code_migrated_doesnt_say_to_migrate(
+    database_url: str, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As for the worker: migrating with this code couldn't help, so it isn't what the
+    line says."""
+    schema.upgrade(database_url)
+    with psycopg.connect(database_url) as connection:
+        connection.execute("UPDATE alembic_version SET version_num = '9999'")
+    monkeypatch.setenv("ACTIO_DATABASE_URL", database_url)
+    plan_within_ten_seconds(monkeypatch)
+
+    assert plan(capsys, ADA) == (
+        1,
+        "",
+        f"actio: the database is at migration 9999, and this code needs {schema.head()}:"
+        " the database is ahead of this code\n",
+    )
+
+
+def test_plan_takes_a_plan_or_the_default_and_not_both(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert plan(capsys, ADA, "dev", "--default") == (
+        2,
+        "",
+        "usage: actio plan EMAIL [NAME | --default]\n"
+        "actio: error: argument --default: not allowed with argument NAME\n",
+    )
+
+
+@pytest.mark.usefixtures("account")
+def test_plan_runs_as_its_own_process_says_one_line_and_leaves_nothing_open() -> None:
+    """As `make plan` runs it. Python is told to say what a process left open, such as a
+    connection of its pool, and nothing else is written.
+
+    Not Python's whole development mode, which also says each step of the event loop
+    that took 100 ms or longer: reading the migrations takes the command about that
+    long, once, and nobody waits behind it."""
+    ran = subprocess.run(  # noqa: S603 - this interpreter, running the command under test
+        [sys.executable, "-W", "always::ResourceWarning", "-m", "actio", "plan", ADA, "dev"],
+        env=os.environ,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert (ran.returncode, ran.stderr) == (0, "")
+    assert ran.stdout == (
+        f"{ADA} is now on the plan {ON_DEV}. Before, it was on {ON_THE_ACCOUNTS_PLAN}.\n"
+    )

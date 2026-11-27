@@ -378,17 +378,9 @@ async def _migrated(resources: Resources) -> None:
         raise jobs.DatabaseUnreachableError(
             f"couldn't read the database's migration: {said}"
         ) from error
-    needed = resources.schema_head
-    if revision == needed:
-        return
-    if revision is None:
-        at, to_do = "was never migrated", 'run "actio --role migrate" first'
-    elif schema.knows(revision):
-        at, to_do = f"is at migration {revision}", 'run "actio --role migrate" first'
-    else:
-        # Applied by newer code than this. Migrating with this code would not help.
-        at, to_do = f"is at migration {revision}", "the database is ahead of this code"
-    raise NotMigratedError(f"the database {at}, and this code needs {needed}: {to_do}")
+    mismatch = schema.mismatch(revision, resources.schema_head)
+    if mismatch is not None:
+        raise NotMigratedError(mismatch)
 
 
 def _now() -> datetime:

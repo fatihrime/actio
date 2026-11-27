@@ -8,6 +8,12 @@ Actio is one application that runs as different processes, chosen with ``--role`
 - ``worker`` runs the background jobs, until it is told to stop;
 - ``all`` serves HTTP as ``api`` does, with the worker inside the same process: for the
   smallest installations, and for ``make dev``. It doesn't migrate either.
+
+Beside the roles, ``plan`` does a piece of an installer's work, and exits: ``actio plan
+EMAIL`` says which plan of the plans file an account is on, ``actio plan EMAIL NAME``
+puts it on the plan ``NAME`` of its own, and ``actio plan EMAIL --default`` takes its own
+plan away, so that it has the one the file names for accounts again. It reads the plans
+file alone, and connects to the database alone.
 """
 
 import argparse
@@ -20,16 +26,23 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from uvicorn.config import LOGGING_CONFIG
 
 from actio import worker
 from actio.catalog import CatalogError, read_file
 from actio.core import jobs, schema
+from actio.core.database import create_engine, create_session_factory
 from actio.core.settings import Settings
-from actio.usage.plans import PlansError
+from actio.identity import accounts
+from actio.usage.plans import Plan, Plans, PlansError
 from actio.usage.plans import load as load_plans
+from actio.usage.plans import read_file as read_plans
 
 ROLES = ("api", "migrate", "worker", "all")
+
+PLAN_USAGE = "actio plan EMAIL [NAME | --default]"
 
 WAITS_FOR_REQUESTS_S = 25
 """How long the web server waits, when it is told to stop, for the requests it is
@@ -48,7 +61,15 @@ logger and the message."""
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="actio", description="Run an Actio process.")
+    given = sys.argv[1:] if argv is None else argv
+    if given and given[0] == "plan":
+        _plan(given[1:])
+        return
+    parser = argparse.ArgumentParser(
+        prog="actio",
+        description="Run an Actio process.",
+        epilog=f"{PLAN_USAGE} says which plan an account is on, or puts it on another.",
+    )
     parser.add_argument(
         "--role", choices=ROLES, default="api", help="process to run (default: %(default)s)"
     )
@@ -118,6 +139,124 @@ def main(argv: Sequence[str] | None = None) -> None:
         reload_dirs=[str(Path(__file__).parent)] if args.reload else None,
         **logs,
     )
+
+
+class PlanError(Exception):
+    """What keeps `actio plan` from doing what it was asked, in one line: no account has
+    the address, or the database can't be reached or isn't at this code's migration."""
+
+
+def _plan(argv: Sequence[str]) -> None:
+    """`actio plan`: say which plan an account is on, or put it on another. Success is
+    one line on stdout; a failure is one line on stderr, and status 1 for the account or
+    the database, 2 for the plans file or a plan it doesn't have."""
+    parser = argparse.ArgumentParser(
+        prog="actio",
+        usage=PLAN_USAGE,
+        description=(
+            "Say which plan of the plans file an account is on, or put it on another. A"
+            " change holds from the account's next request."
+        ),
+    )
+    parser.add_argument("email", metavar="EMAIL", help="the account's email address")
+    which = parser.add_mutually_exclusive_group()
+    which.add_argument(
+        "name", metavar="NAME", nargs="?", help="put the account on the plan of this name"
+    )
+    which.add_argument(
+        "--default",
+        action="store_true",
+        help="take the account's own plan away: it has the one the file names for accounts",
+    )
+    args = parser.parse_args(argv)
+
+    settings = Settings()
+    try:
+        # The plans file alone: no model is asked anything here.
+        plans = Plans(read_plans(settings.plans_file))
+    except PlansError as error:
+        parser.exit(2, f"actio: {error}\n")
+    if args.name is not None and plans.named(args.name) is None:
+        names = [f'"{name}"' for name in plans.names()]
+        listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+        parser.exit(
+            2, f'actio: {settings.plans_file} has no plan "{args.name}": its plans are {listed}\n'
+        )
+    try:
+        said = asyncio.run(
+            plan(
+                settings.database_url.get_secret_value(),
+                plans,
+                args.email,
+                to=args.name,
+                change=args.name is not None or args.default,
+            )
+        )
+    except PlanError as error:
+        parser.exit(1, f"actio: {error}\n")
+    sys.stdout.write(f"{said}\n")
+
+
+async def plan(database_url: str, plans: Plans, email: str, *, to: str | None, change: bool) -> str:
+    """Say which plan the account with the address `email` is on. With `change`, put it on
+    the plan `to` of `plans`, of its own, or with `None` take its own plan away, and
+    commit that. Returns the line to say. Raises `PlanError`.
+
+    The database's migration is read first: at another than this code's, the account's
+    plan may have no column to be read from or written to."""
+    address = accounts.normalize_email(email)
+    engine = create_engine(database_url)
+    try:
+        async with create_session_factory(engine)() as db:
+            await _at_this_codes_migration(db)
+            if not change:
+                own = await accounts.own_plan(db, email=email)
+                said = f"{address} is on the plan {_on(plans, own)}"
+                if own is not None and plans.named(own) is None:
+                    said += f": meanwhile it has {_on(plans, None)}"
+                return f"{said}."
+            before = await accounts.put_on_plan(db, email=email, plan=to)
+            if before == to:
+                return f"{address} is already on the plan {_on(plans, to)}: nothing was changed."
+            await db.commit()
+            return (
+                f"{address} is now on the plan {_on(plans, to)}."
+                f" Before, it was on {_on(plans, before)}."
+            )
+    except accounts.NoSuchAccountError:
+        raise PlanError(f"no account has the address {address}") from None
+    finally:
+        await engine.dispose()
+
+
+async def _at_this_codes_migration(db: AsyncSession) -> None:
+    """Raise `PlanError` unless the database can be reached, and is at the migration this
+    code expects."""
+    try:
+        revision = await schema.current(await db.connection())
+    except (SQLAlchemyError, OSError) as error:
+        # The driver's own words, in one line: SQLAlchemy adds a second one about itself.
+        said = str(getattr(error, "orig", None) or error).splitlines()[0]
+        raise PlanError(f"couldn't connect to the database: {said}") from error
+    mismatch = schema.mismatch(revision, schema.head())
+    if mismatch is not None:
+        raise PlanError(mismatch)
+
+
+def _on(plans: Plans, own: str | None) -> str:
+    """The plan an account that is on `own` of its own has, or on none of its own, in
+    words: its name, its title, and whether it is the account's own."""
+    if own is None:
+        accounts_plan = plans.plan_for(is_guest=False, own_plan=None)
+        return f"{_named(accounts_plan)}, the one the plans file names for accounts"
+    found = plans.named(own)
+    if found is None:
+        return f'"{own}", its own, which the plans file doesn\'t have'
+    return f"{_named(found)}, its own"
+
+
+def _named(found: Plan) -> str:
+    return f'"{found.name}" ({found.title})'
 
 
 def _log_config(settings: Settings) -> dict[str, Any]:
