@@ -543,3 +543,85 @@ Not taken: a test of the fake API's own models, which are test data; and the 12 
 - **On the tree as committed, 54,** those three and five for what the review brought: a line in the log at each read, another model's failing said of the row's own model or not said at all, a failing model given its own question saying nothing, the load ahead asked for by the list's object, and asked for once whatever its model's status becomes. All 54 failed a test.
 
 - **In a real browser, five,** each in a stack built from the scratch copy, against the picker's end-to-end tests: the model itself always listed as asked first, a spent count not said, the list's look made at keys where nothing is counted, and the other model named by its `id` each failed one of the two tests. The fifth, the cost drawn above what a question would meet, failed nothing: the test held the row's description, whose order is that of the ids it names, and not where the lines are drawn. It holds that now, for the two lines of "Away", and the mistake fails it.
+
+### 2026-11-27: a conversation's read names the models on offer, and an answer's line names its model from the first draw
+
+The revision "an answer says which model wrote it, where there is a choice" left it under "Known, and left": "the item comes when the models are read, which after a page load can be a moment after a stored conversation's answers are drawn; in a window too narrow for the line's one row, each line then takes a row more". [ADR 0028](0028-a-model-names-those-that-stand-in-for-it.md) left the same under its revision "a turn says which model answered, and the page says so", for the item of a stand-in. Both entries are answered here.
+
+The line under an answer took the title of the model that wrote it from the list of models (`GET /api/models`), which the page reads once when it loads. That list also says what each model's server says now, and waits for the servers when what it knows is older than 15 seconds: with cloud models, for the providers' own lists ([ADR 0028](0028-a-model-names-those-that-stand-in-for-it.md), revision "a status that is known isn't waited for"). So after a page load the item could come after a stored conversation's answers were drawn, and in a narrow window each line then took a row more. The performance run after the picker found what it costs, and it was measured again before this revision (Measured, below): with the example's cloud models, at each load more than 15 seconds after the last ask of the servers, the list was answered 274 to 2,398 ms after the conversation was first drawn, every line went from 16 to 36 px high, and Chromium counted a layout shift of 0.0885 with six answers, where the page holds itself to 0.05 (`docs/performance.md`).
+
+What the line needs is each model's title and how many models are on offer: what the models file says. It needs nothing a model's server says.
+
+**How the line gets the titles before the list of models is read:**
+
+1. **The list answers by what is known, and asks the servers behind the request,** as a turn's start does (ADR 0028, revision "a status that is known isn't waited for").
+    - Con: it helps only while a status is younger than five minutes, and a page opened after a break, the usual load, would still wait. What to answer when nothing is known would need a new kind of status.
+    - Con: that revision had the list wait on purpose: the page reads it once, and its notice that a model can't be reached, and its reads every 5 seconds, rest on what the servers said within 15 seconds.
+2. **A stored conversation waits for the list before its first draw,** with a limit, as it waits for the renderer.
+    - Con: it holds the conversation's words back by what the list takes, 0.3 to 2.4 s as measured, for one item of a line under them. With a short limit, most such loads would still move.
+3. **Left as it is,** with its figure in this record.
+    - Con: the page holds itself to a layout shift under 0.05 when a stored conversation opens.
+4. **A second, quick route for the names alone.**
+    - Con: one more request at every load, and it races the conversation's draw (the quick list of today is ahead by 56 to 82 ms), unless the draw waits for it, which is the second option again, in small.
+5. **The names remembered in the browser from the last read.**
+    - Con: a copy that can be out of date, none at a browser's first load, and one more thing kept in storage and believed from it.
+6. **The conversation's read says the models on offer, by id and title.** Chosen.
+    - Pro: the read the draw waits for anyway brings what the line needs: no race, no wait, no new request, nothing kept in the browser, and the list is as it was.
+    - Con: a slice of what `GET /api/models` says is said a second time, in every read of a conversation: a few dozen bytes a model.
+
+**The decision: a conversation's read says the models on offer, each by its id and title, from the models file alone, and the page names the model that wrote an answer by them until the list of models is read.**
+
+**The API** (`actio.api.conversations`):
+
+- **`ConversationOut` has a member `models`:** for each model on offer, its `id` and its `title` (`ModelTitle`), the two that `GET /api/models` says of it, in the same order, the models file's. A model whose server is away, or that nothing was asked about yet, is on offer and named like any other.
+- **Both routes that answer a conversation say it,** `GET /api/conversations/{id}` and `PUT /api/conversations/{id}/branch`, through `_with_messages`, which is given the catalog (`Models`). It goes through the catalog's models and nothing else: no model's server is asked for it, and nothing is waited for. The page doesn't show another branch yet; the second route says it because it answers the same shape.
+- **Its description** says what the member is for: that the conversation can be shown from this answer alone, with the model that wrote each answer, and that whether a model can answer right now is the list of models' to say.
+- **Unchanged:** the routes' paths, errors and other members, `hold_still` and the order of the reads; `GET /api/models`; the catalog; the turn's record and its stream; the tables.
+
+**The page** (`apps/web`):
+
+- **`ModelTitle`** (`lib/api/client.ts`) is the item's type, generated. `figuresOf` and `writtenBy` (`lib/chat/figures.ts`) and the context `ModelsOnOffer` (`components/chat/message.tsx`) take it: an id and a title, and nothing else. A list of `Model`s fits it. The rule and its words are as they were.
+- **`Chat` gives the context the list of models once it is read, and until then the stored conversation's own** (`stored.models`, kept once when the conversation comes onto the page): the list is the newer read, so it takes the place of the other as soon as it is there. `null` only when there is neither, as in a new chat before the list is read. The value is one of two objects that are there already, never one made at a render, so `Took` is drawn again only when it changes from the one to the other: once, when the list comes, and with the same words, so nothing on the page changes. `Message` has no new property, and no answer's words are drawn again.
+- **Only the names:** everything else that follows the models has the list alone, as before: the line under the box (`contextFill`: a window is the list's to say), the picker, the switch for reasoning, the notices, the reads every 5 seconds and the load ahead. The conversation's names say nothing of a window or a status, and their type keeps them from being taken for more.
+
+**Tests:**
+
+- **the API's** (`apps/api/tests/test_conversations_api.py`): the read of a conversation names the models of a lineup of three, one of whose servers can't be reached and one that hasn't got its model, each by id and title, in the models file's order, which isn't their names' order, and as `GET /api/models` lists them; with nothing known of any model, the read asks no server, and while the list of models waits for a server's answer, which the test holds, a conversation is read all the same, the reads within a time limit; `PUT …/branch` says them; an empty conversation says them; the test of a whole conversation has the member; and the member and its item are described in the API's description. The recorded read of a conversation (`fixtures/turns/conversation.json`, which `test_turn_fixtures.py` compares whole, and which the web app's tests read) was recorded again, with the member;
+- **the page's** (`components/chat/answered-by.test.tsx`, the whole app opened with its modules loaded anew, the list of models held where a test needs it late): a stored answer a model stood in for, the list not answered yet, with "answered by … in place of …" in the very change of the page that put its words there, and the same, with the same items and its words drawn once, when the list comes, and when it is read again 5 seconds on; two stored answers by the models asked, two models named by the read, each line naming its model in the change that put the answers there, and the same, with neither answer's words drawn again, when the list comes; a read that names one model, the asked model's own answer named by nothing until the list comes with two; a read that titles a model otherwise than the list, said by the read until the list comes, and by the list after; a list that can't be read, the lines staying as the read named them; and a new chat, its answer named by nothing until the list is read. Where the list was read before the conversation, the list is what names, from the answers' first draw: a read that titles both models otherwise, and one that names one model alone where the list has two. And a line's words are made once for a stored answer, and not again at a key pressed in the box, before the list is read or after: the test counts the calls of `figuresOf`, which a names' object made anew at each render would have called at each key. The two tests that held that the item came with the list hold now that it is there first. The fake API's `conversation()` names the model of its own default list unless a test says other models (`titlesOf`), and the tests of this file that list several models open conversations that name the same, unless the test is about the two differing;
+- **end to end** (`e2e/picker.spec.ts`): in a window 320 px wide, a short question to the default model, then a reload with the list of models held back: the line under the answer says "answered by Fake model", in a row of its own, while the page has asked for the list and the picker, which comes with it, isn't on the page; then the list is let through, the picker comes, and the line and the box stand where they stood.
+
+`lib/chat/figures.test.ts` is as it was: its lists of `Model`s fit the type.
+
+**Consequences:**
+
+- **Easier:**
+    - **a stored conversation's lines name their models in the render that first draws them,** on every load, whatever the list of models takes;
+    - **no request is added, and nothing is kept in the browser.**
+- **Harder:**
+    - **the page has two sources of the models' titles,** for the line under an answer alone, the newer one winning;
+    - **a slice of the list is said twice,** in every read of a conversation.
+
+**Known, and left** (worked out from the rule, and not seen, unless it says measured):
+
+- **a new chat's first answer that ends before the list of models is read names its model only when the list comes:** a chat that was never stored has no read of its own;
+- **the names a conversation's read brought are as old as that read,** and say nothing once the list is there. A read of the same conversation again on the page (`resync`) leaves them as they were;
+- **the picker's button and the switch for reasoning still come with the list;**
+- **a slice of the list is said twice,** in every read of a conversation;
+- **an installation that renames a model between the read and the list** has the line say the old title, then the new one: the item changes in place, and its row can fold otherwise.
+
+**How to reverse it:** `models` in `ConversationOut`, `ModelTitle`, and the catalog given to `get_conversation`, `show_branch` and `_with_messages` (`actio.api.conversations`), with their tests, then `make openapi` and the recorded read of a conversation recorded again (`ACTIO_RECORD_TURNS=1 uv run pytest apps/api/tests/test_turn_fixtures.py`); `ModelTitle` in `lib/api/client.ts`, and `Model` back in `figuresOf`, `writtenBy` and `ModelsOnOffer`; `storedTitles` in `Chat` (`components/chat/chat.tsx`), the context given `models` again; `titlesOf` and `conversation()`'s fourth parameter in the fake API; the tests of `answered-by.test.tsx` back to the item coming with the list; and the end-to-end test.
+
+#### Measured
+
+**Before,** on 2026-11-27, on a MacBook Pro (M1 Pro, 16 GB), on a stack built from the tree with the example's cloud models (`config/examples/free-cloud/`), in Chromium, 390 px wide, a stored conversation of six answers:
+
+- **At each of 8 loads that came more than 15 s after the last ask of the models' servers,** the list of models was answered 274 to 2,398 ms after the conversation's first draw, the list itself taking 358 to 2,484 ms. Every line went from 16 to 36 px high, and Chromium counted a layout shift of 0.0885 with six answers. The performance run after the picker, on a stack of its own with the list held back by hand, counted 0.7053 with a hundred exchanges.
+- **At each of 4 loads right after another,** the list was answered after 16 to 32 ms, 56 to 82 ms before the draw, and nothing moved: a shift of 0.0017.
+
+**After,** the same day, on the same stack built from the tree as it was committed, the same conversation, the same script:
+
+- **In Chromium, at each of 8 loads that came more than 15 s after the last ask,** the list was answered 243 to 498 ms after the conversation's first draw, the list itself taking 330 to 589 ms: the providers' own pace that hour. Every line named its model in the frame that first drew it, and was 36 px high from then on; nothing moved when the list came, and Chromium counted a layout shift of 0.0017 all in all, where it had counted 0.0902. At each of 4 loads right after another, as before: the list 56 to 63 ms ahead of the draw, 0.0017.
+- **In Firefox and in Safari's engine,** 4 such loads each and 2 right after another: the same, the name in the frame of the first draw and every line 36 px from the first, with the list 151 to 315 ms after the draw in Firefox, and 251 to 882 ms after it at three of the four loads in Safari's engine. At the fourth, the engine's first page, the conversation was drawn after 1.7 s, when the list was there already.
+- **With the list held back by hand,** in Chromium and in Safari's engine: every line said "answered by Qwen 3.5 4B" and was 36 px high while the page had asked for the list and had no picker, and the same once the list was let through.
+- **Mistakes planted on purpose,** one at a time in a scratch copy of the tree, with the tests that should notice each: 14, eight in the route and six in the page, and for the end-to-end test two more on a stack built from the copy. On the first build 13 failed a test: a names' object made anew at every render failed none, and has the test that counts how often a line is worded since. On the tree as committed all 14 failed a test, and the end-to-end test failed at both of its two, the page naming by the list alone and the API naming no model.
+- **The review found one thing the checks hadn't run:** the recorded read of a conversation, which a test compares whole, lacked the member. It was recorded again; nothing else of the recording changed.
