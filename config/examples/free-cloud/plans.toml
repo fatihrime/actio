@@ -12,8 +12,8 @@
 #   tests read config/ as it is shipped: run them with the shipped pair back.
 #
 # Run `make dev` or `make up` again after either. To chat with a cloud model in the
-# page, set `default` to its name in your copy of models.toml: the page asks the
-# default model until it can offer a choice.
+# page, choose it in the list that the first button under the box opens: `default` in
+# your copy of models.toml decides which one a new browser starts with.
 #
 # On the Gemini API's free tier, what is sent may be used to improve Google's products
 # and be read by human reviewers: nothing private goes through a free key.

@@ -13,9 +13,10 @@
 #   copy the two over those. That changes two tracked files, and the repository's own
 #   tests read config/ as it is shipped: run them with the shipped pair back.
 #
-# Run `make dev` or `make up` again after either. The page asks the default model, until
-# it can offer a choice: to chat with a cloud model there, set `default` below to its
-# name in your copy. `GET /api/models` lists them all, and a turn's request may name one.
+# Run `make dev` or `make up` again after either. The page offers them all, in the list
+# that the first button under its box opens, and asks the default model until a reader
+# chooses another: `default` below decides which one a new browser starts with.
+# `GET /api/models` lists them all, and a turn's request may name one.
 #
 # On the Gemini API's free tier, what is sent may be used to improve Google's products
 # and be read by human reviewers: nothing private goes through a free key.

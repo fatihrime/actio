@@ -221,3 +221,9 @@ On the machine of the [Context](#context), 2026-11-23, on the stack of `make up`
     - **the page:** the two calls to `warmUp`, in `components/chat/chat-app.tsx` and `components/chat/chat.tsx`, and the module;
     - **the API:** the route, `Catalog.load_ahead` and `stop_loading`, and the setting;
     - **the model client:** `Ollama.load` and `LoadsAhead`.
+
+## Revisions
+
+### 2026-11-27: a chosen model is loaded ahead as the model that answers
+
+The reader can now choose the model that answers, in a menu by the box, and the choice is this browser's ([ADR 0032](0032-the-reader-chooses-the-model-that-answers.md)). A chosen model is the model that answers, and is loaded ahead as the decision says of that model: once the page knows it and it is ready, so also when it is chosen, or read from an earlier visit, and when something is written into the box; through `warmUp` alone, at most once a minute for one session and model; never while it isn't ready. A model chosen and then chosen again within the minute is asked for once. The route and the API are unchanged.

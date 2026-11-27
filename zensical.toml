@@ -55,6 +55,7 @@ nav = [
     { "0029. A model passed over for a request too large" = "adr/0029-a-model-is-passed-over-for-a-request-too-large.md" },
     { "0030. The providers' budgets are counted" = "adr/0030-the-providers-budgets-are-counted.md" },
     { "0031. A model that keeps failing is asked last" = "adr/0031-a-model-that-keeps-failing-is-asked-last.md" },
+    { "0032. The reader chooses the model that answers" = "adr/0032-the-reader-chooses-the-model-that-answers.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

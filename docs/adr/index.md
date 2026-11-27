@@ -42,5 +42,6 @@ Facts that change over time, such as which versions are current, carry the date 
 | [0029](0029-a-model-is-passed-over-for-a-request-too-large.md) | A model is passed over when a request is larger than its room, its window or what its server takes in a minute, while another model has room; a guess never refuses a turn | Accepted |
 | [0030](0030-the-providers-budgets-are-counted.md) | The providers' budgets are counted in Valkey, and a model with nothing left for a request is asked after those that have budget, as is one whose provider named a wait, until it is over; when no model with room for it has any, the turn is refused for now, with how long to wait | Accepted |
 | [0031](0031-a-model-that-keeps-failing-is-asked-last.md) | A model that failed half or more of its recent tries is asked after the others of its chain for a while, by a circuit breaker each process keeps; then one request tries it in its place; nothing is refused for it | Accepted |
+| [0032](0032-the-reader-chooses-the-model-that-answers.md) | The reader chooses the model that answers, in a menu by the box; the browser keeps the choice for every conversation, a model that stands in at a usage limit stays on top of it, and a question names a model only when it was chosen | Accepted |
 
 To record a new decision, copy the [template](0000-template.md) to the next free number.
