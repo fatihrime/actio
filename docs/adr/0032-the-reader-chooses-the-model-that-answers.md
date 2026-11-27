@@ -401,3 +401,145 @@ On the tree as committed, the same day, in Playwright 1.65's Chromium, Firefox a
 - **The review found a second gap by reading:** with the fake API's models priced, every row of the tests that said a reason said a cost too, and no test was left of a row that says a reason alone, as each row of five models at one price does when its server is away. Two broken versions of the row would have passed. It has a test now, and both versions fail it, and it alone.
 - **On the tree as committed, 44,** those two among them: 43 failed a test. The one left takes the cost's line out of a line of its own, by its class, and is no mistake in what is drawn, below.
 - **In a real browser, five,** each in a stack built from the scratch copy, against the end-to-end test: every model listed at the default's price, the stack's `namer` priced like its other models again, the cost as a part of the row's name, and the title and the lines under it side by side, each of which failed it. The fifth was the one that the component tests couldn't see: without its class, the cost was still drawn under the title and in line with it, the title before it being a block of its own, and the test passed.
+
+### 2026-11-27: the list says what a question to a model would meet now, and the menu's rows say it
+
+The decision left it under "Known, and left": "what a model costs, and that one keeps failing, was told to wait or has no budget, isn't said in the menu: the next steps". The revision before this one was the sentence's first half; this is its second. [ADR 0031](0031-a-model-that-keeps-failing-is-asked-last.md) left the same under its own: "`GET /api/models` and the page say nothing of a failing model".
+
+Three things the server knows of a model change what a question to it meets, and nothing said them before the question was asked:
+
+- **it keeps failing:** its circuit breaker is open (ADR 0031), and it is asked after the models of its chain that aren't failing;
+- **its provider said to wait,** in a 429 that named a wait longer than 2 s: until then it counts as having no budget left ([ADR 0030](0030-the-providers-budgets-are-counted.md), revision "a provider's own wait is kept, and until it is over its model has no budget");
+- **its counted budget is spent** (ADR 0030): it is asked after the models with budget, or the question is refused for now.
+
+A reader chose such a model in the menu and learned it from the question's refusal, or from the words under an answer another model wrote. And a model whose own server isn't there, with a stand-in that is ready, was listed `ready`, and its row said nothing of who would answer.
+
+**What the list says:**
+
+1. **Each model's own state,** its breaker, its provider's wait and its budget, from which the page works out who answers.
+    - Con: the page would build the server's rule again from `then` and each model's state, and `status` is the chain's, so it couldn't tell whether a stand-in is ready itself.
+    - Con: a model's own health is for whoever runs the installation: the admin page and `/metrics`, a later step's.
+2. **A value of `status`,** such as `failing` or `limited`.
+    - Con: the page and the warm-up read `status` as "can answer", and a failing model, or one without budget, is still asked.
+    - Con: a status is what a model's server says of it, which nothing a breaker says changes (ADR 0031, revision "a status that is known isn't waited for").
+3. **The rule's own answer for the shortest question.** Chosen.
+    - Pro: the server decides, by the rule a turn is decided by, and the page says it.
+    - Pro: it also says which model answers when the model itself isn't ready and a stand-in is, which the list never said.
+    - Con: it holds for the shortest question alone (below).
+4. **The breakers and the providers' waits alone,** without the counted budgets, which need Valkey.
+    - Con: the list would say nothing of a count that is spent, which a free plan's soon is: the Gemini API gave a free account 20 requests a day of `gemini-3.6-flash` on 2026-11-25. And the look costs 0.16 ms (Measured, below).
+
+**Which breaker's word:**
+
+1. **Failing until its model answers,** in the place of what the breaker says at the moment.
+    - Con: those words would stay for as long as nobody tries the model, and they are what keeps a reader from trying it.
+2. **What the breaker says now** (`Breaker.failing`): failing while its wait runs, and while one request tries the model after it, and nothing once the wait is over and nobody tries it. Chosen: by the order's own rule, the words never outlast what was seen by more than the breaker's wait, five minutes at the most, and the list never says anything else than a question would meet.
+
+**The decision: `GET /api/models` says, for each model, what the shortest question to it would meet right now, by the reads a turn's start makes and the one rule a turn is decided by, with one look at the budgets for the whole list; and a row of the menu says it in one line, before the cost, where the reason a model can't answer was. Nothing else on the page follows it.**
+
+**The list** (`actio.api.catalog`):
+
+- **Three members beside `status`,** whose value and meaning don't change:
+    - `asked_first`, a model's `id` or `null`: the model the question would be given to first. Itself, or one of `then`: another while it can't answer itself, has nothing left of what its provider lets this installation send it, or keeps failing while the other doesn't. `null` when nobody would be asked: none of them can answer, which `status` says, or the question would be refused for now;
+    - `failing`, whether the model `asked_first` names keeps failing, by its breaker now. It is asked all the same: none that would do better is there to ask before it. False when `asked_first` is `null`;
+    - `retry_after`, whole seconds or `null`: for how long the shortest question to it would be refused for now, the very number a turn's 429 names for a request that the same limit refuses (`Asked.refused.seconds`). `null` when it would be asked, and when none of its chain is ready.
+- **The shortest question is one token** (`SHORTEST_QUESTION`), by Actio's guess at a prompt: the smallest a request can be. A longer one may meet something else: it may wait longer, be given to another model, or be refused where the shortest isn't; and one longer than every ready model's room is asked all the same, where the shortest may be refused, since a guess never refuses a request ([ADR 0029](0029-a-model-is-passed-over-for-a-request-too-large.md)). Every model has room for the shortest: a models file's smallest window is 256 tokens, and its smallest `tokens_a_minute` 1.
+- **The reads and the rule are a turn's own,** in a turn's order: the look at the budgets for one request of that one token, `Chain.with_own_waits`, `Chain.failing`, then `Chain.asked_with`. The rule is called, never written a second time, on the server or on the page.
+- **One look for the whole list:** `look_at_chains` in `actio.catalog` asks Valkey once for every chain, each ready model with a budget once, whichever chains it is in, and nothing when no ready model has a budget, as with the shipped models file. It shares the look's body with `Chain.look`, which does what it did.
+- **A read of the list writes nothing and counts as no try:** every bucket, breaker and provider's wait is as it was after it. It says nothing in the log.
+- **With Valkey away,** the list answers as if no count were spent, and says a provider's wait and the breakers all the same. Nothing goes to the log: the page reads the list every 5 seconds while its model can't answer, and a turn says that the budgets couldn't be read where it matters.
+- **`thinking`'s description is reworded:** it said "the model that would be asked first", which beside `asked_first` could be read as that model. Its rule is as it was: the first of the chain that can answer, whichever is then asked first.
+- **Unchanged:** `status`, `thinking`, `then` and `price`; a turn's start, the title job, `Chain`'s four methods, the breaker, a provider's wait, what a request takes of a budget and how a try is recorded; the 429 and the warm-up.
+
+**What a row says** (`meetsInShort` in `lib/chat/outcomes.ts`, which takes a model and the models on offer, in the place of `notReadyInShort`): the first of these that applies, or nothing.
+
+| When | The row says |
+|---|---|
+| `status` is `missing` | "Isn't downloaded yet", as before |
+| `status` is `unreachable` | "Can't be reached", as before |
+| `retry_after` is under 60 | "At its provider's limit for under a minute" |
+| `retry_after` is 60 or more | "At its provider's limit for about " and the wait as `timeLeft` words it: "about 1 minute", "about 12 minutes", "about 4 hours 12 minutes", "about 24 hours" |
+| `asked_first` is the model itself, and `failing` | "Keeps failing" |
+| `asked_first` is another model's `id` | that model's title and " answers for now", "Local answers for now", or its `id` where the list has no model of it |
+| the same, and `failing` | "Local answers for now, and keeps failing" |
+
+- **The wait's words are `lib/time.ts`'s** (`timeLeftRoughly`, beside `timeLeft`): "under a minute" where `timeLeft` would say seconds, "about" and its words from a minute on. A wait is a day at the most, but the words are given for whatever it is.
+- **It is not counted down:** no clock is read for it, and it has no `role="timer"`. The row says the wait as the list said it, and the list is read again each time the menu opens. "Under a minute" and "about" are there because the number is the shortest question's, and as old as the read.
+- **Who answers, and not why** another model does: what a reader choosing a model acts on is who answers. The cause is in the server's log.
+- **A row never says of its own model what is so of another.** `failing` is of the model given the question first: where that is another, as when the model itself can't answer and the one that stands in for it keeps failing, the row names it.
+
+**Where it is said:**
+
+- **In the row alone, in the reason's line:** the same element, under the title and before the cost, the same suffix to its id, and the row's description in the order line, cost. A row is still named by its title alone. `ModelPicker` works the line out for each row from the list as it was read last, as it does the cost, and hands it to `Choice`.
+- **Nothing else follows the three members:** the picker's button says the title, as before; no notice says them, and Send is never blocked for them, since the wait is one request's and a refusal counts its own down already ([ADR 0021](0021-usage-limits-in-the-page.md), revision "a refusal for now is counted down"); the reads of the list every 5 seconds go by `status` alone, as before; the load ahead, the switch for reasoning, the line under the box and the words under an answer don't read them. `Chat` is given nothing new. With one model on offer there is no picker, and nothing shows.
+- **The load ahead goes by the model's `id` and `status`,** and no longer by the list's object for it (`Current` in `components/chat/chat-app.tsx`; `warmUp` takes the two). A read of the list brings a new object whenever anything in the list changed, and a wait counted in it changes at every read: by the object, each such read asked for the load again once its minute was over, with nothing new of the model that answers.
+
+**The end-to-end stack** offers what it offered (`deploy/e2e/config/`, of which a comment changed): its `away` is answered for by `standard`, so its row now says "Fake model answers for now" before its cost, and its `rationed`, of one request a minute, is now asked by a test of the picker too, beside `e2e/no-budget.spec.ts`, each of which holds whatever the other has taken.
+
+**Tests:**
+
+- **the list** (`apps/api/tests/test_catalog_api.py`, through the route, with a `lineup` where a state is needed): a model alone with nothing in its way, in the test of the whole list, every member as before and the three new ones; a model that can't answer and a chain of stand-ins, the first ready one given the question, and none of a chain ready, nobody given it and nothing refused; a budget spent, filled under the app's keys at the test's clock, the stand-in with budget given it first, and alone refused for a minute, with nothing in the log; the same wait as the 429 of a question asked in the same moment, 43 seconds after 17.25 of a minute's one request; a bucket of tokens with one left, which the shortest question fits and a real question doesn't, refused; a provider's own wait, for models without a budget, the stand-in first, alone refused, and nothing once the clock is past it; breakers opened, the stand-in that isn't failing given it first, alone or with every model of the chain failing the first of the chain and `failing`, and nothing once the wait is over; while one request tries a model, `failing`, and once it answered, not; three reads of the list after a breaker's wait is over, which leave nobody trying the model, the next question asked of it in its place, and a budget's buckets as they were; one look for five chains, at each ready model with a budget once, and none where the one with a budget isn't ready; Valkey away, nothing said spent, a provider's wait and a breaker said, and no line in the log at warning or above; two names of one model on one provider, the same of its breaker and its budget; and the three members in the API's description, each described. The cases hold `status`, `thinking`, `then` and the price as they were, and one holds that whether a question can reason stays the first ready model's to say, whichever is given the question first. Where the log is held, it is held at every level, for what Actio's own code says;
+- **the look** (`apps/api/tests/test_catalog.py`): `look_at_chains` over three chains, one question to Valkey at the buckets of the ready models with a budget, each once, and of each chain what its own look says; nothing asked when no ready model has a budget, and Valkey away raised when one has;
+- **the words** (`lib/chat/outcomes.test.ts`, `lib/time.test.ts`): each row of the table, the order of the four, 59 and 60 seconds, an hour and a day, a title looked up and an id where the list has none, a model given its own question saying nothing, another model that keeps failing named by its title, and nothing made up of a model that nobody is given the question of; and the wait's words at 1, 59, 60 and 61 seconds, a millisecond past 59 seconds, 59 minutes and a second, an hour, 90 minutes and a day;
+- **on the page** (`components/chat/model-picker.test.tsx`): the three new states, each a row's description and its lines, before the cost where costs are said and alone where they aren't, each row named by its title alone; a row that changes when the menu is opened again and the list says otherwise, with no timer in it; and, with the model that answers at its provider's limit and with it failing, Send open, no notice, the button named as before, and the list not read again 6 seconds on. The fake API's models say what the API would of a model with nothing in its way;
+- **the load ahead** (`components/chat/warm-up.test.tsx`): a list read anew as the menu opens, more than a minute after the load was asked for, that says another wait of another model, and no second request to load the model that answers; then something written, which asks for it as ever;
+- **end to end** (`e2e/picker.spec.ts`): "Away"'s row says "Fake model answers for now" before its cost, in its description and as its two lines are drawn, the other three rows held as before; and "Rationed" chosen in the picker and asked until the list read as the menu opens says that it is at its provider's limit, which its row then says, for "under a minute" or "about 1 minute", on a fresh stack and on one kept running, whatever `e2e/no-budget.spec.ts` left or does beside it. No end-to-end test opens a breaker: that takes failed questions to a model whose breaker the other tests share or read the rows of, and it was looked at in the three engines instead (Measured, below).
+
+**Known, and left** (worked out from the rule, and not seen, unless it says measured):
+
+- **the answer is the shortest question's:** a longer one may wait longer or go to another model, and a bucket of tokens with one token left says nothing;
+- **a row is as old as the last read of the list:** a menu left open says what was so when it opened;
+- **the breakers and the providers' waits are the API process's own:** a separate worker's, and another API process's, are apart, and a restart forgets them;
+- **a model whose breaker opened says "Keeps failing" for 30 seconds to 5 minutes,** then nothing until a question tries it;
+- **with one model on offer there is no menu,** and nothing on the page says any of it before a question is asked;
+- **a row says who answers, not why another does;**
+- **with Valkey away, a read of the list takes 2 seconds longer** where a ready model has a budget (measured);
+- **a list in which anything changed is a new one to the page, and a wait counted in it changes at every read:** the conversation and each answer's line of figures are drawn again then, where a read that changed nothing draws nothing. Measured: about 2 ms more for 400 messages in WebKit, and nothing that showed in Chromium;
+- **a model's own state, for whoever runs the installation,** is a later step's.
+
+**How to reverse it:** `asked_first`, `failing` and `retry_after` in `ModelOut`, with their part of `list_models` and `SHORTEST_QUESTION` (`actio.api.catalog`), `look_at_chains` (`actio.catalog`), and their tests, then `make openapi`; `meetsInShort` back to `notReadyInShort` of the status alone, `timeLeftRoughly`, `why` handed to `Choice`, and their tests, and the three members of the fake API's models. `Chain.look` can keep the body it shares, and the load ahead its `id` and `status`.
+
+#### Measured
+
+2026-11-27, MacBook Pro M1 Pro.
+
+**Before the build:**
+
+- **What one look costs.** 1,000 looks from the API's container of the development stack on this machine to its Valkey (9.1.3), under a prefix of their own: a look at eight buckets, four limits of two models, took 0.156 ms at the median, 0.217 ms at the 95th percentile and 0.892 ms at the longest; a look at one bucket 0.110 ms, 0.125 ms and 0.184 ms. Nothing was written: no key was left.
+
+**On the tree as committed,** in Playwright 1.65's Chromium, Firefox and WebKit, by scripts kept outside the repository, against the stack of `make e2e`, kept running. Each was the same in the three engines unless it says otherwise:
+
+- **The rows as the stack starts,** in a window 1100 by 800 px: "Away" said "Fake model answers for now" and then "1 credit a token", in a row 64 px high, a title's line of 20 px and two of 16 px. The other six said their cost alone, in rows of 48 px. No row held a timer, and the menu was inside the window.
+- **"Rationed", one request a minute,** chosen and asked once: the list said `retry_after` 60, and its row "At its provider's limit for about 1 minute", then its cost. The button was still named "Model: Rationed", Send wasn't blocked once something was written, no status line of the page spoke of a limit, and in 11 seconds with the menu shut the list wasn't read once. A second question was then refused for now: its notice counted "in 49 seconds" while the list said 49. In Firefox's first run the first question was itself refused, the bucket having been spent by the run before it, with 6 seconds left: the row said "At its provider's limit for under a minute".
+- **"Hurried", a model alone,** asked questions that the fake fails with a 503: after the fourth the list said `failing`, an answer from before being the fifth call its breaker had kept, and the row said "Keeps failing", then its cost. Send wasn't blocked. The list said so for about 30 seconds, read every 5, then nothing; a question after that was answered, and the list said nothing of the model.
+- **The longest words, at 320 px wide,** light, dark, and dark with forced colours, the list changed on its way to the page: "At its provider's limit for about 4 hours 12 minutes", a title of 80 characters with "answers for now" after it, and "Keeps failing", each above a cost. The menu stood from 29 to 312 px, the page no wider than the window, no line past its row; the three rows were 80, 96 and 64 px high.
+- **Valkey held still** (`docker pause` of the stack's Valkey: away, with what it held): three reads of the list each answered 200 after 2,019 to 2,023 ms, and said nothing of Rationed's spent budget, where they had taken 5 to 20 ms and said 28 seconds. Back, 7 to 10 ms, and 22 seconds. The API's log of that minute had no line of it.
+- **What a list that changed costs a long conversation.** A conversation of 200 questions, 400 messages and 200 lines of figures drawn, and 24 reads of the list measured, each by opening the menu: in turns a list that said another wait of one model each time, and one that said the same. The longest time the page's own thread was held, from the list's arrival on, over 600 ms: in WebKit 3.0 ms at the median for the list that changed (2.0 to 10.0 ms) and 1.0 ms for the one that didn't (1.0 to 2.0 ms), with 3.0 ms (1.0 to 12.0 ms) in the same 600 ms with nothing going on; in Chromium 5.3 ms for each of the three. The row said "about 15 minutes", then "about 14 minutes", as the wait went from 893 to 816 seconds.
+- **The picker's and the budget's end-to-end tests, five times over at once,** on the stack kept running, each asking the same model of one request a minute: 40 of 40 passed, in 12 seconds.
+
+**With real models,** on the stack of `make up` built from that tree, with a scratch pair of files in the place of `config/`: Ollama's `qwen3.5:4b-q4_K_M`; its `granite4:micro` with a budget of one request a minute; the repository's fake model, run on this machine, once alone and once with the first model standing in for it, one model on one provider under two names; and a model at an address nothing listens at, which the first stands in for. In Chromium:
+
+- **As the stack started,** the row of the model whose server isn't there said "Qwen 3.5 4B answers for now", and no other row anything but its cost.
+- **One question to the model with the budget,** which it answered: the list said 55 seconds, and its row "At its provider's limit for under a minute". A second question was refused for now, its notice counting "in 54 seconds" while the list said 54.
+- **The fake told to answer 429 with a wait of 90 seconds:** alone, the list said `retry_after` 90, and its row "At its provider's limit for about 2 minutes"; under its other name, with a stand-in, "Qwen 3.5 4B answers for now". A question to the first was refused for now, "in 2 minutes"; one to the second was answered by the local model, with "answered by Qwen 3.5 4B in place of Fake, with a stand-in" under the answer. Once the wait was over, both rows said their cost alone.
+- **The fake failed four more questions,** the 429 having been the first failed call its breaker kept: the list said `failing` of it alone, and its row "Keeps failing"; under its other name, "Qwen 3.5 4B answers for now". Half a minute on, both rows said their cost alone, and the next question to it was answered.
+- **The server's log** of those minutes had seven lines about the models, each a turn's or a model's own, as before the step, and none from a read of the list.
+
+**The review,** by a reviewer that had not seen the build: nothing that had to be fixed before the step could go on, and eleven smaller points, of which these changed something:
+
+- **A row said "Keeps failing" of a model that wasn't.** Where a model can't answer itself, or has no budget left, and the one given the question first in its place keeps failing, `failing` is of that one, and the row said it under the first model's title. Now the row names the other: "Local answers for now, and keeps failing".
+- **The load ahead followed the list's object.** A read that changes nothing leaves the page its old list, but a wait counted in the list changes at every read: each such read gave the page a new object for the model that answers, and the effect that asks for its load ran again, sending a request once its minute was over, with nothing new of that model. It goes by the model's `id` and `status` now, and a test holds it. That the conversation is drawn again for such a list was measured, above, and left.
+- **Words that said more than the code does:** that what the list says "holds for every question at the least", which a question longer than every model's room contradicts, since it is asked where the shortest may be refused; that a breaker "opens on five failed calls at the least", in a test's comment and here, where three of five open it; the route's own description, which named none of the three members; `failing`'s description, which gave one of the breaker's reasons as the only one; and the reason given here for having no end-to-end test of a breaker.
+- **The tests held the log at warnings and above.** They hold it at every level now, for what Actio's own code says.
+
+Not taken: a test of the fake API's own models, which are test data; and the 12 seconds that the two waits of real time add to one file of the component tests, which run beside the others.
+
+**Mistakes were planted,** one at a time, in a scratch copy of the tree, never the working tree:
+
+- **On the first build, 49,** beside the review, against the tests of the list, the look, the words, the time and the menu: in the route (a longer question than the shortest, the breakers or the providers' waits left out, `failing` as the model's own or as any model's of the chain, the wait rounded down, the first ready model in the place of the first asked, Valkey away as an error, a look for each chain, a read that counts as a try), in the look for many chains, in the words and their order, in the wait's words, in the row (whose line, its place before the cost, the description, the row's name), and in what else might follow (reads every 5 seconds, a notice and a blocked Send, the button's name). 46 failed a test. Three failed nothing, and each has a test now:
+    - whether a question can reason taken from the model given the question first, where it is the first ready one's to say: every model of the tests could reason alike;
+    - a model that nobody is given the question of, with nothing said why, saying that "null answers for now": the list says no such thing of a model, and the row is held to saying nothing then;
+    - a wait rounded down to the second in the rough words, where `timeLeft` rounds up: no test asked a millisecond past 59 seconds.
+- **On the tree as committed, 54,** those three and five for what the review brought: a line in the log at each read, another model's failing said of the row's own model or not said at all, a failing model given its own question saying nothing, the load ahead asked for by the list's object, and asked for once whatever its model's status becomes. All 54 failed a test.
+
+- **In a real browser, five,** each in a stack built from the scratch copy, against the picker's end-to-end tests: the model itself always listed as asked first, a spent count not said, the list's look made at keys where nothing is counted, and the other model named by its `id` each failed one of the two tests. The fifth, the cost drawn above what a question would meet, failed nothing: the test held the row's description, whose order is that of the ids it names, and not where the lines are drawn. It holds that now, for the two lines of "Away", and the mistake fails it.
