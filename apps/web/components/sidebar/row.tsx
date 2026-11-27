@@ -126,17 +126,24 @@ export function Row({
         onFollow={onOpen}
         aria-current={current ? "page" : undefined}
         title={label}
-        // Room for the two buttons, when they show. And a line around the conversation
-        // on the page where a system's own colours take the place of the page's: its
-        // ground is gone there (app/globals.css).
-        className="peer block truncate rounded-lg px-3 py-2 text-sm group-focus-within:pr-16 group-hover:bg-muted group-hover:pr-16 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring aria-[current=page]:bg-muted aria-[current=page]:pr-16 aria-[current=page]:font-medium forced-colors:aria-[current=page]:border"
+        // Room for the two buttons, when they show: with the keyboard on this link
+        // (`focus:`) or on one of the buttons after it (`has-[~div:focus-within]:`).
+        // Where the keyboard is, each piece says by its own state or its neighbour's,
+        // and the row is never asked whether the keyboard is in it
+        // (`group-focus-within:`): asked so, Safari's engine went through the whole
+        // page at every move of the keyboard, anywhere on it (ADR 0015, revision "the
+        // keyboard's place is never asked of an element around it"). And a line around
+        // the conversation on the page where a system's own colours take the place of
+        // the page's: its ground is gone there (app/globals.css).
+        className="peer block truncate rounded-lg px-3 py-2 text-sm group-hover:bg-muted group-hover:pr-16 focus:pr-16 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring has-[~div:focus-within]:pr-16 aria-[current=page]:bg-muted aria-[current=page]:pr-16 aria-[current=page]:font-medium forced-colors:aria-[current=page]:border"
       >
         {label}
       </InAppLink>
       {/* Shown for the row the pointer or the keyboard is on, and for the conversation
           on the page: a finger has no pointer to hover with. Always there for the
-          keyboard and for screen readers. */}
-      <div className="absolute inset-y-0 right-1 flex items-center opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 peer-aria-[current=page]:opacity-100">
+          keyboard and for screen readers. The keyboard is on the row when it is on one
+          of the two (`focus-within:`) or on the link before them (`peer-focus:`). */}
+      <div className="absolute inset-y-0 right-1 flex items-center opacity-0 group-hover:opacity-100 peer-focus:opacity-100 peer-aria-[current=page]:opacity-100 focus-within:opacity-100">
         <button
           ref={renameButton}
           type="button"
