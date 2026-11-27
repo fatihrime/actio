@@ -5,7 +5,7 @@
 // says what it took"; ADR 0028, revision "a turn says which model answered, and the page
 // says so"; ADR 0032, revision "an answer says which model wrote it, where there is a
 // choice").
-import type { Model, Turn } from "@/lib/api/client";
+import type { ModelTitle, Turn } from "@/lib/api/client";
 import { timeTaken } from "@/lib/time";
 
 /** The shortest time of writing over which a rate is said, in milliseconds, whoever
@@ -35,13 +35,14 @@ export function answeredInPlace(turn: Turn): boolean {
 
 /** What a turn took, as the words to show under its answer, in this order: how fast
  * its model wrote, how long its first word took, what it cost, and, last, which model
- * wrote it (`writtenBy`). That one waits for `models`, the models on offer, `null`
- * until they are read: last, so that nothing else in the list moves when it comes. Only
- * the figures its record holds and that can be right; none while it is still being
- * written. */
+ * wrote it (`writtenBy`). That one waits for `models`, the models on offer by their ids
+ * and titles, `null` while the page has none: the list of models once it is read, and
+ * until then a stored conversation's own read of them. Last, so that nothing else in
+ * the list moves if it comes later. Only the figures its record holds and that can be
+ * right; none while it is still being written. */
 export function figuresOf(
   turn: Turn,
-  models: readonly Model[] | null,
+  models: readonly ModelTitle[] | null,
 ): string[] {
   if (turn.status === "running") {
     return [];
@@ -80,7 +81,7 @@ export function figuresOf(
  * names no model that wrote it, however many are on offer: one given up on may hold a
  * stand-in's words, so such a turn isn't taken for the asked model's here, as
  * `answeredBy` takes it. */
-function writtenBy(turn: Turn, models: readonly Model[]): string | null {
+function writtenBy(turn: Turn, models: readonly ModelTitle[]): string | null {
   const writer = turn.answered_by;
   if (writer === null) {
     return null;

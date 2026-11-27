@@ -9,7 +9,9 @@
 // each model costs, from the stack's plans file through the API, a line under its
 // title; and what a question to a model would meet now, by the API's look at the
 // stack's Valkey and its real chains, a line before the cost: which model answers for
-// one whose server isn't there, and that one is at its provider's limit. The stack
+// one whose server isn't there, and that one is at its provider's limit; and the model
+// named under a stored answer by the conversation's own read, before the list of models
+// is, so that nothing under the answer moves when the list comes. The stack
 // offers seven models, one of them under a title of 21 characters
 // (deploy/e2e/config/models.toml), at three kinds of price (plans.toml beside it). The
 // rule's variants are the component tests' (components/chat/model-picker.test.tsx,
@@ -427,4 +429,63 @@ test("two answers of one conversation, by the default model and by one chosen af
   await expect(lines).toHaveCount(2);
   await expect(itemsOf(0)).toHaveText(said[0] ?? []);
   await expect(itemsOf(1)).toHaveText(said[1] ?? []);
+});
+
+test("after a reload, an answer's line names its model before the list of models is read, and nothing under the answer moves when the list comes", async ({
+  chat,
+  page,
+}) => {
+  // A window too narrow for the line's items in one row, had the name come later.
+  await page.setViewportSize({ width: 320, height: 640 });
+  const picker = pickerOf(page);
+  const line = page.getByRole("list", { name: "What this answer took" });
+  await chat.open();
+  await chat.ask("Name a bike part.");
+  await expect(chat.answers).toHaveText("Echo: Name a bike part.");
+  await chat.answered();
+  await expect(page).toHaveURL(/\/c\//);
+
+  // The list of models is held back from here, at the reload and until the test lets
+  // it go: the conversation's own read is all the page has of the models meanwhile.
+  let letGo: () => void = () => undefined;
+  const goes = new Promise<void>((resolve) => {
+    letGo = resolve;
+  });
+  let asked: () => void = () => undefined;
+  const isAsked = new Promise<void>((resolve) => {
+    asked = resolve;
+  });
+  await page.route("**/api/models", async (route) => {
+    asked();
+    await goes;
+    await route.continue();
+  });
+
+  await page.reload();
+
+  await expect(chat.answers).toHaveText("Echo: Name a bike part.");
+  const items = line.getByRole("listitem");
+  await expect(items.last()).toHaveText("answered by Fake model");
+  // The hold works: the page has asked for the list, and the picker, which comes with
+  // it, isn't there.
+  await isAsked;
+  await expect(picker.button).toHaveCount(0);
+  const before = {
+    line: await line.boundingBox(),
+    box: await chat.box.boundingBox(),
+  };
+  expect(before.line).not.toBeNull();
+  expect(before.box).not.toBeNull();
+  // The name stands in a row of its own here: had it come with the list, the line
+  // would have got a row higher, and what is under it would have moved.
+  const firstItem = await items.first().boundingBox();
+  const name = await items.last().boundingBox();
+  expect(name?.y).toBeGreaterThan(firstItem?.y ?? Infinity);
+
+  letGo();
+
+  await expect(picker.button).toHaveAccessibleName("Model: Fake model");
+  await expect(items.last()).toHaveText("answered by Fake model");
+  expect(await line.boundingBox()).toEqual(before.line);
+  expect(await chat.box.boundingBox()).toEqual(before.box);
 });

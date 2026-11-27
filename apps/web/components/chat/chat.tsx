@@ -208,7 +208,8 @@ export function Chat({
   picker: ReactElement | null;
   /** The models on offer, once read: which say the title of the model that wrote an
    * answer, and of the one asked when another wrote it, and the window of one that
-   * stands in for `model`. */
+   * stands in for `model`. Until they are read, a stored conversation's own read says
+   * the titles (`stored.models`), and nothing else. */
   models: readonly Model[] | null;
   /** The models that cost nothing, to offer when a usage limit is reached. */
   offers: Model[];
@@ -225,6 +226,11 @@ export function Chat({
   const [initial] = useState(() =>
     stored === null ? [] : fromStored(stored.messages),
   );
+  // The models on offer as the conversation's own read named them, by their ids and
+  // titles: what names the model that wrote each answer until the list of models is
+  // read, so that an answer's line has its name from the first draw, whatever the list
+  // takes. One object for as long as the conversation is on the page.
+  const [storedTitles] = useState(() => stored?.models ?? null);
   // Where the reader left this conversation, if they left it away from its end in this
   // session, and its message is among those it came with: it opens there, and the
   // messages around that place are the ones drawn at once. Otherwise it opens at its
@@ -766,8 +772,12 @@ export function Chat({
   return (
     // What an answer took names the model that wrote it by its title, where a reader
     // could take it for another's: the models are read by that alone, and no answer's
-    // words are drawn again when they come, or are read again (message.tsx).
-    <ModelsOnOffer value={models}>
+    // words are drawn again when they come, or are read again (message.tsx). The list
+    // of models once it is read, the newer of the two, and until then the stored
+    // conversation's own: one of two objects that are there already, never one made
+    // anew here. Only the names: everything else that follows the models, the window
+    // under the box among it, has the list alone.
+    <ModelsOnOffer value={models ?? storedTitles}>
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
           <div

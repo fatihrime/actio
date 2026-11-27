@@ -4,13 +4,17 @@
 // where more than one model is on offer, it names the model that wrote an answer of its
 // own too, "answered by" and its title (ADR 0032, revision "an answer says which model
 // wrote it, where there is a choice"). The rule and its words are lib/chat/figures.ts's,
-// and tested there; here, when the item is on the page, and that the models it is named
-// from draw nothing of an answer again, when they come or when they are read again.
+// and tested there; here, when the item is on the page, which models it is named from,
+// and that they draw nothing of an answer again, when they come or when they are read
+// again. A stored conversation's own read names the models on offer, and its answers
+// are named by them until the list of models is read, from the render in which they
+// are first on the page (ADR 0032, revision "a conversation's read names the models on
+// offer, and an answer's line names its model from the first draw").
 //
 // The code that draws markdown is a stand-in here, which notes each text it drew once
-// React has put it on the page: an answer drawn again shows there. The page holds that
-// code for as long as it is open, so each test opens the app from modules loaded anew,
-// as newest-first.test.tsx does.
+// React has put it on the page, with what the lines under the answers said then: an
+// answer drawn again shows there. The page holds that code for as long as it is open,
+// so each test opens the app from modules loaded anew, as newest-first.test.tsx does.
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { useLayoutEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,8 +23,10 @@ import type {
   Conversation,
   MessageMetadata,
   ModelList,
+  ModelTitle,
   Turn,
 } from "@/lib/api/client";
+import type * as Figures from "@/lib/chat/figures";
 import { SECOND } from "@/tests/clock";
 import {
   answer,
@@ -31,8 +37,12 @@ import {
   json,
   later,
   model,
+  models as fakeModels,
+  problem,
   question,
   sentByHand,
+  streamed,
+  titlesOf,
   turn,
 } from "@/tests/fake-api";
 import { holdFrames } from "@/tests/frames";
@@ -93,20 +103,30 @@ const NEXT_LOOK = { timeout: 8 * SECOND };
 /** Each text the stand-in drew, once React had put it on the page. */
 const drawn: string[] = [];
 
+/** What each item of each line under the answers said, from the top, when a text was
+ * first drawn, by the text: in the very change of the page that put it there. */
+const linesWhenFirstDrawn = new Map<string, string[][]>();
+
 /** Stands in for `./markdown`: shows the text as it is, and notes it each time React has
- * put a drawing of it on the page. */
+ * put a drawing of it on the page, and the lines under the answers the first time. */
 function StandIn({ text, className }: { text: string; className?: string }) {
   useLayoutEffect(() => {
     drawn.push(text);
+    if (!linesWhenFirstDrawn.has(text)) {
+      linesWhenFirstDrawn.set(text, lines().map(said));
+    }
   });
   return <p className={className}>{text}</p>;
 }
 
 beforeEach(() => {
   drawn.length = 0;
+  linesWhenFirstDrawn.clear();
   // Every module is loaded anew by the next import, as on a page that was just opened,
-  // with the stand-in for the code that draws markdown.
+  // with the stand-in for the code that draws markdown, and with the module that words
+  // the line as it is: one test counts its calls, and puts a counter in its place.
   vi.resetModules();
+  vi.doUnmock("@/lib/chat/figures");
   vi.doMock("./markdown", () => ({ default: StandIn }));
 });
 
@@ -137,39 +157,61 @@ function recordedTurn(name: string): Turn {
   return ended;
 }
 
-/** The recorded answer, stored. */
-function stored(): Conversation {
-  return conversation(RECORDED.conversation, [
-    question(RECORDED.question, "Who answers?"),
-    answer(
-      RECORDED.answer,
-      WORDS,
-      RECORDED.question,
-      recordedTurn("stood_in.sse"),
-    ),
-  ]);
+/** The recorded answer, stored, in a conversation whose read names the models of
+ * `chained()`, the default model and the one that stands in for it, unless `onOffer`
+ * says others. */
+function stored(onOffer = titlesOf(chained())): Conversation {
+  return conversation(
+    RECORDED.conversation,
+    [
+      question(RECORDED.question, "Who answers?"),
+      answer(
+        RECORDED.answer,
+        WORDS,
+        RECORDED.question,
+        recordedTurn("stood_in.sse"),
+      ),
+    ],
+    null,
+    onOffer,
+  );
+}
+
+/** The models of a list as a conversation's read named them a while ago, each under
+ * another title than the list gives it now. */
+function titledOtherwise(list: ModelList): ModelTitle[] {
+  return titlesOf(list).map(({ id, title }) => ({
+    id,
+    title: `${title}, as it was`,
+  }));
 }
 
 /** A stored conversation of two answers, each by the model that was asked for it: the
  * recorded answer of `figures.sse`, by the default model, and a second one by Local,
- * which cost nothing. */
-function twoAnswers(): Conversation {
-  return conversation(RECORDED.conversation, [
-    question(RECORDED.question, "How fast was that?"),
-    answer(
-      RECORDED.answer,
-      OWN_WORDS,
-      RECORDED.question,
-      recordedTurn("figures.sse"),
-    ),
-    question(STORED.question, "And with the other one?", RECORDED.answer),
-    answer(
-      STORED.answer,
-      LOCAL_WORDS,
-      STORED.question,
-      turn({ id: STORED.turn, model: "local", credits: 0 }),
-    ),
-  ]);
+ * which cost nothing. Its read names the models of `twoModels()`, unless `onOffer`
+ * says others. */
+function twoAnswers(onOffer = titlesOf(twoModels())): Conversation {
+  return conversation(
+    RECORDED.conversation,
+    [
+      question(RECORDED.question, "How fast was that?"),
+      answer(
+        RECORDED.answer,
+        OWN_WORDS,
+        RECORDED.question,
+        recordedTurn("figures.sse"),
+      ),
+      question(STORED.question, "And with the other one?", RECORDED.answer),
+      answer(
+        STORED.answer,
+        LOCAL_WORDS,
+        STORED.question,
+        turn({ id: STORED.turn, model: "local", credits: 0 }),
+      ),
+    ],
+    null,
+    onOffer,
+  );
 }
 
 /** What the line under the second answer of `twoAnswers` says: its record's clock
@@ -250,10 +292,12 @@ describe("which model wrote an answer", () => {
     ).toBe(took);
   });
 
-  it("is said of a stored answer at once when the models were read before it, with no frame to wait for", async () => {
+  it("is said of a stored answer at once when the models were read before it, with no frame to wait for, and by the list's titles, whatever the conversation's read titles them", async () => {
     // No frame comes in this test: a stored answer never arrived on this page.
     holdFrames();
-    const reading = later(() => json(200, stored()));
+    // The conversation's read titles both models otherwise than the list read before
+    // it: the list is what names, from the answer's first draw.
+    const reading = later(() => json(200, stored(titledOtherwise(chained()))));
     const api = fakeApi()
       .on(MODELS, () => json(200, chained()))
       .on(CONVERSATION, reading.answer);
@@ -268,9 +312,10 @@ describe("which model wrote an answer", () => {
 
     const took = await screen.findByRole("list", { name: LINE });
     expect(said(took)).toEqual(TOOK);
+    expect(linesWhenFirstDrawn.get(WORDS)).toEqual([TOOK]);
   });
 
-  it("comes when the models do, after the rest of the line, which stays as it was, and nothing of the answer is drawn again, also when they are read again", async () => {
+  it("is said of a stored answer from its first draw by the models the conversation's read names, before the models are read, and stays as it was when they come and when they are read again, nothing of the answer drawn again", async () => {
     // The models come after the conversation, and say that the model that answers
     // can't: so the page reads them again five seconds later, and now it can.
     const models = later(() =>
@@ -283,22 +328,23 @@ describe("which model wrote an answer", () => {
     open(`/c/${RECORDED.conversation}`);
 
     const took = await screen.findByRole("list", { name: LINE });
-    expect(said(took)).toEqual(TOOK.slice(0, -1));
+    expect(said(took)).toEqual(TOOK);
+    // Already when its words were first put on the page.
+    expect(linesWhenFirstDrawn.get(WORDS)).toEqual([TOOK]);
+    expect(api.to(MODELS)).toHaveLength(1);
     const before = items(took);
     expect(wordsDrawn()).toBe(1);
 
     models.release();
 
-    await waitFor(() => {
-      expect(said(line())).toEqual(TOOK);
-    });
     expect(
       await screen.findByText("Qwen 3.5 4B can't be reached."),
     ).toBeVisible();
-    // The same list, and its first items the same elements: one was added, last.
+    // The same list, the same items, saying the same.
     expect(line()).toBe(took);
+    expect(said(took)).toEqual(TOOK);
     const after = items(took);
-    expect(after).toHaveLength(before.length + 1);
+    expect(after).toHaveLength(before.length);
     before.forEach((item, index) => {
       expect(after[index]).toBe(item);
     });
@@ -353,10 +399,13 @@ describe("which model wrote an answer", () => {
     ).toBe(took);
   });
 
-  it("is said under each answer of a stored conversation that two models on offer wrote, by the one that wrote it, at once when the models were read before it", async () => {
+  it("is said under each answer of a stored conversation that two models on offer wrote, by the one that wrote it, at once when the models were read before it, also where the conversation's read names one model alone", async () => {
     // No frame comes in this test: a stored answer never arrived on this page.
     holdFrames();
-    const reading = later(() => json(200, twoAnswers()));
+    // Its read names the default model alone, as the installation offered when it was
+    // read: by that alone the first line would name no model, and the second would
+    // name Local by its id. The list, read before it, names both.
+    const reading = later(() => json(200, twoAnswers(titlesOf(fakeModels()))));
     const api = fakeApi()
       .on(MODELS, () => json(200, twoModels()))
       .on(CONVERSATION, reading.answer);
@@ -381,9 +430,9 @@ describe("which model wrote an answer", () => {
     ]);
   });
 
-  it("comes under the asked models' own answers when the models do, after the rest of each line, which stays as it was, and draws neither answer's words again", async () => {
+  it("is said under the asked models' own stored answers from their first draw by the models the conversation's read names, before the models are read, and each line stays as it was when they come, neither answer's words drawn again", async () => {
     const models = later(() => json(200, twoModels()));
-    fakeApi()
+    const api = fakeApi()
       .on(MODELS, models.answer)
       .on(CONVERSATION, () => json(200, twoAnswers()));
     const { open } = await newPage();
@@ -393,33 +442,201 @@ describe("which model wrote an answer", () => {
       expect(lines()).toHaveLength(2);
     });
     const before = lines();
-    expect(before.map(said)).toEqual([
-      OWN_TOOK.slice(0, -1),
-      LOCAL_TOOK.slice(0, -1),
+    expect(before.map(said)).toEqual([OWN_TOOK, LOCAL_TOOK]);
+    // Already when the answers' words were first put on the page.
+    expect(linesWhenFirstDrawn.get(OWN_WORDS)).toEqual([OWN_TOOK, LOCAL_TOOK]);
+    expect(linesWhenFirstDrawn.get(LOCAL_WORDS)).toEqual([
+      OWN_TOOK,
+      LOCAL_TOOK,
     ]);
+    expect(api.to(MODELS)).toHaveLength(1);
     const itemsBefore = before.map(items);
     expect(wordsDrawn(OWN_WORDS)).toBe(1);
     expect(wordsDrawn(LOCAL_WORDS)).toBe(1);
 
     models.release();
 
-    await waitFor(() => {
-      expect(lines().map(said)).toEqual([OWN_TOOK, LOCAL_TOOK]);
-    });
-    // The same lists, and their first items the same elements: one was added to each,
-    // last.
+    // The picker comes with the list of models.
+    expect(
+      await screen.findByRole("button", { name: "Model: Qwen 3.5 4B" }),
+    ).toBeVisible();
+    // The same lists, the same items, saying the same.
     const after = lines();
+    expect(after.map(said)).toEqual([OWN_TOOK, LOCAL_TOOK]);
     after.forEach((list, index) => {
       expect(list).toBe(before[index]);
       const shown = items(list);
       const earlier = itemsBefore[index] ?? [];
-      expect(shown).toHaveLength(earlier.length + 1);
+      expect(shown).toHaveLength(earlier.length);
       earlier.forEach((item, at) => {
         expect(shown[at]).toBe(item);
       });
     });
     expect(wordsDrawn(OWN_WORDS)).toBe(1);
     expect(wordsDrawn(LOCAL_WORDS)).toBe(1);
+  });
+
+  it("is not said of the asked model's own stored answer where the conversation's read names that model alone, before the models are read", async () => {
+    // Its read names the default model alone, as the fake API's conversations do unless
+    // a test says otherwise. The list, when it comes, offers two: the installation
+    // offers one more now than when the conversation was read.
+    const models = later(() => json(200, twoModels()));
+    fakeApi()
+      .on(MODELS, models.answer)
+      .on(CONVERSATION, () =>
+        json(
+          200,
+          conversation(RECORDED.conversation, [
+            question(RECORDED.question, "How fast was that?"),
+            answer(
+              RECORDED.answer,
+              OWN_WORDS,
+              RECORDED.question,
+              recordedTurn("figures.sse"),
+            ),
+          ]),
+        ),
+      );
+    const { open } = await newPage();
+    open(`/c/${RECORDED.conversation}`);
+
+    const took = await screen.findByRole("list", { name: LINE });
+    expect(said(took)).toEqual(OWN_TOOK.slice(0, -1));
+    expect(linesWhenFirstDrawn.get(OWN_WORDS)).toEqual([OWN_TOOK.slice(0, -1)]);
+    await afterAMoment();
+    expect(said(line())).toEqual(OWN_TOOK.slice(0, -1));
+
+    models.release();
+
+    // Two on offer now: the list names it.
+    await waitFor(() => {
+      expect(said(line())).toEqual(OWN_TOOK);
+    });
+  });
+
+  it("is said by the list of models once it is read, where it titles a model otherwise than the conversation's read did", async () => {
+    // The default model was given a new title after the conversation was read.
+    const RENAMED = "Qwen 3.5 4B, renamed";
+    const models = later(() =>
+      json(200, {
+        default: "standard",
+        models: [model({ title: RENAMED }), freeModel()],
+      }),
+    );
+    fakeApi()
+      .on(MODELS, models.answer)
+      .on(CONVERSATION, () => json(200, twoAnswers()));
+    const { open } = await newPage();
+    open(`/c/${RECORDED.conversation}`);
+
+    await waitFor(() => {
+      expect(lines().map(said)).toEqual([OWN_TOOK, LOCAL_TOOK]);
+    });
+
+    models.release();
+
+    await waitFor(() => {
+      expect(lines().map(said)).toEqual([
+        [...OWN_TOOK.slice(0, -1), `answered by ${RENAMED}`],
+        LOCAL_TOOK,
+      ]);
+    });
+  });
+
+  it("stays as the conversation's read named it where the list of models can't be read", async () => {
+    const api = fakeApi()
+      .on(MODELS, () => problem(503, "The service is restarting."))
+      .on(CONVERSATION, () => json(200, twoAnswers()));
+    const { open } = await newPage();
+    open(`/c/${RECORDED.conversation}`);
+
+    await waitFor(() => {
+      expect(lines().map(said)).toEqual([OWN_TOOK, LOCAL_TOOK]);
+    });
+    // The list was asked for, and refused: no picker came, and the lines are as they
+    // were.
+    await waitFor(() => {
+      expect(api.to(MODELS).length).toBeGreaterThan(0);
+    });
+    await afterAMoment();
+    expect(
+      screen.queryByRole("button", { name: /^Model: / }),
+    ).not.toBeInTheDocument();
+    expect(lines().map(said)).toEqual([OWN_TOOK, LOCAL_TOOK]);
+  });
+
+  it("is worded once for a stored answer, and not again at each key pressed in the box, before the models are read or after: the names are an object that is there already, never one made at a render", async () => {
+    // How often a line's words were made: once for each drawing of a line.
+    let worded = 0;
+    vi.doMock("@/lib/chat/figures", async (original) => {
+      const actual = await original<typeof Figures>();
+      return {
+        ...actual,
+        figuresOf: (...given: Parameters<typeof actual.figuresOf>) => {
+          worded += 1;
+          return actual.figuresOf(...given);
+        },
+      };
+    });
+    const models = later(() => json(200, twoModels()));
+    fakeApi()
+      .on(MODELS, models.answer)
+      .on(CONVERSATION, () => json(200, twoAnswers()));
+    const { open } = await newPage();
+    const user = open(`/c/${RECORDED.conversation}`);
+    await waitFor(() => {
+      expect(lines().map(said)).toEqual([OWN_TOOK, LOCAL_TOOK]);
+    });
+    await afterAMoment();
+    const box = screen.getByLabelText("Message");
+    const byTheRead = worded;
+    // The counter counts: both lines were worded.
+    expect(byTheRead).toBeGreaterThanOrEqual(2);
+
+    // Each key draws the conversation again, with its box.
+    await user.type(box, "abc");
+
+    expect(box).toHaveValue("abc");
+    expect(worded).toBe(byTheRead);
+
+    models.release();
+
+    // The picker comes with the list of models, which names the lines from here: each
+    // is worded once more, by the newer names.
+    expect(
+      await screen.findByRole("button", { name: "Model: Qwen 3.5 4B" }),
+    ).toBeVisible();
+    await afterAMoment();
+    const byTheList = worded;
+    expect(byTheList).toBeGreaterThan(byTheRead);
+
+    await user.type(box, "d");
+
+    expect(box).toHaveValue("abcd");
+    expect(worded).toBe(byTheList);
+    expect(lines().map(said)).toEqual([OWN_TOOK, LOCAL_TOOK]);
+  });
+
+  it("is not said in a new chat until the models are read, as the chat has no read of its own", async () => {
+    const models = later(() => json(200, twoModels()));
+    fakeApi()
+      .on(MODELS, models.answer)
+      .on(TURNS, () => streamed("figures.sse"));
+    const { ask, open } = await newPage();
+    const user = open();
+    await ask(user, "How fast was that?");
+    expect(await screen.findByText(OWN_WORDS)).toBeVisible();
+
+    const took = await screen.findByRole("list", { name: LINE });
+    expect(said(took)).toEqual(OWN_TOOK.slice(0, -1));
+    await afterAMoment();
+    expect(said(line())).toEqual(OWN_TOOK.slice(0, -1));
+
+    models.release();
+
+    await waitFor(() => {
+      expect(said(line())).toEqual(OWN_TOOK);
+    });
   });
 
   it("is not said of an answer kept from a turn that was given up on, whose record names no model, where two are on offer", async () => {
@@ -442,23 +659,28 @@ describe("which model wrote an answer", () => {
       .on(CONVERSATION, () =>
         json(
           200,
-          conversation(RECORDED.conversation, [
-            question(RECORDED.question, "How fast was that?"),
-            answer(
-              RECORDED.answer,
-              OWN_WORDS,
-              RECORDED.question,
-              recordedTurn("figures.sse"),
-            ),
-            question(STORED.question, "And then?", RECORDED.answer),
-            answer(STORED.answer, KEPT, STORED.question, givenUp),
-          ]),
+          conversation(
+            RECORDED.conversation,
+            [
+              question(RECORDED.question, "How fast was that?"),
+              answer(
+                RECORDED.answer,
+                OWN_WORDS,
+                RECORDED.question,
+                recordedTurn("figures.sse"),
+              ),
+              question(STORED.question, "And then?", RECORDED.answer),
+              answer(STORED.answer, KEPT, STORED.question, givenUp),
+            ],
+            null,
+            titlesOf(twoModels()),
+          ),
         ),
       );
     const { open } = await newPage();
     open(`/c/${RECORDED.conversation}`);
 
-    // The first answer's line names its model: the models are read.
+    // The first answer's line names its model: two are on offer.
     await waitFor(() => {
       expect(lines().map(said)).toEqual([OWN_TOOK]);
     });

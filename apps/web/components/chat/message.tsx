@@ -8,7 +8,7 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 
-import type { Model, Turn } from "@/lib/api/client";
+import type { ModelTitle, Turn } from "@/lib/api/client";
 import { figuresOf } from "@/lib/chat/figures";
 import { isBlank, turnOf } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/lib/chat/messages";
@@ -159,14 +159,17 @@ export function useWaitsForRenderer(words: boolean): boolean {
   return waits;
 }
 
-/** The models on offer, as the page last read them, or `null` until it has: what an
- * answer took names the model that wrote it by its title there, and the one asked when
- * another wrote it, and says nothing of the asked model's own answer where it is the
- * one model on offer (`figuresOf`). Given to the conversation's messages by `Chat`, and
- * read by `Took` alone. A context, and no property of `Message`: the models are read
- * again while the model that answers can't, and that draws `Took` again, never the
- * answers' words. */
-export const ModelsOnOffer = createContext<readonly Model[] | null>(null);
+/** The models on offer, by their ids and titles alone: the list of models as the page
+ * last read it, and until it has, a stored conversation's own read of them (ADR 0032,
+ * revision "a conversation's read names the models on offer, and an answer's line names
+ * its model from the first draw"), or `null` while there is neither, as in a new chat.
+ * What an answer took names the model that wrote it by its title there, and the one
+ * asked when another wrote it, and says nothing of the asked model's own answer where it
+ * is the one model on offer (`figuresOf`). Given to the conversation's messages by
+ * `Chat`, and read by `Took` alone. A context, and no property of `Message`: the models
+ * are read again while the model that answers can't, and that draws `Took` again, never
+ * the answers' words. */
+export const ModelsOnOffer = createContext<readonly ModelTitle[] | null>(null);
 
 /** One message of a conversation: a question, or a model's answer.
  *
@@ -293,7 +296,8 @@ function Answer({
  * painted (`useSettled`, which says why). That wait is kept here, and not in `Answer`:
  * a frame later this is drawn again, and the answer's words are not. So are the models
  * on offer, which name the model that wrote the answer (`ModelsOnOffer`): read here,
- * they draw this again when they come, and nothing else of the answer. */
+ * they draw this again when they change, as when the list of models takes the place of
+ * a stored conversation's own, and nothing else of the answer. */
 function Took({
   turn,
   writing,
