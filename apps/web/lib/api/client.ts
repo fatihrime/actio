@@ -15,6 +15,7 @@ type Schemas = components["schemas"];
 
 export type Me = Schemas["Me"];
 export type Model = Schemas["ModelOut"];
+export type Price = Schemas["PriceOut"];
 export type ModelList = Schemas["ModelList"];
 export type Conversation = Schemas["ConversationOut"];
 export type ConversationSummary = Schemas["ConversationSummary"];

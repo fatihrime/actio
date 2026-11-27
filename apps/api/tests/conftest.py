@@ -380,6 +380,7 @@ def plans_for_tests(
     free_models: Iterable[str] = (),
     answers_at_once: int | None = None,
     credits_a_token: int = 1,
+    prices: Mapping[str, Mapping[str, int]] | None = None,
 ) -> Plans:
     """Prices and plans for the app under test.
 
@@ -390,6 +391,9 @@ def plans_for_tests(
     offers, unless a test offers others. `free_models` are offered beside them, and cost
     nothing whatever `free` says. `answers_at_once` is how many answers a guest and an
     account may each have being written at once; by default as many as they ask for.
+    `prices` states models' prices as a plans file would, such as `{"standard":
+    {"input": 250_000, "output": 1_000_000, "cached_input": 25_000}}`: each in the place
+    of the price the rest would give it, or beside them for a model they don't name.
     """
 
     def plan(title: str, allowance: tuple[int, int] | None) -> dict[str, Any]:
@@ -401,8 +405,9 @@ def plans_for_tests(
         return limits
 
     price = 0 if free else credits_a_token * 1_000_000
-    prices = {name: {"input": price, "output": price} for name in models}
-    prices |= {name: {"input": 0, "output": 0} for name in free_models}
+    priced = {name: {"input": price, "output": price} for name in models}
+    priced |= {name: {"input": 0, "output": 0} for name in free_models}
+    priced |= {name: dict(stated) for name, stated in (prices or {}).items()}
     return Plans(
         PlansFile.model_validate(
             {
@@ -411,7 +416,7 @@ def plans_for_tests(
                 "session_hours": 5,
                 "week_resets": "MON 00:00 UTC",
                 "min_answer_tokens": min_answer_tokens,
-                "prices": prices,
+                "prices": priced,
                 "plans": {"guest": plan("Guest", guest), "member": plan("Member", account)},
             }
         )
@@ -430,6 +435,7 @@ class PlansWith(Protocol):
         free_models: Iterable[str] = ...,
         answers_at_once: int | None = ...,
         credits_a_token: int = ...,
+        prices: Mapping[str, Mapping[str, int]] | None = ...,
     ) -> Plans: ...
 
 

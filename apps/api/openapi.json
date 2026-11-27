@@ -1012,7 +1012,7 @@
           "models"
         ],
         "summary": "List Models",
-        "description": "The models you can choose from, and whether each can answer right now, by itself\nor through a model asked in its place.\n\nEach provider is asked at most every 15 seconds, so this can be fetched often.",
+        "description": "The models you can choose from, whether each can answer right now, by itself or\nthrough a model asked in its place, and what each costs.\n\nEach provider is asked at most every 15 seconds, so this can be fetched often.",
         "operationId": "list_models",
         "responses": {
           "200": {
@@ -1558,6 +1558,10 @@
             "type": "boolean",
             "title": "Thinking",
             "description": "Whether a question to it can ask for reasoning: whether the model that would be\nasked first, of itself and those asked in its place that can answer, can reason\nbefore it answers. While none of them can answer, whether it can itself: false\nwhile its server can't be asked."
+          },
+          "price": {
+            "$ref": "#/components/schemas/PriceOut",
+            "description": "What a question to it is counted at: its own price, also when a model asked in\nits place answers. All three are 0 for a model that costs nothing."
           }
         },
         "type": "object",
@@ -1570,7 +1574,8 @@
           "max_output_tokens",
           "then",
           "status",
-          "thinking"
+          "thinking",
+          "price"
         ],
         "title": "ModelOut"
       },
@@ -1657,6 +1662,33 @@
           "title"
         ],
         "title": "PlanOut"
+      },
+      "PriceOut": {
+        "properties": {
+          "input": {
+            "type": "integer",
+            "title": "Input",
+            "description": "For what it reads: the conversation so far."
+          },
+          "output": {
+            "type": "integer",
+            "title": "Output",
+            "description": "For what it writes: its answer, and its reasoning."
+          },
+          "cached_input": {
+            "type": "integer",
+            "title": "Cached Input",
+            "description": "For what its server says it read again from its cache. The same as `input` where\nno other price is stated for it."
+          }
+        },
+        "type": "object",
+        "required": [
+          "input",
+          "output",
+          "cached_input"
+        ],
+        "title": "PriceOut",
+        "description": "What a model costs, in credits per million tokens."
       },
       "Readiness": {
         "properties": {

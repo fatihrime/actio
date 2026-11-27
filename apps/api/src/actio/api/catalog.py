@@ -1,9 +1,10 @@
 """The routes of the models on offer.
 
-`GET /api/models` says what can be chosen, which one is the default, and whether each
-is ready to answer right now, by itself or through a model that stands in for it (ADR
-0028). Which models there are comes from the models file (`actio.catalog`); whether one
-is ready is asked from its provider.
+`GET /api/models` says what can be chosen, which one is the default, whether each is
+ready to answer right now, by itself or through a model that stands in for it (ADR
+0028), and what each costs. Which models there are comes from the models file
+(`actio.catalog`); whether one is ready is asked from its provider; what it costs is the
+plans file's (`actio.usage`, ADR 0020), joined to it here.
 
 `POST /api/models/{model_id}/warm-up` has a model's server load it into memory before
 the first question to it, so that the question doesn't wait for the load (ADR 0026).
@@ -17,7 +18,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Response
 
-from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Models, Now
+from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Models, Now, Usage
 from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.api.rate_limits import Limits
@@ -36,6 +37,18 @@ def not_ready(model: str, state: str) -> Problem:
     `missing` or `unreachable`. The words are for a person, and `model_status` is for
     a page that says what to do about it."""
     return Problem(503, NOT_READY[state], model=model, model_status=state)
+
+
+class PriceOut(Described):
+    """What a model costs, in credits per million tokens."""
+
+    input: int
+    """For what it reads: the conversation so far."""
+    output: int
+    """For what it writes: its answer, and its reasoning."""
+    cached_input: int
+    """For what its server says it read again from its cache. The same as `input` where
+    no other price is stated for it."""
 
 
 class ModelOut(Described):
@@ -66,6 +79,9 @@ class ModelOut(Described):
     asked first, of itself and those asked in its place that can answer, can reason
     before it answers. While none of them can answer, whether it can itself: false
     while its server can't be asked."""
+    price: PriceOut
+    """What a question to it is counted at: its own price, also when a model asked in
+    its place answers. All three are 0 for a model that costs nothing."""
 
 
 class ModelList(Described):
@@ -75,9 +91,9 @@ class ModelList(Described):
 
 
 @router.get("/api/models")
-async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelList:
-    """The models you can choose from, and whether each can answer right now, by itself
-    or through a model asked in its place.
+async def list_models(_: CurrentPrincipal, catalog: Models, usage: Usage, now: Now) -> ModelList:
+    """The models you can choose from, whether each can answer right now, by itself or
+    through a model asked in its place, and what each costs.
 
     Each provider is asked at most every 15 seconds, so this can be fetched often.
     """
@@ -86,6 +102,9 @@ async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelLi
     for offered in catalog:
         chain = chains[offered.name]
         first = chain.ready[0][1] if chain.ready else None
+        # By its own name: a question to it costs this, whichever of its chain answers.
+        # Every model on offer has a price, which the app checked when it started.
+        price = usage.plans.price_of(offered.name)
         listed.append(
             ModelOut(
                 id=offered.name,
@@ -99,6 +118,12 @@ async def list_models(_: CurrentPrincipal, catalog: Models, now: Now) -> ModelLi
                 status="ready" if first is not None else chain.status.state,
                 # None ready: its own word, as for a model that has no stand-in.
                 thinking=(first or chain.status).thinking,
+                price=PriceOut(
+                    input=price.input,
+                    output=price.output,
+                    # Left out of the file: the price of what it reads, as it is counted.
+                    cached_input=price.input if price.cached_input is None else price.cached_input,
+                ),
             )
         )
     return ModelList(default=catalog.default, models=listed)

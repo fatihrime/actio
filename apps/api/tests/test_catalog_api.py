@@ -104,6 +104,8 @@ async def test_the_models_on_offer_and_the_default(api: httpx.AsyncClient) -> No
                 "then": [],
                 "status": "ready",
                 "thinking": True,
+                # The tests' plans: a credit a token, read or written.
+                "price": {"input": 1_000_000, "output": 1_000_000, "cached_input": 1_000_000},
             }
         ],
     }
@@ -202,6 +204,72 @@ async def test_a_models_window_is_listed_as_its_room(
         "standard": (8_000, 512),
         "wide": (4096, 1024),
         "local": (8192, 512),
+    }
+
+
+async def test_each_model_is_listed_with_its_price_as_the_plans_state_it(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, plans_with: Any
+) -> None:
+    """In credits per million tokens: for what it reads, what it writes, and what it
+    reads again from its server's cache, which is what reading costs where the plans
+    file states nothing of it, as a turn is counted. A cache whose reads the file
+    states as costing nothing is listed so, and not as left out. A model that costs
+    nothing says nothing but zeros."""
+    assert migrated
+    lineup.add("standard")
+    lineup.add("plain")
+    lineup.add("cached")
+    lineup.add("local")
+    plans = plans_with(
+        prices={
+            "standard": {"input": 250_000, "output": 1_000_000, "cached_input": 25_000},
+            "plain": {"input": 2_000_000, "output": 3_000_000},
+            "cached": {"input": 500_000, "output": 1_000_000, "cached_input": 0},
+            "local": {"input": 0, "output": 0},
+        }
+    )
+    browser = await start_app(settings, catalog=lineup.catalog(), plans=plans)
+    await browser.post("/api/session/guest")
+
+    listed = (await browser.get("/api/models")).json()["models"]
+
+    assert {m["id"]: m["price"] for m in listed} == {
+        "standard": {"input": 250_000, "output": 1_000_000, "cached_input": 25_000},
+        "plain": {"input": 2_000_000, "output": 3_000_000, "cached_input": 2_000_000},
+        "cached": {"input": 500_000, "output": 1_000_000, "cached_input": 0},
+        "local": {"input": 0, "output": 0, "cached_input": 0},
+    }
+
+
+async def test_a_model_is_listed_at_its_own_price_while_one_asked_in_its_place_would_answer(
+    start_app: Any, settings: Settings, migrated: str, lineup: Any, plans_with: Any
+) -> None:
+    """A question to it costs its price, whichever model of its chain answers it (ADR
+    0028): never the price of the one that would be asked first."""
+    assert migrated
+    lineup.add("standard", state="unreachable", then=["second"])
+    lineup.add("second")
+    plans = plans_with(
+        prices={
+            "standard": {"input": 750_000, "output": 3_000_000, "cached_input": 75_000},
+            "second": {"input": 100_000, "output": 400_000},
+        }
+    )
+    browser = await start_app(settings, catalog=lineup.catalog(), plans=plans)
+    await browser.post("/api/session/guest")
+
+    listed = {m["id"]: m for m in (await browser.get("/api/models")).json()["models"]}
+
+    assert listed["standard"]["status"] == "ready"  # through "second", which would answer
+    assert listed["standard"]["price"] == {
+        "input": 750_000,
+        "output": 3_000_000,
+        "cached_input": 75_000,
+    }
+    assert listed["second"]["price"] == {
+        "input": 100_000,
+        "output": 400_000,
+        "cached_input": 100_000,
     }
 
 
@@ -447,3 +515,22 @@ async def test_the_route_is_in_the_api_description(api: httpx.AsyncClient) -> No
     paths = (await api.get("/api/openapi.json")).json()["paths"]
 
     assert set(paths["/api/models"]) == {"get"}
+
+
+async def test_a_models_price_and_each_of_its_numbers_are_described(
+    api: httpx.AsyncClient,
+) -> None:
+    """For a reader of the API, in its description, which the web app's types are
+    generated from (test_api_description.py holds the recorded file to it)."""
+    schemas = (await api.get("/api/openapi.json")).json()["components"]["schemas"]
+    model, price = schemas["ModelOut"], schemas["PriceOut"]
+
+    assert "price" in model["required"]
+    assert model["properties"]["price"]["$ref"] == "#/components/schemas/PriceOut"
+    assert model["properties"]["price"]["description"]
+    assert "credits per million tokens" in price["description"]
+    assert set(price["required"]) == {"input", "output", "cached_input"}
+    assert set(price["properties"]) == {"input", "output", "cached_input"}
+    for name, member in price["properties"].items():
+        assert member["type"] == "integer", name
+        assert member["description"], name

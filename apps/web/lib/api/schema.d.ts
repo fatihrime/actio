@@ -351,8 +351,8 @@ export interface paths {
         };
         /**
          * List Models
-         * @description The models you can choose from, and whether each can answer right now, by itself
-         *     or through a model asked in its place.
+         * @description The models you can choose from, whether each can answer right now, by itself or
+         *     through a model asked in its place, and what each costs.
          *
          *     Each provider is asked at most every 15 seconds, so this can be fetched often.
          */
@@ -644,6 +644,11 @@ export interface components {
              *     while its server can't be asked.
              */
             thinking: boolean;
+            /**
+             * @description What a question to it is counted at: its own price, also when a model asked in
+             *     its place answers. All three are 0 for a model that costs nothing.
+             */
+            price: components["schemas"]["PriceOut"];
         };
         /**
          * NewMessage
@@ -676,6 +681,28 @@ export interface components {
              * @description What to call it, such as `Free`.
              */
             title: string;
+        };
+        /**
+         * PriceOut
+         * @description What a model costs, in credits per million tokens.
+         */
+        PriceOut: {
+            /**
+             * Input
+             * @description For what it reads: the conversation so far.
+             */
+            input: number;
+            /**
+             * Output
+             * @description For what it writes: its answer, and its reasoning.
+             */
+            output: number;
+            /**
+             * Cached Input
+             * @description For what its server says it read again from its cache. The same as `input` where
+             *     no other price is stated for it.
+             */
+            cached_input: number;
         };
         /**
          * Readiness

@@ -338,6 +338,9 @@ export function model(changes: Partial<Model> = {}): Model {
     then: [],
     status: "ready",
     thinking: true,
+    // The shipped price (config/plans.toml): a credit a token written, a quarter of
+    // that read, and a tenth of reading from the cache.
+    price: { input: 250_000, output: 1_000_000, cached_input: 25_000 },
     ...changes,
   };
 }
@@ -354,6 +357,7 @@ export function freeModel(changes: Partial<Model> = {}): Model {
     title: "Local",
     model: "granite4:micro",
     thinking: false,
+    price: { input: 0, output: 0, cached_input: 0 },
     ...changes,
   });
 }
