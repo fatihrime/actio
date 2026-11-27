@@ -53,6 +53,7 @@ from actio.catalog import (
     budget_of,
     counted,
     kept,
+    look_at_chains,
     read_file,
 )
 from actio.core.budget import Bucket, Budgets, BudgetsUnavailableError
@@ -1571,6 +1572,64 @@ async def test_a_look_asks_valkey_nothing_when_no_ready_model_has_a_budget(
     assert await Chain(((plain, READY), (away, GONE))).look(budgets_away, 10, now=NOON) == {}
     with pytest.raises(BudgetsUnavailableError):
         await Chain(((away, READY),)).look(budgets_away, 10, now=NOON)
+
+
+class Looking(Budgets):
+    """Budgets that note how many buckets each of their looks is at: one question to
+    Valkey for each look at any."""
+
+    def __init__(self, client: Valkey) -> None:
+        super().__init__(client, prefix=f"test-{uuid.uuid4().hex}")
+        self.looks: list[int] = []
+
+    async def look(self, *amounts: tuple[Bucket, int], now: datetime) -> list[timedelta]:
+        self.looks.append(len(amounts))
+        return await super().look(*amounts, now=now)
+
+
+async def test_a_look_at_many_chains_says_what_each_ones_own_look_says_with_one_question(
+    valkey: Valkey,
+) -> None:
+    """Three chains, each ready model with a budget in two of them, and a model with a
+    budget that isn't ready in the third: one look, at the buckets of the two ready ones,
+    each once. Of each chain, what its own look says, by the same key."""
+    budgets = Looking(valkey)
+    spent = offered("spent", budget={"requests_a_minute": 1})
+    roomy = offered("roomy", budget={"requests_a_minute": 10})
+    plain, away = offered("plain"), offered("away", budget={"requests_a_day": 1})
+    [minute] = model_budget(spent).buckets
+    await budgets.add((minute, 1), (model_budget(away).buckets[0], 1), now=NOON)
+    chains = {
+        "spent": Chain(((spent, READY), (roomy, READY))),
+        "roomy": Chain(((roomy, READY),)),
+        "plain": Chain(((plain, READY), (spent, READY), (away, AWAY))),
+    }
+
+    found = await look_at_chains(chains, budgets, 1, now=NOON)
+    looks = list(budgets.looks)
+    alone = {name: await chain.look(budgets, 1, now=NOON) for name, chain in chains.items()}
+
+    assert looks == [2]
+    assert found == alone
+    assert found == {
+        "spent": {"spent": Spent(timedelta(minutes=1), minute)},
+        "roomy": {},
+        "plain": {"spent": Spent(timedelta(minutes=1), minute)},
+    }
+
+
+async def test_a_look_at_many_chains_asks_valkey_nothing_when_no_ready_model_has_a_budget(
+    budgets_away: Budgets,
+) -> None:
+    """And says it can't be had when one has, in any of them."""
+    plain, away = offered("plain"), offered("away", budget={"requests_a_day": 1})
+    chains = {"plain": Chain(((plain, READY), (away, GONE))), "away": Chain(((away, GONE),))}
+
+    assert await look_at_chains(chains, budgets_away, 1, now=NOON) == {"plain": {}, "away": {}}
+    with pytest.raises(BudgetsUnavailableError):
+        await look_at_chains(
+            chains | {"other": Chain(((plain, READY), (away, READY)))}, budgets_away, 1, now=NOON
+        )
 
 
 # --- What a request takes -------------------------------------------------------------

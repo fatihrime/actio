@@ -328,7 +328,7 @@ export function account(changes: Partial<Me> = {}): Me {
 }
 
 export function model(changes: Partial<Model> = {}): Model {
-  return {
+  const made: Model = {
     id: "standard",
     title: "Qwen 3.5 4B",
     provider: "ollama",
@@ -338,11 +338,23 @@ export function model(changes: Partial<Model> = {}): Model {
     then: [],
     status: "ready",
     thinking: true,
+    asked_first: null,
+    // Nothing in the way of the shortest question to it: it doesn't keep failing, and
+    // it isn't at its provider's limit.
+    failing: false,
+    retry_after: null,
     // The shipped price (config/plans.toml): a credit a token written, a quarter of
     // that read, and a tenth of reading from the cache.
     price: { input: 250_000, output: 1_000_000, cached_input: 25_000 },
     ...changes,
   };
+  // As the API lists it: the shortest question to a model that can answer is its own,
+  // and nobody is given one to a model that can't. A test of another model given it
+  // first says so.
+  if (!("asked_first" in changes)) {
+    made.asked_first = made.status === "ready" ? made.id : null;
+  }
+  return made;
 }
 
 export function models(changes: Partial<Model> = {}): ModelList {

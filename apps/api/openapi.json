@@ -1012,7 +1012,7 @@
           "models"
         ],
         "summary": "List Models",
-        "description": "The models you can choose from, whether each can answer right now, by itself or\nthrough a model asked in its place, and what each costs.\n\nEach provider is asked at most every 15 seconds, so this can be fetched often.",
+        "description": "The models you can choose from, whether each can answer right now, by itself or\nthrough a model asked in its place, what the shortest question to each would meet\nright now, and what each costs.\n\nEach provider is asked at most every 15 seconds, so this can be fetched often.",
         "operationId": "list_models",
         "responses": {
           "200": {
@@ -1557,7 +1557,36 @@
           "thinking": {
             "type": "boolean",
             "title": "Thinking",
-            "description": "Whether a question to it can ask for reasoning: whether the model that would be\nasked first, of itself and those asked in its place that can answer, can reason\nbefore it answers. While none of them can answer, whether it can itself: false\nwhile its server can't be asked."
+            "description": "Whether a question to it can ask for reasoning: whether, of itself and the models\nasked in its place, the first in that order that can answer right now can reason\nbefore it answers. That one says it also when another would be given the question\nfirst (`asked_first`). While none of them can answer, whether it can itself: false\nwhile its server can't be asked."
+          },
+          "asked_first": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asked First",
+            "description": "The `id` of the model the shortest question to it would be given to first, right\nnow: itself, or one of `then`, which is given it while this model can't answer, has\nnothing left of what its provider lets this installation send it, or keeps failing\nwhile that one doesn't. `null` when nobody would be asked: none of them can answer,\nwhich `status` says, or the question would be refused for now, which `retry_after`\nsays. A longer question may be given to another."
+          },
+          "failing": {
+            "type": "boolean",
+            "title": "Failing",
+            "description": "Whether the model `asked_first` names keeps failing: enough of the latest\nrequests to it failed that, for a while, it is asked after models that don't. It is\ngiven the question first all the same: no model that would do better is there to\nask before it. False when `asked_first` is `null`."
+          },
+          "retry_after": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After",
+            "description": "For how long the shortest question to it would be refused for now, in whole\nseconds, as the refusal of a question asked now would say: every model that could\ntake it has reached what its provider lets this installation send it. `null` when\nthe question would be asked, and when none of them can answer. A longer question\nmay be refused for longer, or where this one isn't."
           },
           "price": {
             "$ref": "#/components/schemas/PriceOut",
@@ -1575,6 +1604,9 @@
           "then",
           "status",
           "thinking",
+          "asked_first",
+          "failing",
+          "retry_after",
           "price"
         ],
         "title": "ModelOut"

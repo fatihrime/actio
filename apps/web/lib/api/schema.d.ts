@@ -352,7 +352,8 @@ export interface paths {
         /**
          * List Models
          * @description The models you can choose from, whether each can answer right now, by itself or
-         *     through a model asked in its place, and what each costs.
+         *     through a model asked in its place, what the shortest question to each would meet
+         *     right now, and what each costs.
          *
          *     Each provider is asked at most every 15 seconds, so this can be fetched often.
          */
@@ -638,12 +639,40 @@ export interface components {
             status: "ready" | "missing" | "unreachable";
             /**
              * Thinking
-             * @description Whether a question to it can ask for reasoning: whether the model that would be
-             *     asked first, of itself and those asked in its place that can answer, can reason
-             *     before it answers. While none of them can answer, whether it can itself: false
+             * @description Whether a question to it can ask for reasoning: whether, of itself and the models
+             *     asked in its place, the first in that order that can answer right now can reason
+             *     before it answers. That one says it also when another would be given the question
+             *     first (`asked_first`). While none of them can answer, whether it can itself: false
              *     while its server can't be asked.
              */
             thinking: boolean;
+            /**
+             * Asked First
+             * @description The `id` of the model the shortest question to it would be given to first, right
+             *     now: itself, or one of `then`, which is given it while this model can't answer, has
+             *     nothing left of what its provider lets this installation send it, or keeps failing
+             *     while that one doesn't. `null` when nobody would be asked: none of them can answer,
+             *     which `status` says, or the question would be refused for now, which `retry_after`
+             *     says. A longer question may be given to another.
+             */
+            asked_first: string | null;
+            /**
+             * Failing
+             * @description Whether the model `asked_first` names keeps failing: enough of the latest
+             *     requests to it failed that, for a while, it is asked after models that don't. It is
+             *     given the question first all the same: no model that would do better is there to
+             *     ask before it. False when `asked_first` is `null`.
+             */
+            failing: boolean;
+            /**
+             * Retry After
+             * @description For how long the shortest question to it would be refused for now, in whole
+             *     seconds, as the refusal of a question asked now would say: every model that could
+             *     take it has reached what its provider lets this installation send it. `null` when
+             *     the question would be asked, and when none of them can answer. A longer question
+             *     may be refused for longer, or where this one isn't.
+             */
+            retry_after: number | null;
             /**
              * @description What a question to it is counted at: its own price, also when a model asked in
              *     its place answers. All three are 0 for a model that costs nothing.

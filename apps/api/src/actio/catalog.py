@@ -21,7 +21,10 @@ what to call it at its provider, its limits, and the client to stream an answer 
   `Chain.with_own_waits`). When none of those with room has any, the request is
   refused for now. Within each of those two groups, a model that keeps failing, by what
   `Chain.failing` read of its breaker, is asked after those that don't
-  (`OfferedModel.breaker`, ADR 0031): that never refuses anything.
+  (`OfferedModel.breaker`, ADR 0031): that never refuses anything. `look_at_chains` is
+  `Chain.look` for many chains at once, with one question to Valkey: what the list of
+  models reads to say of each model what the shortest question to it would meet (ADR
+  0032).
 - What a model's provider said of it is reused for `STATUS_LIFETIME`, and asked again
   and waited for after that: `Catalog.chain_status` for a chain, `Catalog.status` for a
   model alone, and `Catalog.chains` for every model's chain at once, as the list of
@@ -55,6 +58,7 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Hashable,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -934,21 +938,7 @@ class Chain:
         One question to Valkey for the whole chain, and none when no ready model has a
         budget. It writes nothing. Raises `BudgetsUnavailableError` when Valkey doesn't
         answer."""
-        each = [
-            (offered, offered.budget.takes(requests=1, tokens=tokens))
-            for offered, _ in self.ready
-            if offered.budget is not None
-        ]
-        waits = iter(await budgets.look(*(take for _, takes in each for take in takes), now=now))
-        spent: dict[str, Spent] = {}
-        for offered, takes in each:
-            # The longest wait is the limit in the way: of two as long, the first.
-            wait, limit = max(
-                ((next(waits), bucket) for bucket, _ in takes), key=lambda found: found[0]
-            )
-            if wait > timedelta(0):
-                spent[offered.name] = Spent(wait, limit)
-        return spent
+        return await _looked((offered for offered, _ in self.ready), budgets, tokens, now=now)
 
     def with_own_waits(self, spent: Mapping[str, Spent], now: datetime) -> dict[str, Spent]:
         """What a look said (`spent`, by name), with each ready model of the chain whose
@@ -1035,6 +1025,54 @@ class Chain:
             return Asked((), too_small, over, refused=shortest)
         asked = _failing_last(left, failing)
         return Asked(asked, too_small, failing=_moved(tuple(left), asked, failing))
+
+
+async def look_at_chains(
+    chains: Mapping[str, Chain], budgets: Budgets, tokens: int, *, now: datetime
+) -> dict[str, dict[str, Spent]]:
+    """What `Chain.look` says of each chain of `chains`, by the same keys: for one
+    request with a prompt of about `tokens` by Actio's guess, the ready models of that
+    chain with a budget that it doesn't fit now, each with how long until it does and
+    the limit in the way.
+
+    One question to Valkey for all of them, however many chains there are: each ready
+    model with a budget is looked at once, whichever chains it is in, and none is asked
+    when no ready model has a budget. For the list of models, which says what the
+    shortest question to each model would meet now (ADR 0032). It writes nothing. Raises
+    `BudgetsUnavailableError` when Valkey doesn't answer."""
+    ready = {offered.name: offered for chain in chains.values() for offered, _ in chain.ready}
+    spent = await _looked(ready.values(), budgets, tokens, now=now)
+    return {
+        name: {
+            offered.name: spent[offered.name] for offered, _ in chain.ready if offered.name in spent
+        }
+        for name, chain in chains.items()
+    }
+
+
+async def _looked(
+    models: Iterable[OfferedModel], budgets: Budgets, tokens: int, *, now: datetime
+) -> dict[str, Spent]:
+    """The look of `Chain.look` and `look_at_chains`, written once: whether one request,
+    with a prompt of about `tokens`, fits the budget of each of `models` that has one,
+    each taken to be ready. Those it doesn't fit now, by their names, each with how long
+    until it does and the limit in the way. One question to Valkey for all of them, and
+    none when none has a budget."""
+    each = [
+        (offered, offered.budget.takes(requests=1, tokens=tokens))
+        for offered in models
+        if offered.budget is not None
+    ]
+    waits = iter(await budgets.look(*(take for _, takes in each for take in takes), now=now))
+    spent: dict[str, Spent] = {}
+    for offered, takes in each:
+        # The longest wait is the limit in the way: of two as long, the first.
+        wait, limit = max(
+            ((next(waits), bucket) for bucket, _ in takes), key=lambda found: found[0]
+        )
+        if wait > timedelta(0):
+            spent[offered.name] = Spent(wait, limit)
+    return spent
 
 
 def _failing_last(

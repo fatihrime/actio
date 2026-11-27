@@ -2,9 +2,11 @@
 
 `GET /api/models` says what can be chosen, which one is the default, whether each is
 ready to answer right now, by itself or through a model that stands in for it (ADR
-0028), and what each costs. Which models there are comes from the models file
-(`actio.catalog`); whether one is ready is asked from its provider; what it costs is the
-plans file's (`actio.usage`, ADR 0020), joined to it here.
+0028), what the shortest question to each would meet right now (ADR 0032), and what
+each costs. Which models there are comes from the models file (`actio.catalog`);
+whether one is ready is asked from its provider; what a question would meet is the
+rule a turn is decided by, with the reads a turn makes; what it costs is the plans
+file's (`actio.usage`, ADR 0020), joined to it here.
 
 `POST /api/models/{model_id}/warm-up` has a model's server load it into memory before
 the first question to it, so that the question doesn't wait for the load (ADR 0026).
@@ -18,13 +20,29 @@ from typing import Literal
 
 from fastapi import APIRouter, Response
 
-from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Models, Now, Usage
+from actio.api.dependencies import (
+    NO_SESSION,
+    AppResources,
+    CurrentPrincipal,
+    Models,
+    Now,
+    Usage,
+)
 from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.api.rate_limits import Limits
-from actio.catalog import UnknownModelError
+from actio.catalog import Spent, UnknownModelError, look_at_chains
+from actio.core.budget import BudgetsUnavailableError
 
 router = APIRouter(tags=["models"], responses=NO_SESSION)
+
+SHORTEST_QUESTION = 1
+"""The tokens of the shortest question, by Actio's guess at a prompt: what the list says
+a question to each model would meet now is said of a request this size, the smallest
+there is. Every model has room for it. A longer one may meet something else: it may
+wait longer, be given to another model, or be refused where this one isn't; and one
+longer than every model's room is asked all the same, where this one may be refused,
+since a guess at a request's size never refuses it (ADR 0029)."""
 
 NOT_READY = {
     "missing": "This model isn't on its server yet.",
@@ -75,10 +93,29 @@ class ModelOut(Described):
     Otherwise its own: `missing`, the server answers, but hasn't got this model;
     `unreachable`, the server doesn't answer."""
     thinking: bool
-    """Whether a question to it can ask for reasoning: whether the model that would be
-    asked first, of itself and those asked in its place that can answer, can reason
-    before it answers. While none of them can answer, whether it can itself: false
+    """Whether a question to it can ask for reasoning: whether, of itself and the models
+    asked in its place, the first in that order that can answer right now can reason
+    before it answers. That one says it also when another would be given the question
+    first (`asked_first`). While none of them can answer, whether it can itself: false
     while its server can't be asked."""
+    asked_first: str | None
+    """The `id` of the model the shortest question to it would be given to first, right
+    now: itself, or one of `then`, which is given it while this model can't answer, has
+    nothing left of what its provider lets this installation send it, or keeps failing
+    while that one doesn't. `null` when nobody would be asked: none of them can answer,
+    which `status` says, or the question would be refused for now, which `retry_after`
+    says. A longer question may be given to another."""
+    failing: bool
+    """Whether the model `asked_first` names keeps failing: enough of the latest
+    requests to it failed that, for a while, it is asked after models that don't. It is
+    given the question first all the same: no model that would do better is there to
+    ask before it. False when `asked_first` is `null`."""
+    retry_after: int | None
+    """For how long the shortest question to it would be refused for now, in whole
+    seconds, as the refusal of a question asked now would say: every model that could
+    take it has reached what its provider lets this installation send it. `null` when
+    the question would be asked, and when none of them can answer. A longer question
+    may be refused for longer, or where this one isn't."""
     price: PriceOut
     """What a question to it is counted at: its own price, also when a model asked in
     its place answers. All three are 0 for a model that costs nothing."""
@@ -91,17 +128,37 @@ class ModelList(Described):
 
 
 @router.get("/api/models")
-async def list_models(_: CurrentPrincipal, catalog: Models, usage: Usage, now: Now) -> ModelList:
+async def list_models(
+    _: CurrentPrincipal, catalog: Models, usage: Usage, resources: AppResources, now: Now
+) -> ModelList:
     """The models you can choose from, whether each can answer right now, by itself or
-    through a model asked in its place, and what each costs.
+    through a model asked in its place, what the shortest question to each would meet
+    right now, and what each costs.
 
     Each provider is asked at most every 15 seconds, so this can be fetched often.
     """
     chains = await catalog.chains(now=now)
+    # What the providers' plans have left for the shortest question, read for every
+    # chain at once: one question to Valkey, and none when no ready model has a budget.
+    looked: dict[str, dict[str, Spent]]
+    try:
+        looked = await look_at_chains(chains, resources.budgets, SHORTEST_QUESTION, now=now)
+    except BudgetsUnavailableError:
+        # As if nothing were spent, as a turn takes it, and nothing in the log: the page
+        # reads this every 5 s while its model can't answer, and a turn says it where it
+        # matters.
+        looked = {}
     listed = []
     for offered in catalog:
         chain = chains[offered.name]
         first = chain.ready[0][1] if chain.ready else None
+        # What the shortest question to it would meet now: the reads a turn's start
+        # makes, in its order, and the one rule it is decided by (`start_turn`). None of
+        # them writes anything, or counts as a try of a model.
+        spent = chain.with_own_waits(looked.get(offered.name, {}), now)
+        failing = chain.failing(now)
+        asked = chain.asked_with(SHORTEST_QUESTION, spent, failing)
+        asked_first = asked.models[0][0].name if asked.models else None
         # By its own name: a question to it costs this, whichever of its chain answers.
         # Every model on offer has a price, which the app checked when it started.
         price = usage.plans.price_of(offered.name)
@@ -118,6 +175,9 @@ async def list_models(_: CurrentPrincipal, catalog: Models, usage: Usage, now: N
                 status="ready" if first is not None else chain.status.state,
                 # None ready: its own word, as for a model that has no stand-in.
                 thinking=(first or chain.status).thinking,
+                asked_first=asked_first,
+                failing=asked_first in failing,
+                retry_after=None if asked.refused is None else asked.refused.seconds,
                 price=PriceOut(
                     input=price.input,
                     output=price.output,
