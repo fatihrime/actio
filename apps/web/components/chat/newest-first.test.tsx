@@ -129,9 +129,18 @@ function aPageJustOpened(): void {
   });
 }
 
+/** Every listener the page puts on anything, from each test's start on: what was
+ * listened for, and by what (`thePageListens`). */
+let listeners: ReturnType<typeof noteListeners>;
+
+function noteListeners() {
+  return vi.spyOn(EventTarget.prototype, "addEventListener");
+}
+
 beforeEach(() => {
   drawing.waits = null;
   aPageJustOpened();
+  listeners = noteListeners();
 });
 
 /** Keep the stand-in from drawing `text` until the test calls what this returns. A
@@ -183,6 +192,26 @@ function onThePage(): string[] {
 
 function log(): HTMLElement {
   return screen.getByRole("log", { name: "Conversation" });
+}
+
+/** Wait until the page listens for its reader's scrolling. A conversation is on the
+ * page a moment before the effect that listens has run (`useFollow`), and a test goes
+ * on as soon as it sees the messages: a wheel turned in that moment, which no reader's
+ * hand is fast enough for, was heard by nobody. The page then took its reader for
+ * still and showed the older messages, and the test failed for it: three times in a
+ * full run of the suites on a busy machine, in two tests of this file, and once in
+ * thirty repeats inside the whole suite on a machine kept busy on purpose, where the
+ * hook was made to say when it listened. */
+async function thePageListens(): Promise<void> {
+  const scrolling = log().parentElement;
+  await waitFor(() => {
+    expect(
+      listeners.mock.calls.some(
+        ([type], call) =>
+          type === "wheel" && listeners.mock.contexts[call] === scrolling,
+      ),
+    ).toBe(true);
+  });
 }
 
 /** From now on, note the first message on the page each time the page shows more. */
@@ -365,6 +394,7 @@ describe("a long stored conversation", () => {
       await waitFor(() => {
         expect(onThePage()).toEqual(newest);
       });
+      await thePageListens();
 
       scrolls();
       arrive();
@@ -470,6 +500,7 @@ describe("a long stored conversation", () => {
       await waitFor(() => {
         expect(onThePage()).toEqual(newest);
       });
+      await thePageListens();
       fireEvent.wheel(log().parentElement ?? log(), { deltaY: -100 });
       arrive();
       await waitFor(() => {
