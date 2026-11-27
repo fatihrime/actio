@@ -471,6 +471,14 @@ export interface components {
              *     says whether an answer is still being written, or why none came. Otherwise empty.
              */
             unanswered: components["schemas"]["TurnOut"] | null;
+            /**
+             * Models
+             * @description The models on offer, in the order `GET /api/models` lists them: each by the `id`
+             *     that a turn's `model` and `answered_by` name it by, and its title. Here so that the
+             *     conversation can be shown from this answer alone, with the model that wrote each
+             *     answer. Whether a model can answer right now is for `GET /api/models` to say.
+             */
+            models: components["schemas"]["ModelTitle"][];
         };
         /** ConversationSummary */
         ConversationSummary: {
@@ -678,6 +686,22 @@ export interface components {
              *     its place answers. All three are 0 for a model that costs nothing.
              */
             price: components["schemas"]["PriceOut"];
+        };
+        /**
+         * ModelTitle
+         * @description A model on offer, by its name and its title.
+         */
+        ModelTitle: {
+            /**
+             * Id
+             * @description The name to ask for it by, such as `standard`: its `id` in `GET /api/models`.
+             */
+            id: string;
+            /**
+             * Title
+             * @description Its name for people, as `GET /api/models` gives it.
+             */
+            title: string;
         };
         /**
          * NewMessage

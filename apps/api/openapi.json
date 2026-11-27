@@ -1257,6 +1257,14 @@
               }
             ],
             "description": "When the branch ends with a question: the last turn that tried to answer it. It\nsays whether an answer is still being written, or why none came. Otherwise empty."
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelTitle"
+            },
+            "type": "array",
+            "title": "Models",
+            "description": "The models on offer, in the order `GET /api/models` lists them: each by the `id`\nthat a turn's `model` and `answered_by` name it by, and its title. Here so that the\nconversation can be shown from this answer alone, with the model that wrote each\nanswer. Whether a model can answer right now is for `GET /api/models` to say."
           }
         },
         "type": "object",
@@ -1268,7 +1276,8 @@
           "last_active_at",
           "current_leaf_id",
           "messages",
-          "unanswered"
+          "unanswered",
+          "models"
         ],
         "title": "ConversationOut"
       },
@@ -1610,6 +1619,27 @@
           "price"
         ],
         "title": "ModelOut"
+      },
+      "ModelTitle": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "The name to ask for it by, such as `standard`: its `id` in `GET /api/models`."
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "description": "Its name for people, as `GET /api/models` gives it."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "ModelTitle",
+        "description": "A model on offer, by its name and its title."
       },
       "NewMessage": {
         "properties": {

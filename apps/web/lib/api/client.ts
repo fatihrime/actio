@@ -15,6 +15,9 @@ type Schemas = components["schemas"];
 
 export type Me = Schemas["Me"];
 export type Model = Schemas["ModelOut"];
+/** A model on offer by its id and title alone, as a conversation's read names it. A
+ * `Model` of the list is one too. */
+export type ModelTitle = Schemas["ModelTitle"];
 export type Price = Schemas["PriceOut"];
 export type ModelList = Schemas["ModelList"];
 export type Conversation = Schemas["ConversationOut"];

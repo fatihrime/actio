@@ -12,6 +12,7 @@ import type {
   Me,
   Model,
   ModelList,
+  ModelTitle,
   Problem,
   StoredMessage,
   Turn,
@@ -520,11 +521,20 @@ export function listed(
   return { items, next_cursor: nextCursor };
 }
 
-/** A stored conversation. `unanswered` is for one that ends with a question. */
+/** The models of a list as a conversation's read names them: each by its id and title,
+ * in the list's order. */
+export function titlesOf(list: ModelList): ModelTitle[] {
+  return list.models.map(({ id, title }) => ({ id, title }));
+}
+
+/** A stored conversation. `unanswered` is for one that ends with a question. `onOffer`
+ * are the models on offer that its read names, by default those of the fake API's own
+ * list (`models()`): a test that lists others says so, as `titlesOf(chained())`. */
 export function conversation(
   id: string,
   messages: StoredMessage[],
   unanswered: Turn | null = null,
+  onOffer: ModelTitle[] = titlesOf(models()),
 ): Conversation {
   return {
     id,
@@ -535,5 +545,6 @@ export function conversation(
     current_leaf_id: messages.at(-1)?.id ?? null,
     messages,
     unanswered,
+    models: onOffer,
   };
 }

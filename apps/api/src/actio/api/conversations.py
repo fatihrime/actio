@@ -10,6 +10,13 @@
 Every route needs a session, a guest's included, and sees only the caller's own
 conversations: someone else's answers 404, like one that doesn't exist.
 
+A conversation is read with the models on offer, each by its id and title, so that the
+page can name the model that wrote each answer from the read alone (ADR 0032, revision
+"a conversation's read names the models on offer, and an answer's line names its model
+from the first draw"). They are the models file's, as the catalog holds it: no model's
+server is asked, and the read waits for none. Whether a model can answer now is
+`GET /api/models`'s to say.
+
 Messages are added by turns, which have their own routes.
 """
 
@@ -23,7 +30,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import Field, StringConstraints
 
 from actio.api.body import Body
-from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Now, Runner
+from actio.api.dependencies import NO_SESSION, CurrentPrincipal, Database, Models, Now, Runner
 from actio.api.described import Described
 from actio.api.problems import Problem
 from actio.chat import context, conversations, titles, tree, turns
@@ -186,6 +193,15 @@ class MessageOut(Described):
     metadata: MessageMetadata
 
 
+class ModelTitle(Described):
+    """A model on offer, by its name and its title."""
+
+    id: str
+    """The name to ask for it by, such as `standard`: its `id` in `GET /api/models`."""
+    title: str
+    """Its name for people, as `GET /api/models` gives it."""
+
+
 class ConversationOut(ConversationSummary):
     current_leaf_id: uuid.UUID | None
     """The last message of the branch that is shown."""
@@ -194,6 +210,11 @@ class ConversationOut(ConversationSummary):
     unanswered: TurnOut | None
     """When the branch ends with a question: the last turn that tried to answer it. It
     says whether an answer is still being written, or why none came. Otherwise empty."""
+    models: list[ModelTitle]
+    """The models on offer, in the order `GET /api/models` lists them: each by the `id`
+    that a turn's `model` and `answered_by` name it by, and its title. Here so that the
+    conversation can be shown from this answer alone, with the model that wrote each
+    answer. Whether a model can answer right now is for `GET /api/models` to say."""
 
 
 class Rename(Body):
@@ -243,10 +264,10 @@ async def list_conversations(
 
 @router.get("/{conversation_id}", responses=NOT_YOURS)
 async def get_conversation(
-    conversation: OwnConversation, db: Database, now: Now
+    conversation: OwnConversation, db: Database, catalog: Models, now: Now
 ) -> ConversationOut:
     """One conversation, with the messages of the branch that is shown."""
-    return await _with_messages(db, conversation, now)
+    return await _with_messages(db, conversation, catalog, now)
 
 
 @router.patch("/{conversation_id}", responses=NOT_YOURS)
@@ -261,7 +282,7 @@ async def rename_conversation(
 
 @router.put("/{conversation_id}/branch", responses=NO_SUCH)
 async def show_branch(
-    body: ShowBranch, conversation: OwnConversation, db: Database, now: Now
+    body: ShowBranch, conversation: OwnConversation, db: Database, catalog: Models, now: Now
 ) -> ConversationOut:
     """Show the branch that passes through a message: another version of a question,
     or of an answer, and what followed it. Where that branch forks again further down,
@@ -271,7 +292,7 @@ async def show_branch(
     except tree.NoSuchMessageError:
         raise Problem(404, "This conversation has no such message.") from None
     await db.commit()
-    return await _with_messages(db, conversation, now)
+    return await _with_messages(db, conversation, catalog, now)
 
 
 @router.delete("/{conversation_id}", status_code=204, responses=NOT_YOURS)
@@ -290,7 +311,7 @@ async def delete_conversation(conversation: OwnConversation, db: Database, runne
 
 
 async def _with_messages(
-    db: Database, conversation: Conversation, now: datetime
+    db: Database, conversation: Conversation, catalog: Models, now: datetime
 ) -> ConversationOut:
     # A turn whose server died still says `running`. Looking is when that is noticed.
     await turns.give_up_on_stale(db, conversation.id, now=now)
@@ -318,6 +339,9 @@ async def _with_messages(
         # A turn that wrote an answer put it after the question, at the end of the branch
         # (`tree.append`): one that leaves the question at the end wrote none.
         unanswered=TurnOut.of(unanswered, answer=None) if unanswered else None,
+        # The models file's, as the catalog holds it: no server is asked, and nothing
+        # is waited for. A model is on offer whether or not it can answer now.
+        models=[ModelTitle(id=offered.name, title=offered.title) for offered in catalog],
     )
 
 

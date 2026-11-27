@@ -4,6 +4,7 @@ Turns, which add messages, come in the next step. Until then these tests put the
 messages into the database through `actio.chat`, and read them back through the API.
 """
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -24,6 +25,10 @@ pytestmark = pytest.mark.anyio
 PROBLEM = "application/problem+json"
 NOON = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 DENIZ = {"email": "deniz@example.com", "password": "correct horse battery staple"}
+PATIENCE_S = 5.0
+"""How long a test waits for the app to answer a read that waits for nothing. It takes
+milliseconds; this only keeps an app that waits for a model's server from hanging the
+run."""
 
 
 def later(minutes: float) -> datetime:
@@ -319,10 +324,12 @@ async def test_a_conversation_comes_with_the_branch_that_is_shown(
             },
         ],
         "unanswered": None,
+        # The one model the tests offer, by its name and its title.
+        "models": [{"id": "standard", "title": "Fake"}],
     }
 
 
-async def test_an_empty_conversation_has_no_messages(
+async def test_an_empty_conversation_has_no_messages_and_names_the_models_on_offer(
     api: httpx.AsyncClient, db: AsyncSession
 ) -> None:
     conversation = await started(db, await guest(api))
@@ -330,6 +337,68 @@ async def test_an_empty_conversation_has_no_messages(
     body = (await api.get(f"/api/conversations/{conversation.id}")).json()
 
     assert (body["current_leaf_id"], body["messages"]) == (None, [])
+    assert body["models"] == [{"id": "standard", "title": "Fake"}]
+
+
+async def test_a_conversation_names_the_models_on_offer_as_the_list_of_models_does(
+    start_app: Any, settings: Settings, migrated: str, db: AsyncSession, lineup: Any
+) -> None:
+    """Each by its id and its title, in the models file's order, which isn't the order
+    of their names. A model whose server can't answer, or hasn't got it, is on offer all
+    the same, and named."""
+    assert migrated
+    lineup.add("standard")
+    lineup.add("local", state="unreachable")
+    lineup.add("away", state="missing")
+    browser = await start_app(settings, catalog=lineup.catalog())
+    conversation = await started(db, await guest(browser))
+
+    named = (await browser.get(f"/api/conversations/{conversation.id}")).json()["models"]
+    listed = (await browser.get("/api/models")).json()["models"]
+
+    assert named == [
+        {"id": "standard", "title": "Standard"},
+        {"id": "local", "title": "Local"},
+        {"id": "away", "title": "Away"},
+    ]
+    assert named == [{"id": model["id"], "title": model["title"]} for model in listed]
+    assert [model["status"] for model in listed] == ["ready", "unreachable", "missing"]
+
+
+async def test_reading_a_conversation_asks_no_models_server_and_waits_for_none(
+    start_app: Any, settings: Settings, migrated: str, db: AsyncSession, lineup: Any
+) -> None:
+    """Nothing is known of any model when the conversation is read: no server is asked.
+    Then, while the list of models waits for a server's answer, which the test holds, a
+    conversation is read all the same."""
+    assert migrated
+    lineup.add("standard")
+    lineup.add("second")
+    browser = await start_app(settings, catalog=lineup.catalog())
+    conversation = await started(db, await guest(browser))
+    path = f"/api/conversations/{conversation.id}"
+
+    async with asyncio.timeout(PATIENCE_S):
+        first = await browser.get(path)
+    asked_by_the_read = list(lineup.asked)
+    held = lineup.hold("second")
+    async with asyncio.timeout(PATIENCE_S):
+        listing = asyncio.create_task(browser.get("/api/models"))
+        await held.asked.wait()
+        while_held = await browser.get(path)
+        list_done_while_held = listing.done()
+        held.answers.set()
+        listed = await listing
+
+    assert first.status_code == while_held.status_code == 200
+    assert asked_by_the_read == []
+    assert while_held.json()["models"] == [
+        {"id": "standard", "title": "Standard"},
+        {"id": "second", "title": "Second"},
+    ]
+    assert not list_done_while_held
+    assert listed.status_code == 200
+    assert sorted(lineup.asked) == ["second", "standard"]  # the list's asks alone
 
 
 async def test_only_one_branch_is_shown_and_each_message_names_its_versions(
@@ -402,6 +471,7 @@ async def test_showing_the_branch_through_another_version(
     ]
     assert response.json()["current_leaf_id"] == str(bike.sit.id)
     assert response.json()["last_active_at"] == "2026-11-10T12:05:00Z"  # looking isn't activity
+    assert response.json()["models"] == [{"id": "standard", "title": "Fake"}]
     assert (await api.get(path)).json() == response.json()  # and it stays shown
 
 
@@ -509,3 +579,18 @@ async def test_the_routes_are_in_the_api_description(api: httpx.AsyncClient) -> 
     assert set(paths["/api/conversations"]) == {"get"}
     assert set(paths["/api/conversations/{conversation_id}"]) == {"get", "patch", "delete"}
     assert set(paths["/api/conversations/{conversation_id}/branch"]) == {"put"}
+
+
+async def test_the_models_a_conversation_names_are_described(api: httpx.AsyncClient) -> None:
+    """For a reader of the API, in its description, which the web app's types are
+    generated from (test_api_description.py holds the recorded file to it)."""
+    schemas = (await api.get("/api/openapi.json")).json()["components"]["schemas"]
+    conversation, item = schemas["ConversationOut"], schemas["ModelTitle"]
+
+    assert "models" in conversation["required"]
+    member = conversation["properties"]["models"]
+    assert member["items"] == {"$ref": "#/components/schemas/ModelTitle"}
+    assert "GET /api/models" in member["description"]
+    assert set(item["required"]) == set(item["properties"]) == {"id", "title"}
+    for name, described in item["properties"].items():
+        assert described["description"], name

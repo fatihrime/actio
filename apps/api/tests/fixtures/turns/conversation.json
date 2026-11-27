@@ -67,5 +67,11 @@
       }
     }
   ],
-  "unanswered": null
+  "unanswered": null,
+  "models": [
+    {
+      "id": "standard",
+      "title": "Fake"
+    }
+  ]
 }
