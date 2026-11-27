@@ -59,6 +59,10 @@ min_answer_tokens = 256
 # Here a credit is one token of an answer, and reading costs a quarter of writing. A
 # question with a page of conversation behind it and a page of answer costs about 600.
 #
+# The list of models (GET /api/models) says each model's price, and the page's menu of
+# models says it under each title, in credits a token, unless every model's reads the
+# same there.
+#
 # A model with input = 0 and output = 0 is free: it uses up no credits, so it is never
 # refused. Whether a machine of your own is shared out fairly, or just used, is yours
 # to say here.

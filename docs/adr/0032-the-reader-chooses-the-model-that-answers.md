@@ -299,3 +299,105 @@ On the tree as committed, the same day, machine and engines.
 - **2 against a stack built from the copy of the first build,** with the three end-to-end specs that read the line, which didn't change after it: the asked model's own answer never named, and a stand-in's item in its old words. Each failed two tests.
 
 The tests of the first build were written before any planting; the one named above came after it.
+
+### 2026-11-27: the list says what a model costs, and the menu's rows say it where the models differ
+
+The decision left it under "Known, and left": "what a model costs, and that one keeps failing, was told to wait or has no budget, isn't said in the menu: the next steps". This revision is the first half of that sentence; the second is the next step's. A model has a price, in the plans file ([ADR 0020](0020-usage-limits-on-turns.md)): three whole numbers, in credits per million tokens, for what it reads, what it writes, and what it reads again from its server's cache. Nothing said it before an answer was paid for: `GET /api/models` didn't have it, and a row of the menu said a title and, for a model that can't answer, why. With the picker, a reader chooses among models that may each cost something else, and saw what one cost only under its first answer.
+
+**What a row says of the cost.** The plan named it "cost multipliers".
+
+1. **A multiple of the default model's cost,** such as "4×".
+    - Con: a multiple needs a model to be measured against, and the one at hand, the default, may cost nothing: an installation whose local model is free and whose cloud models are counted has no multiple to say.
+    - Con: one number can't stand for two prices. What a turn costs is its tokens read at one price and its tokens written at another, and the two don't come in a usual proportion (Measured, below). So a multiple worked out for any fixed mix is wrong for most turns as soon as two models' prices aren't in proportion to each other.
+2. **The credits of a usual answer,** such as "about 600 credits a question".
+    - Con: a usual answer is a fixed mix of tokens read and written, which the turns measured don't have: the same reason as the multiple's second.
+    - Con: it is a forecast, which the page doesn't make: the page adds up no credits ([ADR 0021](0021-usage-limits-in-the-page.md)), and what an answer did cost is said under it.
+3. **The price itself, in credits a token.** Chosen.
+    - Pro: always there and always true, and in the unit the page already shows under every answer, "73 credits".
+    - Pro: the number said first is a multiple all the same, of the shipped price for what a model writes: there a credit is one token of an answer. So "2 credits a token" is twice the shipped price of what is written, and eight times that of what is read.
+    - Con: two numbers where what a model reads and what it writes cost apart.
+
+**The decision: the list says each model's price as the installation states it, and a row of the menu says it in words, under the title, wherever the models on offer don't all say the same.**
+
+**The list** (`actio.api.catalog`):
+
+- **Each model has a `price`,** three whole numbers in credits per million tokens:
+    - `input`, for what it reads: the conversation so far;
+    - `output`, for what it writes: its answer and its reasoning;
+    - `cached_input`, for what its server says it read again from its cache. Always a number: the price of `input` where the plans file states no other, as a turn is counted, and 0 where the file states 0.
+- **It is the model's own price, by its name in the models file:** never that of a model that stands in for it, since a question to it costs this whichever of them answers ([ADR 0028](0028-a-model-names-those-that-stand-in-for-it.md)). All three are 0 for a model that costs nothing.
+- **The route joins it,** from the plans it reaches through the usage limits: `actio.catalog` and `actio.usage` don't import each other. Nothing below `actio.api` changed.
+
+**The words** (`lib/chat/prices.ts`, `priceInWords`), from `input` and `output`, each said as that number divided by a million:
+
+- both 0: "Free", the page's word for it already ("Use Local (free)");
+- both alike: one number, "1 credit a token", "0.5 credits a token";
+- otherwise what it writes first, then what it reads: "1 credit a token written, 0.25 read", "1 credit a token written, 0 read";
+- "credit" where the first number said is exactly 1, "credits" otherwise;
+- a number is said exactly, never rounded: a price is a whole number of millionths of a credit a token, so six decimals at the most, and no zeros after the last digit, "0.000001 credits a token";
+- what a model reads again from its server's cache is not said in a row. The list has it.
+
+**Said only where the models differ** (`pricesSaid`). Each model of the menu has its words worked out. When every model's words are the same, no row says a cost; otherwise every row says its own, those that are alike too. Five rows that each say "1 credit a token written, 0.25 read" tell a reader nothing to choose by; one "Free" among them does, and then the others' prices are what it is free against. The rule compares the words, not the prices: two models that differ in what they read again from the cache alone say the same words, and say none. So does one model alone.
+
+**Where, and in which order:**
+
+- **In the menu's row alone:** not on the picker's button, not under an answer, not in the offer at a usage limit.
+- **Under the title, after the reason a model can't answer:** the title, then "Can't be reached" or "Isn't downloaded yet" if there is one, then the cost. Each is a line of its own, in the small muted style the reason has.
+- **The row's name stays its title alone.** Its description is the reason and the cost, the reason first, each only when it is there: "Can't be reached 1 credit a token".
+
+**What changed** (`apps/web`):
+
+- **`ModelPicker`** works out what its rows say from the list it is given, as it was read last, and hands each row its line or nothing. Nothing new is passed to the conversation, its box or its messages: opening the picker, and what its rows say, draws no message again, as before.
+- **`Choice`** draws the line under the reason, and names both in its description.
+- **Unchanged:** the picker's keys, its focus and its closing; the button; what a question names; the offer at a usage limit; the line under an answer.
+
+**The end-to-end stack** (`deploy/e2e/config/plans.toml`): the model that names conversations, `namer`, has the shipped price now, `input = 250_000`, `output = 1_000_000`, `cached_input = 25_000`: the one model of the stack whose row says two numbers, and whose price has a `cached_input` of its own. It is still not free, so still not offered at a limit, and a title costs its account nothing whatever the price. So the stack's menu shows the three forms: "Fake model", "Hurried, in 3 seconds", "Rationed", "Queued" and "Away" say "1 credit a token", "Local" says "Free", and "Namer" "1 credit a token written, 0.25 read". No row there says a reason: "Away", whose server isn't there, is listed `ready` through the model that stands in for it.
+
+**Tests:**
+
+- **the list** (`apps/api/tests/test_catalog_api.py`): a price of three different numbers listed as those three; one whose file states no `cached_input` listed with `input`'s; one whose file states a `cached_input` of 0 listed with 0; a model that costs nothing with three zeros; a model whose own server can't be reached, ready through the model that stands in for it, listed at its own price and not at the stand-in's; and the member and its three numbers in the API's description, each described. The test of the whole list has the tests' own price in it, a credit a token for all three;
+- **the rule** (`lib/chat/prices.test.ts`): the words of the table above, row by row, numbers said exactly, "credit" and "credits", "Free" only when both are 0, nothing of the cache; and which rows say theirs: none with all alike, all with one different, none for two that differ in what is read from the cache alone, and none for one model alone;
+- **on the page** (`components/chat/model-picker.test.tsx`): rows that say their costs where the models differ, as their descriptions, and are still named by their titles alone; no row that says a cost where every model costs the same, nor the words in the menu, nor a description of any kind; a row that can't answer where no cost is said, which says the reason and nothing else; a row that can't answer where costs are said, which says the reason first and then the cost, in its description and in what it draws; that a description names the lines that are there, and no other; and the costs of a new read of the list, which opening the menu asks for. The fake API's model has the shipped price, and its model that costs nothing three zeros: so where a test offers both, the rows say their costs, and the five assertions on a row's description, in two tests, changed with that, as did the one that read the rows' text for their titles, which reads their names now;
+- **end to end** (`e2e/picker.spec.ts`): the menu of the stack's seven models, with the descriptions of "Fake model", "Local", "Namer" and "Away", each row named by its title alone, and "Namer"'s cost drawn as a line under its title, inside the menu.
+
+**Known, and left** (worked out from the rule, and not seen, unless it says measured):
+
+- **the price of what a model reads again from its server's cache isn't said in a row:** the list has it;
+- **a price in credits a token is no forecast of what an answer will cost:** that depends on the conversation behind the question and on the answer's length, and the line under an answer says what it did cost;
+- **the meter under the list of conversations says shares of the limits, not credits,** so a row's credits can't be held against it by reading: an answer's credits under it and the meter's move are what connect the two;
+- **where every model costs the same, nothing says what that is** before an answer was paid for;
+- **a reader whose plan has no limits is told the prices all the same;**
+- **whoever has a session, a guest too, can read every model's price in the list;**
+- **nothing says that a question to a model costs its price also when another model answers in its place:** the line under such an answer names both models, and not whose price it was;
+- **the menu is higher by a line a row where costs are said:** in a low window it scrolls inside itself sooner;
+- **a screen reader is given a row's reason and its cost as one description,** the two run together, "Can't be reached 1 credit a token": nobody listened to one.
+
+**How to reverse it:** `lib/chat/prices.ts` and its test; the line and the description in `Choice`, and `pricesSaid` in `ModelPicker` (`components/chat/model-picker.tsx`), with their tests, and the prices of the fake API's models. `price` in `ModelOut`, and `PriceOut` (`actio.api.catalog`), with their tests, and `Price` in `lib/api/client.ts`, then `make openapi`. `namer`'s price in the end-to-end stack can stay.
+
+#### Measured
+
+Before the build, on 2026-11-27, on a MacBook Pro (M1 Pro, 16 GB):
+
+- **How a turn's cost divides between reading and writing.** The usage ledger of the development stack on this machine, 2026-11-14 to 2026-11-27: 516 turns whose tokens their provider counted and that read and wrote something (of 535 rows), most of them short questions asked while building and testing, none of them people's traffic. At the shipped prices (0.25 credits a token read, 0.025 read again from the cache, 1 written), the share of a turn's cost that was its answer: 7 % at the tenth percentile, 49 % at the median, 97 % at the ninetieth; 67 % of all their credits together. Tokens read for each token written: 0.15 at the tenth percentile, 5.7 at the median, 51 at the ninetieth.
+- **That a price is said exactly.** `new Intl.NumberFormat("en", { maximumFractionDigits: 6 })` of a price divided by a million, held against the digits worked out as text, for every price from 0 to 2,000,000, 2,000,000 more drawn at random up to 100,000,000, and twelve edges (4,000,013 in all, Node 24.11.1): none differed.
+
+On the tree as committed, the same day, in Playwright 1.65's Chromium, Firefox and WebKit, by scripts kept outside the repository, against the stack of `make e2e`. Each figure was the same in the three engines:
+
+- **The rows,** in a window 1100 by 800 px: "Fake model", "Hurried, in 3 seconds", "Away", "Rationed" and "Queued" said "1 credit a token", "Local" said "Free", and "Namer" "1 credit a token written, 0.25 read". Each row was 48 px high, a title's line of 20 px and a cost's of 16 px, and the menu 240 px wide and 346 px high, inside the window, with nothing to scroll inside it. A row was found by its title alone.
+- **With every model's price made the same on its way to the page,** no row said a cost, and each was 32 px high.
+- **A window 320 px wide,** light, dark, and dark with forced colours: the menu from 29 to 269 px, the page no wider than the window, no line past its row.
+- **A window 360 px high:** the menu from 8 to 271 px, scrolling inside itself, the checked row in view.
+- **The longest words a price makes,** "99.999998 credits a token written, 99.999999 read", beside a title of 80 characters and a row that said "Isn't downloaded yet" too, at 320 px wide: the menu from 29 to 312 px, inside the window, each cost on two lines inside its row, the page no wider than the window.
+- **That a price is said exactly by each engine's own number formatting:** the comparison above, run inside a page of each (Chromium 158, Firefox 159, WebKit 27.2), 4,000,013 prices: none differed.
+
+**With real models,** on the stack of `make up` built from that tree, with a scratch pair of files in the place of `config/`: Ollama's `qwen3.5:4b-q4_K_M` at the shipped price, its `granite4:micro` at nothing, and a model at an address nothing listens at, at three times the shipped price, which the first stands in for. In Chromium:
+
+- **The rows said** "1 credit a token written, 0.25 read", "Free" and "3 credits a token written, 0.75 read". The third said no reason: it is listed `ready` through its stand-in.
+- **One question to each, and each answer cost what its row's price makes of its tokens,** rounded up once: 81 read and 32 written, 53 credits; 135 read and 29 written by the model that costs nothing, 0 credits; and 196 read and 25 written by the first model in the third's place, 222 credits, the third's price.
+
+**Mistakes were planted,** one at a time, in a scratch copy of the tree, never the working tree:
+
+- **On the first build, 39,** against the tests of the list, the rule and the menu: in the route (the price of the model that would answer first, or of the default; reading and writing changed places; what the cache costs where the file states none; a description gone), in the words (when "Free", "credit" or "credits", a number rounded, the order, one number or two, the unit), in which rows say theirs, and in the row (whose cost, the description and its order, the row's name, a cost kept from the first read). 37 failed a test. Of the two that failed nothing, one was a gap: a row with nothing to say whose description named lines that aren't there reads no differently. The tests now hold which lines a description names, and that a row with nothing to say has none.
+- **The review found a second gap by reading:** with the fake API's models priced, every row of the tests that said a reason said a cost too, and no test was left of a row that says a reason alone, as each row of five models at one price does when its server is away. Two broken versions of the row would have passed. It has a test now, and both versions fail it, and it alone.
+- **On the tree as committed, 44,** those two among them: 43 failed a test. The one left takes the cost's line out of a line of its own, by its class, and is no mistake in what is drawn, below.
+- **In a real browser, five,** each in a stack built from the scratch copy, against the end-to-end test: every model listed at the default's price, the stack's `namer` priced like its other models again, the cost as a part of the row's name, and the title and the lines under it side by side, each of which failed it. The fifth was the one that the component tests couldn't see: without its class, the cost was still drawn under the title and in line with it, the title before it being a block of its own, and the test passed.
