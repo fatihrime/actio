@@ -198,3 +198,104 @@ The tests of the first build were written before any planting; those named above
     - **with forced colours, the row the pointer is over, and the row the keyboard was put on by a press, show by no ground:** the outline is drawn once a key is used;
     - **the five end-to-end tests written before the picker still give a request a model's name on its way out,** which holds what they hold; choosing in the page instead would be a change to each.
 - **How to reverse it:** `components/chat/model-picker.tsx` and `lib/chat/chosen.ts`, with `answering` back in `components/chat/chat-app.tsx` with the stand-in alone; `named` and `picker` in `components/chat/chat.tsx`, which names the stand-in again, and blocks sending at a limit while it doesn't answer; the picker's place in `components/chat/composer.tsx`; `endStandIn` in `lib/usage.ts`; `notReadyInShort`; the two icons; and their tests. The layers of the list over a narrow window's chat can stay. The API is unchanged.
+
+## Revisions
+
+### 2026-11-27: an answer says which model wrote it, where there is a choice
+
+The decision left it under "Known, and left": "an answer says which model wrote it only when one stood in for the one asked". The line under an answer, what it took, named a model only then (ADR 0028, revision "a turn says which model answered, and the page says so"), which had weighed an item under every answer and decided against it: nearly every answer was the default model's, so the item would have said the same of each. The picker changed that. Two answers of one conversation can now be two models' own, each the model asked, and nothing on the page said which wrote which: seen in the decision's look on the stack of `make up` (Measured, above), an answer by "GPT-OSS 20B (Groq)" and one by "Qwen 3.5 4B" in one conversation, with nothing under either that told them apart. It was left so that the picker could be built and looked at first.
+
+**When the line names the model that wrote the answer:**
+
+1. **Only when the answer's model isn't the one chosen now.**
+    - Con: every line of a conversation would change when the reader chooses in the picker, and what an answer says of itself would depend on a choice made after it.
+2. **Only in a conversation whose answers aren't all one model's.**
+    - Con: an answer by another model would change the lines of the answers above it.
+3. **Under every answer, with one model on offer too.**
+    - Con: ADR 0028's reason against it holds there: a line that says the same of every answer, what the empty conversation says already.
+4. **Under every answer whose record names the model that wrote it, but the asked model's own answer where it is the one model on offer.** Chosen.
+    - Pro: what an answer says of itself rests on its record and on what the installation offers, never on the reader's choice or on the other answers.
+    - Pro: on an installation of one model, that model's own answers read as before.
+    - Con: on an installation of several models, every answer's line is one item longer, and in a narrow window a row higher.
+
+**What a stand-in's item says:**
+
+1. **The same words as for the model asked,** "answered by" and its title.
+    - Con: with the name under every answer, nothing would say that another model answered than the one asked.
+2. **"answered by" its title "in place of" the asked model's.** Chosen: "answered by Fake model in place of Away".
+
+**A turn whose record names no model,** given up on, or recorded before 2026-11-25:
+
+1. **Taken for the asked model's,** as its figures and the line under the box take it (`answeredBy`).
+    - Con: a claim the record doesn't make. A turn given up on may hold a stand-in's draft as its answer.
+2. **Nothing said of it.** Chosen, however many models are on offer.
+
+**A model the installation no longer offers:**
+
+1. **Not named.**
+    - Con: the reader would take the answer for a model's that is on offer. ADR 0028 decided the same for a stand-in.
+2. **Named by its id in the record.** Chosen, for the model that wrote the answer and for the model asked alike.
+
+**A long title.** With the item under every answer, and two titles in a stand-in's, a long title is in every line. Measured before the build (below): in a window 320 px wide, an item holding a title of 80 characters in one word, the longest the models file takes, stood from 16 to 674 px, and the conversation scrolled sideways. So no item is wider than the line: one wider than the row shrinks to it, and its words fold there, inside a word when one alone is wider than the row (`wrap-anywhere`). `wrap-break-word` would fold the word too, but leaves the item's smallest width as it is, so that a flex item doesn't shrink with it. An item that fits is drawn as before: it goes to the next row whole before any of its words fold. The first build also gave the item a class of its own to shrink by (`min-w-0`). The review read it as doing nothing beside `wrap-anywhere`, a run in the three engines showed so (Measured, below), and it came out.
+
+**What changed** (`apps/web`):
+
+- **`figuresOf`** (`lib/chat/figures.ts`) ends the line, once the models are read and for a turn that isn't running, with `writtenBy`:
+    - nothing, when the record names no model that wrote the answer (`answered_by` empty);
+    - "answered by" the writer's title "in place of" the asked model's, when they differ;
+    - "answered by" the writer's title, when they are the same, unless that model is the one model on offer: the list has exactly one, and it is this one;
+    - a model the list doesn't have, by its id in the record.
+- **The name doesn't go through `answeredBy`,** which keeps its fallback to the asked model for its other callers, the line under the box and the notices of how a turn ended. Nothing of theirs changed.
+- **Each item of the line** (`Figures` in `components/chat/message.tsx`) folds its words anywhere when one is wider than the row, and shrinks to the row with them: `wrap-anywhere`.
+- **Unchanged:** the order of the three figures, the item last, so that nothing else in the line moves when the models come; the list's role and name, and `aria-live="off"`; where it stands, the answer's next sibling; when it comes, a frame after an arriving answer's last words and at once for a stored one; no line without a figure or an item. The models reach the line through `ModelsOnOffer`, read by `Took` alone, as before: no answer's words are drawn again when they come or are read again. The API, what a question names, the picker, `contextFill` and the notices.
+
+**Tests:**
+
+- **the rule** (`lib/chat/figures.test.ts`): the asked model's own answer with it alone on offer, with another beside it, and with another alone; a stand-in's with both on offer, and with the asked model alone; an answer asked of a model no longer on offer; the item last after the three figures, and alone when the record has no other figure; nothing for a record that names no model, with one model on offer, two, or one it doesn't name; nothing before the models are read; and nothing while the answer is written. The stand-in's expectations have the new words;
+- **on the page** (`components/chat/answered-by.test.tsx`, which loads the app's modules anew for each test): the three tests of a stand-in's answer, with the new words; and with two models on offer, the asked model's own answer that arrives, its item last in the line, which comes a frame after its last words; a stored conversation of two answers by two models, each line naming its own at once when the models were read before it, with no frame to wait for, each the next sibling of its answer; the same conversation when the models come after it, the item added last to each line, whose other items stay the same elements, and neither answer's words drawn again; and an answer kept from a turn that was given up on, whose record names no model, with two models on offer: no line under it. `components/chat/figures.test.tsx`, with one model on offer, passes unchanged;
+- **end to end,** on the stack's seven models: a fourth item, "answered by Fake model", under the default model's answer, and the same after a reload (`e2e/figures.spec.ts`); "answered by Fake model in place of Away" (`e2e/stand-in.spec.ts`, which still gives its request the model's name on its way out, and the test of `e2e/picker.spec.ts` that chooses "Away"); and a conversation with an answer by the default model, then "Local" chosen in the picker and a second answer, the two lines ending with "answered by Fake model" and "answered by Local", the same after a reload (`e2e/picker.spec.ts`).
+
+No component test holds that a long title folds: the simulated page has no layout. It is measured in the three engines.
+
+**Known, and left** (worked out from the rules, and not seen, unless it says measured):
+
+- **the name isn't said while the answer arrives,** only once its turn has ended, as the rest of the line;
+- **a turn that was given up on, and the turns recorded before 2026-11-25, don't say which model wrote them;**
+- **the item comes when the models are read,** which after a page load can be a moment after a stored conversation's answers are drawn; in a window too narrow for the line's one row, each line then takes a row more. Measured below: the reader keeps their place;
+- **a model is named by its id once the installation no longer offers it,** and a model whose title changed is named by its new title;
+- **an installation that changes the model behind a name it keeps says nothing of it:** the record names the model by its name in the models file;
+- **on an installation of one model, nothing is said under that model's own answers,** as before. An answer there names a model only when another one wrote it or was asked: one that stood in, or one the installation no longer offers;
+- **the dot before an item that folded over several rows stands at the middle of the item's height,** as it did before for one folded at its spaces. Seen in the look at titles of 80 characters.
+
+#### Measured
+
+Before the build, on 2026-11-27: a MacBook Pro (M1 Pro, 16 GB), Playwright 1.65's Chromium, Firefox and WebKit, by scripts kept outside the repository, against the stack of `make e2e` built from `8290909`, with "Away" chosen in the picker, so that every answer had the item, as every answer on that stack has it after this revision.
+
+- **The item coming late.** Nine answers, a window 320 by 700 px, the list of models held back by the look until 1.5 s after the conversation was drawn again, then let go. The same in the three engines: each line was 16 px high before the list came and 36 px after it, a second row, and the conversation grew by 180 px. A reader at the conversation's end was at its end before and after. A reader who had gone up 1,500 px and reloaded there: the message at the top of the window stood at the same place before and after, to a tenth of a pixel, in each engine.
+- **Without the look's hold,** three reloads in each engine: the item came in the same change of the page as its line. The list of models was answered 12 to 19 ms after it was asked (Chromium and WebKit).
+- **A long title,** the default model's replaced on its way to the page, in a window 320 px wide, the same in the three engines: 80 characters in several words, the line four rows (72 px) inside the window; 80 characters in one word, the item from 16 to 674 px, and the conversation scrolling sideways; 21 characters, the longest of `config/examples/free-cloud`, two rows (36 px).
+
+On the tree as committed, the same day, machine and engines.
+
+**Against the stack of `make e2e` built from it,** the same in the three engines:
+
+- **One conversation of three answers,** in a window 1100 px wide: the default model's, then "Local" chosen in the picker, then "Away". The lines ended "answered by Fake model", "answered by Local" and "answered by Fake model in place of Away", each one row, 16 px high, 8 px under its answer, and read the same after a reload. The API's records of the three turns: `standard` answered by `standard`, `local` by `local`, `away` by `standard`. In a window 320 px wide, light, dark, and dark with forced colours: the lines 36, 36 and 56 px high, which is two rows, two, and three, and neither the page nor the conversation wider than the window. No script on the page failed.
+- **The item coming late,** as before the build, but with no model chosen, each answer the default model's own: the figures of before the build, in each engine. A line 16 px high before the list came and 36 px after it, the conversation 180 px higher, the reader at its end still at its end, and the message at the top of the window of the reader who had gone up at the same place. Without the hold, the item came in the same change of the page as its line.
+- **A long title,** the default model's and Away's both replaced, so that the item held two: 80 characters in one word each, the item from 16 to 304 px, the line 152 px high, and the conversation no wider than the window; 80 characters in several words, 104 px; 21 characters, 72 px. The three figures before the item stood where they had stood before the build, to a pixel.
+- **The end-to-end tests,** on a stack of their own: 86 passed.
+
+**Which class the fold needs.** On a page of its own, with the line's elements and the styles its classes compile to, 320 px wide, the item holding a title of 80 characters in one word, the same in the three engines: with neither class, and with `min-w-0` alone, the conversation was 667 px wide inside 320; with `wrap-anywhere` alone, and with both, 320. With `min-w-0` alone the item's own box ended at 304 px, and its words ran on past it. With a title in several words, or of 21 characters, the four gave the same places.
+
+**With two local models,** on the stack of `make up` with a models file made for the look: Qwen 3.5 4B as the default, Granite 4 Micro beside it, both on the machine's Ollama, and a third, "Elsewhere", on a server where nothing listens, which the default stands in for. One guest in each engine, three made-up questions: to the default, then to Granite chosen in the picker, then to "Elsewhere". What the page showed was the same in the three: "answered by Qwen 3.5 4B", "answered by Granite 4 Micro" and "answered by Qwen 3.5 4B in place of Elsewhere", last in lines of one row at 1100 px, such as "50 tokens a second · first word after 2.4 s · 88 credits · answered by Granite 4 Micro", and the same after a reload; at 320 px, 36, 36 and 56 px. The API's log for each third question: "model elsewhere is unreachable, and is passed over", then "model standard answered in place of elsewhere". No request went outside the machine.
+
+**With the shipped models file,** one model, on the same stack, in Chromium: no picker, and under an answer "first word after 410 ms · 21 credits", with no model named, the same after a reload.
+
+**Mistakes planted** in a scratch copy of the tree, one at a time:
+
+- **26 plantings on the first build:** 22 mistakes in the rule and in the line, four of them planted a second time with the page's tests alone, the rule's own table left out. 24 failed a test. The two that failed none:
+    - a record that names no model taken for the asked model's, with the page's tests alone: the rule's table caught it, and nothing on the page did. A test was written: the answer kept from a turn that was given up on, with two models on offer, has no line under it;
+    - the fold's class taken away: no component test can hold it, as said above. The look at a long title holds it.
+- **26 on the tree as committed:** 25 failed a test, and the fold's class none.
+- **2 against a stack built from the copy of the first build,** with the three end-to-end specs that read the line, which didn't change after it: the asked model's own answer never named, and a stand-in's item in its old words. Each failed two tests.
+
+The tests of the first build were written before any planting; the one named above came after it.
