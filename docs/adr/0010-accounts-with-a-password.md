@@ -92,3 +92,7 @@ Until now accounts could only be used through the API. The web app's forms for s
 
 - **The login form asks nothing about the form of an address or a password,** so that it gives away no more than the API does.
 - **The sign-up form says that no email is sent,** next to the password: a forgotten one can't be reset by its owner.
+
+### 2026-11-28: an account's row names its own plan
+
+An account's row can now name a plan of the plans file that the account is on of its own, which `actio plan` sets ([ADR 0020](0020-usage-limits-on-turns.md), revision "an account has a plan of its own"). Beside the constraint above, which keeps each row wholly a guest or wholly an account, a second one keeps the plan empty for a guest. A guest who signs up becomes an account with no plan of its own.

@@ -126,6 +126,7 @@ An answer costs credits, and everyone has only so many: per session, which opens
 |---|---|---|
 | A guest | 25,000 credits | 100,000 |
 | An account | 100,000 | 600,000 |
+| An account put on the plan `dev` (below) | 1,500,000 | 8,000,000 |
 
 - **Under the list of conversations, a meter shows how much of each limit is used,** and when it resets, by your clock.
 - **On the way to a limit you are told once:** when half of it is used, three quarters, and nine tenths.
@@ -146,6 +147,16 @@ Prices, plans, how many answers each plan may have written at once, the length o
 - Every model in `config/models.toml` needs a price there, or the API doesn't start, and says which model is missing one.
 - A model priced at nothing is free: it uses up no credits and is never refused. Offer a small one beside the default, at `input = 0` and `output = 0`, and the page offers it by its title to whoever reaches a limit: "Use Local (free)". It answers until the limit starts over, and then the model you chose before answers again, or the default. Chosen in the list of models, it answers at a limit too; choosing another model there while it stands in puts the limit back in your way.
 - A plan that names no limits limits nothing: on a machine that is yours alone, give accounts such a plan.
+
+An account can be put on another plan of the file, of its own. A plan that neither `guests` nor `accounts` names in the file is given to no account by itself: the shipped one has `dev`, for an account that uses much more than a chat does, with four answers at once. With the stack running, under `make up` or `make dev` alike:
+
+```sh
+make plan email=ada@example.com                    # say which plan the account is on
+make plan email=ada@example.com plan=dev           # put it on dev
+make plan email=ada@example.com args=--default     # back on the plan for accounts
+```
+
+Each says in one line which plan the account is on now, and after a change which it was on before. Under `make up` it runs in the API's container, with the plans file the container reads; under `make dev` beside the API, on the same database and plans file. Without `make`, that is `docker compose exec api python -m actio plan ada@example.com dev` and `./scripts/with-dev-env.sh uv run actio plan ada@example.com dev`. The change holds from the account's next question, with no restart, and what it has used in a session or a week that is still open is kept: put back on a smaller plan, an account that used more than that allows waits until the window starts over. A page that was told of a limit before the change says so until its wait is over, or until it is loaded again. An account whose plan the file no longer has gets the plan for accounts, and the API's log says so once.
 
 What was used is kept in the database, in a ledger that only ever grows. See [ADR 0020](adr/0020-usage-limits-on-turns.md).
 
@@ -179,6 +190,7 @@ The answer streams to your terminal, followed by its token counts and speed. `uv
 | `make dev` | Run the stack with the API and the web app native |
 | `make smoke` | Check a running stack: the web page, the API's health and its docs, a guest session, the models and the usage limits |
 | `make down` | Stop all containers; their data is kept |
+| `make plan` | Say which plan an account is on, or put it on another: see [Usage limits](#usage-limits) |
 | `make check` | Run what CI's main job runs: static checks, tests and builds |
 | `make e2e` | Run the end-to-end tests: a stack of its own with a fake model, driven in a real browser |
 | `make docs` | Preview this documentation site at <http://localhost:8001> |

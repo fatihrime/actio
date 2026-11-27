@@ -469,3 +469,62 @@ Chosen: the accounts that have counters, every hour, the log, and saying only.
 ### 2026-11-27: the list of models says each price, and the page's menu says it
 
 `GET /api/models` says each model's price now, as the file states it, in credits per million tokens: for what it reads, what it writes, and what it reads again from its server's cache, which is the price of what it reads where the file states none. The page's menu of models says it under each title, in credits a token, where the models' words differ, and in no row where they are all the same ([ADR 0032](0032-the-reader-chooses-the-model-that-answers.md), revision "the list says what a model costs, and the menu's rows say it where the models differ"). How a turn is held and counted didn't change.
+
+### 2026-11-28: an account has a plan of its own
+
+"A plan per account", under "Not done yet", is done in part: an account can be on a plan of its own, and whoever runs the installation puts it there, or reads which it is on, with a command of the application's own. Granting credits, and pages to do either on, are still to come.
+
+**Why now, and not at the start.** The first decision left it for the admin pages, and gave every account the one plan the file names for accounts. That holds while every account is a person at a chat. An account that a program works through, as the developer gateway that Actio is to have will let one, sends request after request and uses far more: under one plan for all, it would be held to a chat's allowance, or every chat be given a program's. So an account's own plan comes before the pages, with a command in their place.
+
+Options considered:
+
+**Where an account's plan is kept:**
+
+1. **In the plans file,** a list of addresses under each plan. An address in a file of the installation's configuration, beside the prices, and a restart for every change.
+2. **A column on the account's row:** the name of a plan, or empty for the plan the file names for the account's kind.
+3. **A table of grants,** each with when it was given, by whom, and its history. What the admin pages will need, to show who changed what; nothing would read it before then.
+
+**How it is set, before there are pages:**
+
+1. **Not at all.** Then no account can ever be on the `dev` plan below.
+2. **A statement typed into the database.** Nothing checks the name against the file: a name misspelt there is found only by the warning below, once the account asks something.
+3. **A command of the application's own,** which reads the plans file and checks the name against it.
+
+Chosen: the column, and the command.
+
+**The decision:**
+
+- **`users.plan`** (migration 0015): the name of a plan in the file, or empty. Only a lasting account has one: a second check constraint, beside `guest_or_account`, refuses a guest's row with a plan, whatever code writes it. Alembic doesn't compare check constraints, so the migration writes it by hand, as 0003 does. A guest who signs up keeps its row, with no plan of its own, and has the accounts' plan.
+- **A request learns it with its session.** `authenticate` already reads the session with its account's row, in one statement: the `Principal` carries the row's plan, and the `Account` the usage limits are given carries it on. No query more. Neither has a default for it, so a caller that forgets it doesn't type-check.
+- **One place says which plan that makes,** `Plans.plan_for` in `actio.usage.plans`, for a session's and a week's limits and for `answers_at_once` alike:
+    - a guest: the guests' plan, whatever else it is told;
+    - an account with no plan of its own: the one the file names for accounts, as before;
+    - an account on a plan the file has: that one;
+    - an account on a plan the file doesn't have, as after the file was changed and the row was not: the one the file names for accounts. That is no error, and refuses nothing. The log says it, as a warning, by the two plans' names and no account's, once for each such name for as long as the process's plans live: a process that starts again says it again.
+- **A change holds from the account's next request.** Nothing is cached: every request reads the row with its session. The engine is told each window's limit at every call, and admits a request, and answers the usage read, by the limit it is told then ([ADR 0006](0006-usage-limits-engine.md)). So a window that is open keeps what was used and what is held in it, and from then on is held to the new plan's limit. The one limit the engine keeps is that of the last request it admitted, by which it works out the notices at 50, 75 and 90 percent when an answer is counted. Nothing changed in `packages/quota`. An answer that is being written is not touched: it was admitted, and its credits held, under the plan it started on.
+- **The command,** in `actio.cli`, beside the roles: `actio plan EMAIL` says which plan the account is on, `actio plan EMAIL NAME` puts it on the plan `NAME`, of its own, and `actio plan EMAIL --default` takes its own plan away.
+    - It reads the plans file alone, and checks `NAME` against it before anything else. It connects to the database alone, and reads the database's migration before the account's row.
+    - The address is looked up as accounts store it, in lower case, whatever spaces are around it. A guest has none, so none can be named.
+    - The rule that changes the row is `accounts.put_on_plan`, in `actio.identity`, which never commits and knows nothing of the file. The command commits.
+    - It says in one line which plan the account is on, by its name and title, and whether that is the account's own or the one the file names for accounts; after a change, which it was on before; and for a plan of its own that the file doesn't have, the one it has meanwhile. An account that is already where it was asked to be is told so, and nothing is written.
+    - A failure is one line, `actio: …`, with the status 1 for no account at the address, a database it can't reach and one that isn't at this code's migration, and 2 for a plan the file doesn't have, which names those it has, and a mistake in the file.
+- **`make plan email=… [plan=NAME | args=--default]`** runs it where the API runs: in the API's container while `make up` runs it, and otherwise natively, on the database and the plans file of `make dev`.
+- **The `dev` plan,** in the shipped plans file and in the example's: 1,500,000 credits a session, 8,000,000 a week, and four answers at once. Neither `guests` nor `accounts` names it, so no account has it by itself. It is for an account that uses much more than a chat does.
+
+**What it leaves:**
+
+- **no page for it, and no record of who changed a plan, or when:** the column holds the plan, not its history;
+- **the page of a reader who was told of a limit holds that limit** until its wait is over or the page is loaded again ([ADR 0021](0021-usage-limits-in-the-page.md)): put on a larger plan meanwhile, the account would be refused nothing by the server, and its page doesn't know;
+- **a window's notices at 50, 75 and 90 percent are said once a window,** so a share passed on the smaller plan isn't said again on the larger one; and an answer that was admitted before a change and is counted after it has its share worked out by the limit of the last request admitted, which can still be the plan it started on;
+- **a plan can't be given for a time, and credits can't be granted.**
+
+**Measured,** on a running stack (`make up`, the shipped plans file, the local model), with an account made up for it:
+
+- **signed up,** the page said "Free plan", and `GET /api/usage` 0 of 100,000 credits a session and 0 of 600,000 a week. After one question, 27 were used in each;
+- **`make plan email=… plan=dev`** answered `… is now on the plan "dev" (Developer), its own. Before, it was on "free" (Free), the one the plans file names for accounts.` The account's next `GET /api/usage`, with no restart and no new login, said the plan `dev`, with 27 of 1,500,000 and 27 of 8,000,000, in the session that was open, which still ends when it was going to;
+- **the page, left open,** went on saying "Free plan" until its next answer, and "Developer plan" after it: it reads the usage when it is loaded and after each turn;
+- **`make plan email=… args=--default`** put it back: 50 of 100,000 and 50 of 600,000, both answers' credits in the same two windows;
+- **natively,** with the API's container stopped and Postgres published as under `make dev`, the same commands said the same lines. With the database still at migration 0014 the line was `actio: the database is at migration 0014, and this code needs 0015: run "actio --role migrate" first`;
+- **no query was added to a request.** That is read in the code, not timed: the plan comes with the row that the session's one statement takes already.
+
+**Tested:** the cases of `Plans.plan_for` and its warning; through the API, an account at its session's limit that is admitted once it is on a larger plan, with what it had used, and one put back on a smaller plan that is refused until the window it has open starts over; `answers_at_once` by the account's own plan; a row that names a plan the file doesn't have; a guest's row with a plan, refused by the migrated database; and the command, by its status and its whole line in each case, once as a process of its own with Python told to say what it left open. 37 mistakes were planted in a scratch copy of the tree, one at a time, and each failed a test; two of them were planted a second time, because their first form broke something other than what it was about.
