@@ -99,16 +99,20 @@ def test_the_end_to_end_stack_has_a_limit_within_reach_and_a_model_that_costs_no
 def test_the_end_to_end_stack_names_conversations_with_a_model_that_isnt_free() -> None:
     """Its tests see a title arrive (apps/web/e2e/sidebar.spec.ts), from the fake's model
     that says only what a question tells it to (test_catalog.py). A model that cost
-    nothing would be offered at a usage limit, beside the one usage.spec.ts expects."""
+    nothing would be offered at a usage limit, beside the one usage.spec.ts expects. It
+    has the shipped price, which the stack's other models don't: its row in the page's
+    menu of models says two numbers (apps/web/e2e/picker.spec.ts)."""
     folder = ROOT / "deploy/e2e/config"
     models = catalog.read_file(folder / "models.toml")
 
     loaded = plans.load(folder / "plans.toml", models=models.models)
 
     assert models.titles == "namer"
-    assert loaded.price_of("namer") == loaded.price_of("standard")
+    assert "namer" not in loaded.free_models()
     assert loaded.price_of("namer").input > 0
     assert loaded.price_of("namer").output > 0
+    assert loaded.price_of("namer") == Rates(250_000, 1_000_000, 25_000)
+    assert loaded.price_of("namer") != loaded.price_of("standard")
 
 
 @pytest.mark.parametrize("folder", FOLDERS, ids=OF)

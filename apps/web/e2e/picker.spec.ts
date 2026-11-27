@@ -4,11 +4,13 @@
 // the browser over a reload and in a new chat; the picker driven by real keys, where a
 // browser puts the keyboard on nothing inside an element that is hidden, and goes on
 // from a row that Tab hid; the box's row in a window 320 px wide, where styles decide
-// what the switch for reasoning shows and how much of a long title; and a model whose
-// server isn't there, chosen, answered for by the one that stands in for it. The stack
-// offers seven models, one of them under a title of 21 characters
-// (deploy/e2e/config/models.toml). The rule's variants are the component tests'
-// (components/chat/model-picker.test.tsx, lib/chat/chosen.test.ts).
+// what the switch for reasoning shows and how much of a long title; a model whose
+// server isn't there, chosen, answered for by the one that stands in for it; and what
+// each model costs, from the stack's plans file through the API, a line under its
+// title. The stack offers seven models, one of them under a title of 21 characters
+// (deploy/e2e/config/models.toml), at three kinds of price (plans.toml beside it). The
+// rule's variants are the component tests' (components/chat/model-picker.test.tsx,
+// lib/chat/chosen.test.ts, lib/chat/prices.test.ts).
 import type { Locator, Page, Request } from "@playwright/test";
 
 import { expect, test } from "./chat";
@@ -235,6 +237,47 @@ test("a model whose server isn't there, chosen, is answered for by the one that 
   await expect(figuresOf(page).last()).toHaveText(
     "answered by Fake model in place of Away",
   );
+});
+
+test("the menu says under each model's title what it costs, and a row is named by its title alone", async ({
+  chat,
+  page,
+}) => {
+  const picker = pickerOf(page);
+  await chat.open();
+
+  await picker.button.click();
+
+  await expect(picker.menu).toBeVisible();
+  // The stack's prices (deploy/e2e/config/plans.toml): Local costs nothing, Namer has
+  // the shipped price, and the others a credit a word, read or written. Away's server
+  // isn't there, but the model that stands in for it is ready: the list says Away is
+  // ready, and its row says no reason.
+  const costs = {
+    "Fake model": "1 credit a token",
+    Local: "Free",
+    Namer: "1 credit a token written, 0.25 read",
+    Away: "1 credit a token",
+  };
+  for (const [title, cost] of Object.entries(costs)) {
+    const row = picker.row(title);
+    await expect(row).toHaveAccessibleName(title);
+    await expect(row).toHaveAccessibleDescription(cost);
+    await expect(row.getByText(cost, { exact: true })).toBeVisible();
+  }
+  // A line under the title, inside the menu.
+  const namer = picker.row("Namer");
+  const title = await namer.getByText("Namer", { exact: true }).boundingBox();
+  const cost = await namer
+    .getByText(costs.Namer, { exact: true })
+    .boundingBox();
+  const menu = await picker.menu.boundingBox();
+  if (title === null || cost === null || menu === null) {
+    throw new Error("Something of the menu isn't drawn.");
+  }
+  expect(cost.y).toBeGreaterThanOrEqual(title.y + title.height - 1);
+  expect(Math.abs(cost.x - title.x)).toBeLessThan(1);
+  expect(cost.x + cost.width).toBeLessThanOrEqual(menu.x + menu.width);
 });
 
 test("two answers of one conversation, by the default model and by one chosen after it, each say which model wrote it, also after a reload", async ({

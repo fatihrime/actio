@@ -37,6 +37,8 @@ const STORED = "01900000-0000-7000-8000-0000000000c9";
 
 const DEFAULT = "Qwen 3.5 4B";
 const REACHED = "You’ve reached your usage limit for this session.";
+/** What a row says of the fake API's model's price, the shipped one. */
+const SHIPPED = "1 credit a token written, 0.25 read";
 
 /** How long the page takes, at the most, to read the models again while the one that
  * answers can't: it looks every five seconds. */
@@ -66,6 +68,21 @@ function menu(): HTMLElement {
 /** A row of the menu, while it is shown. */
 function row(name: string): HTMLElement {
   return within(menu()).getByRole("menuitemradio", { name });
+}
+
+/** The lines a row's description names, in their order: each has to be an element of
+ * the row. A description that names something that isn't there reads no differently,
+ * so the names themselves are held. */
+function linesNamedBy(of: HTMLElement): (string | null)[] {
+  const ids = (of.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .filter((id) => id !== "");
+  return ids.map((id) => {
+    const line = document.getElementById(id);
+    expect(line).not.toBeNull();
+    expect(of.contains(line)).toBe(true);
+    return line?.textContent ?? null;
+  });
 }
 
 function box(): HTMLElement {
@@ -167,11 +184,10 @@ describe("the model picker", () => {
     expect(button).toHaveAttribute("aria-expanded", "true");
     expect(menu()).toBeVisible();
     expect(menu()).toHaveAccessibleName("Model");
-    expect(
-      within(menu())
-        .getAllByRole("menuitemradio")
-        .map((each) => each.textContent),
-    ).toEqual([DEFAULT, "Local"]);
+    const rows = within(menu()).getAllByRole("menuitemradio");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveAccessibleName(DEFAULT);
+    expect(rows[1]).toHaveAccessibleName("Local");
     expect(row(DEFAULT)).toHaveAttribute("aria-checked", "true");
     expect(row("Local")).toHaveAttribute("aria-checked", "false");
     // Opening puts the keyboard on the checked row.
@@ -562,9 +578,15 @@ describe("the model picker", () => {
     const user = open();
     await user.click(await picker());
 
-    expect(row(DEFAULT)).not.toHaveAccessibleDescription();
-    expect(row("Local")).toHaveAccessibleDescription("Isn't downloaded yet");
-    expect(row("Second model")).toHaveAccessibleDescription("Can't be reached");
+    // Why it can't answer, then what it costs: Local costs nothing, and the others
+    // don't.
+    expect(row(DEFAULT)).toHaveAccessibleDescription(SHIPPED);
+    expect(row("Local")).toHaveAccessibleDescription(
+      "Isn't downloaded yet Free",
+    );
+    expect(row("Second model")).toHaveAccessibleDescription(
+      `Can't be reached ${SHIPPED}`,
+    );
 
     await user.click(row("Local"));
 
@@ -601,10 +623,10 @@ describe("the model picker", () => {
     await waitFor(() => {
       expect(api.to(MODELS)).toHaveLength(2);
     });
-    expect(row("Local")).not.toHaveAccessibleDescription();
+    expect(row("Local")).toHaveAccessibleDescription("Free");
     changed.release();
     await waitFor(() => {
-      expect(row("Local")).toHaveAccessibleDescription("Can't be reached");
+      expect(row("Local")).toHaveAccessibleDescription("Can't be reached Free");
     });
     expect(api.to(MODELS)).toHaveLength(2);
     // The keyboard stayed where opening put it.
@@ -676,6 +698,123 @@ describe("the model picker", () => {
       "aria-valuetext",
       "under 1% full: 36 of 8,192 tokens",
     );
+  });
+});
+
+describe("the model picker's rows, of what each model costs", () => {
+  it("say each model's cost under its title where the models' costs differ, as its description, and are named by their titles alone", async () => {
+    fakeApi().on(MODELS, () => twoModels());
+    const user = open();
+
+    await user.click(await picker());
+
+    expect(row(DEFAULT)).toHaveAccessibleName(DEFAULT);
+    expect(row(DEFAULT)).toHaveAccessibleDescription(SHIPPED);
+    expect(row("Local")).toHaveAccessibleName("Local");
+    expect(row("Local")).toHaveAccessibleDescription("Free");
+    expect(linesNamedBy(row(DEFAULT))).toEqual([SHIPPED]);
+    expect(linesNamedBy(row("Local"))).toEqual(["Free"]);
+    // Drawn under the title, in an element of its own.
+    expect(within(row(DEFAULT)).getByText(SHIPPED)).toBeVisible();
+    expect(within(row("Local")).getByText("Free")).toBeVisible();
+    expect(row(DEFAULT).textContent).toBe(`${DEFAULT}${SHIPPED}`);
+    expect(row("Local").textContent).toBe("LocalFree");
+  });
+
+  it("say no cost where every model's costs are said alike", async () => {
+    fakeApi().on(MODELS, () =>
+      json(200, { default: "standard", models: [model(), secondModel()] }),
+    );
+    const user = open();
+
+    await user.click(await picker());
+
+    expect(row(DEFAULT)).not.toHaveAccessibleDescription();
+    expect(row("Second model")).not.toHaveAccessibleDescription();
+    // Nothing to say: no description at all, and none that names a line that isn't
+    // there.
+    expect(row(DEFAULT)).not.toHaveAttribute("aria-describedby");
+    expect(row("Second model")).not.toHaveAttribute("aria-describedby");
+    expect(within(menu()).queryByText(/credit|Free/)).not.toBeInTheDocument();
+    expect(row(DEFAULT).textContent).toBe(DEFAULT);
+    expect(row("Second model").textContent).toBe("Second model");
+  });
+
+  it("say why a model can't answer, and nothing else, where no cost is said", async () => {
+    // As with the example's five models, all at one price, and Ollama stopped.
+    fakeApi().on(MODELS, () =>
+      json(200, {
+        default: "standard",
+        models: [model(), secondModel({ status: "unreachable" })],
+      }),
+    );
+    const user = open();
+
+    await user.click(await picker());
+
+    expect(row("Second model")).toHaveAccessibleName("Second model");
+    expect(row("Second model")).toHaveAccessibleDescription("Can't be reached");
+    expect(linesNamedBy(row("Second model"))).toEqual(["Can't be reached"]);
+    expect(row("Second model").textContent).toBe(
+      "Second modelCan't be reached",
+    );
+    expect(row(DEFAULT)).not.toHaveAttribute("aria-describedby");
+    expect(row(DEFAULT).textContent).toBe(DEFAULT);
+    expect(within(menu()).queryByText(/credit|Free/)).not.toBeInTheDocument();
+  });
+
+  it("say why a model can't answer first, then what it costs, each a line of its own", async () => {
+    fakeApi().on(MODELS, () =>
+      json(200, {
+        default: "standard",
+        models: [
+          model(),
+          freeModel({ status: "unreachable" }),
+          secondModel({ status: "missing" }),
+        ],
+      }),
+    );
+    const user = open();
+
+    await user.click(await picker());
+
+    expect(row("Local")).toHaveAccessibleName("Local");
+    expect(row("Local")).toHaveAccessibleDescription("Can't be reached Free");
+    expect(row("Second model")).toHaveAccessibleDescription(
+      `Isn't downloaded yet ${SHIPPED}`,
+    );
+    expect(row(DEFAULT)).toHaveAccessibleDescription(SHIPPED);
+    expect(linesNamedBy(row("Local"))).toEqual(["Can't be reached", "Free"]);
+    // Drawn in the same order: the title, the reason, the cost.
+    expect(within(row("Local")).getByText("Can't be reached")).toBeVisible();
+    expect(within(row("Local")).getByText("Free")).toBeVisible();
+    expect(row("Local").textContent).toBe("LocalCan't be reachedFree");
+    expect(row("Second model").textContent).toBe(
+      `Second modelIsn't downloaded yet${SHIPPED}`,
+    );
+  });
+
+  it("say the costs of the list as it was read last, which opening the menu reads again", async () => {
+    const dearer = later(() =>
+      twoModels({
+        price: { input: 2_000_000, output: 2_000_000, cached_input: 2_000_000 },
+      }),
+    );
+    const api = fakeApi().on(MODELS, () => twoModels(), dearer.answer);
+    const user = open();
+
+    await user.click(await picker());
+
+    await waitFor(() => {
+      expect(api.to(MODELS)).toHaveLength(2);
+    });
+    expect(row("Local")).toHaveAccessibleDescription("Free");
+    dearer.release();
+    await waitFor(() => {
+      expect(row("Local")).toHaveAccessibleDescription("2 credits a token");
+    });
+    expect(row(DEFAULT)).toHaveAccessibleDescription(SHIPPED);
+    expect(within(menu()).queryByText("Free")).not.toBeInTheDocument();
   });
 });
 

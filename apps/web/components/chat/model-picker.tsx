@@ -6,6 +6,7 @@ import type { KeyboardEvent } from "react";
 import { CheckIcon, ChevronUpIcon } from "@/components/icons";
 import type { Model } from "@/lib/api/client";
 import { notReadyInShort } from "@/lib/chat/outcomes";
+import { pricesSaid } from "@/lib/chat/prices";
 
 /** The room kept between the menu and the button under it, and between the menu and
  * the window's top and right edges. */
@@ -70,6 +71,9 @@ export function ModelPicker({
   const button = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const menuId = useId();
+  // What each row says of its model's cost, from the list as it was read last: where
+  // the models' words differ, and nowhere when they are all the same.
+  const prices = pricesSaid(models);
 
   function show() {
     const at = button.current?.getBoundingClientRect();
@@ -222,6 +226,7 @@ export function ModelPicker({
           <Choice
             key={model.id}
             model={model}
+            price={prices.get(model.id) ?? null}
             checked={model.id === answering.id}
             onChoose={() => {
               close();
@@ -235,20 +240,29 @@ export function ModelPicker({
 }
 
 /** One model of the menu: its title, and under it, when it can't answer right now, why,
- * in a few words. It can be chosen all the same: chosen, the page says what to do about
+ * in a few words, then what it costs, when the menu says that (`pricesSaid`), each a
+ * line of its own. The title alone names the row; the other two, in that order, are its
+ * description. It can be chosen all the same: chosen, the page says what to do about
  * it. The one that answers has a tick, in the colour of the words, which shows where a
  * system's own few colours take the place of the page's too. */
 function Choice({
   model,
+  price,
   checked,
   onChoose,
 }: {
   model: Model;
+  /** What it costs, in words, or nothing where the menu says no cost. */
+  price: string | null;
   checked: boolean;
   onChoose: () => void;
 }) {
   const id = useId();
   const why = notReadyInShort(model);
+  const described = [
+    ...(why === null ? [] : [`${id}why`]),
+    ...(price === null ? [] : [`${id}price`]),
+  ];
   return (
     <button
       type="button"
@@ -256,7 +270,9 @@ function Choice({
       aria-checked={checked}
       tabIndex={-1}
       aria-labelledby={`${id}title`}
-      aria-describedby={why === null ? undefined : `${id}why`}
+      aria-describedby={
+        described.length === 0 ? undefined : described.join(" ")
+      }
       onClick={onChoose}
       className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted focus:bg-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring in-data-keys:focus:outline-2 in-data-keys:focus:-outline-offset-2 in-data-keys:focus:outline-ring"
     >
@@ -270,6 +286,14 @@ function Choice({
         {why !== null && (
           <span id={`${id}why`} className="block text-xs text-muted-foreground">
             {why}
+          </span>
+        )}
+        {price !== null && (
+          <span
+            id={`${id}price`}
+            className="block text-xs text-muted-foreground"
+          >
+            {price}
           </span>
         )}
       </span>

@@ -2,7 +2,7 @@
 #
 # compose.e2e.yaml mounts this folder where config/ is mounted otherwise, so the API
 # reads this file in place of config/plans.toml. The fake model counts a word as a
-# token, and a credit here is one of its words, read or written.
+# token, and a credit here is one of its words, read or written, but for "namer" below.
 #
 # A guest's limits are far above what a test uses: every test is a new guest, with a
 # whole allowance to itself. An account's are a few questions away, for the tests of
@@ -27,14 +27,18 @@ input = 0
 output = 0
 
 # The model that names conversations (models.toml). A title costs the account nothing
-# whatever its price, but a model that costs nothing is offered at a limit: so it is
-# priced like "standard", and only "local" is offered.
+# whatever its price, but a model that costs nothing is offered at a limit: so it isn't
+# free, and only "local" is offered. It has the shipped price (config/plans.toml), a
+# quarter of a credit a word read and a tenth of that from the cache: the one model of
+# the stack whose row in the page's menu of models says two numbers, and whose price
+# has a cached_input of its own (apps/web/e2e/picker.spec.ts).
 [prices.namer]
-input = 1_000_000
+input = 250_000
 output = 1_000_000
+cached_input = 25_000
 
-# The fake given 3 seconds for an answer (models.toml): priced like "standard", for the
-# same reason.
+# The fake given 3 seconds for an answer (models.toml): priced like "standard", so that
+# it isn't free either.
 [prices.hurried]
 input = 1_000_000
 output = 1_000_000
