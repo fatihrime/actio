@@ -1,4 +1,9 @@
-import type { KeyboardEvent, RefObject, SyntheticEvent } from "react";
+import type {
+  KeyboardEvent,
+  ReactElement,
+  RefObject,
+  SyntheticEvent,
+} from "react";
 
 /** Where a question is written and sent, or the running answer stopped. */
 export function Composer({
@@ -10,6 +15,7 @@ export function Composer({
   answering,
   blocked,
   thinking,
+  picker = null,
 }: {
   /** The box to write in, for whoever wants to put the keyboard there. */
   box?: RefObject<HTMLTextAreaElement | null>;
@@ -23,8 +29,46 @@ export function Composer({
   blocked: string | null;
   /** The switch for reasoning, when the model can reason. */
   thinking: { on: boolean; set: (on: boolean) => void } | null;
+  /** The picker of the model that answers, when there is a choice: first in the row,
+   * with the switch for reasoning to its right, so that the switch, which comes and
+   * goes with the model, never moves it. */
+  picker?: ReactElement | null;
 }) {
   const sendable = !answering && blocked === null && text.trim() !== "";
+
+  // Beside the picker the switch keeps to one line, and says less in little room:
+  // "Think" alone, until the room the picker leaves it in the row holds all of its
+  // words (a container query, as the line under the box has, on the place the switch
+  // stands in). Its name is the same whatever it shows. Without the picker it is as it
+  // was before there was one.
+  const reasoning =
+    thinking === null ? null : (
+      <label
+        className={
+          picker === null
+            ? "flex cursor-pointer items-center gap-2 text-sm text-muted-foreground select-none"
+            : "flex shrink-0 cursor-pointer items-center gap-2 text-sm whitespace-nowrap text-muted-foreground select-none"
+        }
+      >
+        <input
+          type="checkbox"
+          checked={thinking.on}
+          onChange={(event) => {
+            thinking.set(event.target.checked);
+          }}
+          aria-label={picker === null ? undefined : "Think before answering"}
+          className="size-4 accent-primary"
+        />
+        {picker === null ? (
+          "Think before answering"
+        ) : (
+          <span>
+            Think
+            <span className="hidden @[12.5rem]:inline"> before answering</span>
+          </span>
+        )}
+      </label>
+    );
 
   function submit(event: SyntheticEvent) {
     event.preventDefault();
@@ -65,20 +109,18 @@ export function Composer({
         className="field-sizing-content max-h-60 w-full resize-none bg-transparent px-2 py-1.5 outline-none placeholder:text-muted-foreground"
       />
       <div className="flex items-center justify-between gap-3 px-1">
-        {thinking === null ? (
-          <span />
+        {picker === null ? (
+          (reasoning ?? <span />)
         ) : (
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground select-none">
-            <input
-              type="checkbox"
-              checked={thinking.on}
-              onChange={(event) => {
-                thinking.set(event.target.checked);
-              }}
-              className="size-4 accent-primary"
-            />
-            Think before answering
-          </label>
+          // One line in any width. The switch's place takes the room the picker leaves,
+          // and never less than "Think" needs: the switch's words give way first, and
+          // then the picker's title, which ends in "…".
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            {picker}
+            {reasoning !== null && (
+              <div className="@container flex min-w-15 flex-1">{reasoning}</div>
+            )}
+          </div>
         )}
         {answering ? (
           <button

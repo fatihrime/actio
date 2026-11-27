@@ -155,6 +155,20 @@ export function isSessionEnd(error: unknown): boolean {
   return error instanceof ApiProblem && error.status === 401;
 }
 
+/** Why a model can't answer right now, in a few words: what the menu of models says
+ * under its title (`ModelPicker`). Nothing when it can. The whole of it, with what to
+ * do about it, is `notReady`'s, which the page says once that model answers. */
+export function notReadyInShort(model: Model): string | null {
+  switch (model.status) {
+    case "ready":
+      return null;
+    case "missing":
+      return "Isn't downloaded yet";
+    case "unreachable":
+      return "Can't be reached";
+  }
+}
+
 /** Why a model can't answer right now, and what to do about it. Nothing when it can. */
 export function notReady(
   model: Model,

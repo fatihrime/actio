@@ -46,8 +46,9 @@ test("an answer written in the place of a model whose server isn't there says wh
   page,
 }) => {
   // The stack's "away" is a model on a server that refuses every connection, which
-  // names the fake under the default name to stand in for it. The page has no way to
-  // choose it, so the first request for an answer is given it on its way out. The
+  // names the fake under the default name to stand in for it. This test was written
+  // before the page could choose a model (e2e/picker.spec.ts, which chooses "away"
+  // there), so the first request for an answer is given it on its way out. The
   // requests after that go as the page made them.
   let toTheModelAway = true;
   await page.route("**/api/conversations/*/turns", async (route) => {

@@ -28,9 +28,9 @@ test("an answer asked while another is written at its model's gate says behind h
   page,
 }) => {
   test.setTimeout(90_000);
-  // The page has no way to choose a model: every request for a turn it makes is given
-  // the name of the one behind the gate on its way out. Nothing else of a request is
-  // changed.
+  // This test was written before the page could choose a model (e2e/picker.spec.ts):
+  // every request for a turn it makes is given the name of the one behind the gate on
+  // its way out. Nothing else of a request is changed.
   await page.route("**/api/conversations/*/turns", async (route) => {
     const request = route.request();
     if (request.method() !== "POST") {

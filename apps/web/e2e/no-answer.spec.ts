@@ -17,9 +17,10 @@ test("a question that a model answered with nothing says so, also after a reload
   chat,
   page,
 }) => {
-  // The stack's quiet model names conversations, and says nothing of its own. The page
-  // has no way to choose it, so the first request for an answer is given it on its way
-  // out. The requests after that go as the page made them.
+  // The stack's quiet model names conversations, and says nothing of its own. This
+  // test was written before the page could choose a model (e2e/picker.spec.ts), so the
+  // first request for an answer is given it on its way out. The requests after that go
+  // as the page made them.
   let toTheQuietModel = true;
   await page.route("**/api/conversations/*/turns", async (route) => {
     const request = route.request();

@@ -7,25 +7,27 @@ import { expect, it } from "vitest";
 
 import { TITLE_MAX } from "@/components/sidebar/row";
 import { EMAIL_MAX, PASSWORD_MAX, PASSWORD_MIN } from "@/lib/account";
+import { MODEL_ID_MAX } from "@/lib/chat/chosen";
 
 import { API_DESCRIPTION } from "../recorded";
 
+/** A field of a request body, as far as these tests read it. One that may also be left
+ * empty lists its kinds (`anyOf`). */
+interface Field {
+  type?: string;
+  minLength?: number;
+  maxLength?: number;
+  anyOf?: Field[];
+}
+
 interface Description {
   components: {
-    schemas: Record<
-      string,
-      {
-        properties: Record<string, { minLength?: number; maxLength?: number }>;
-      }
-    >;
+    schemas: Record<string, { properties: Record<string, Field> }>;
   };
 }
 
 /** What the API's description says about a field of one of its request bodies. */
-function field(
-  schema: string,
-  name: string,
-): { minLength?: number; maxLength?: number } {
+function field(schema: string, name: string): Field {
   const description = JSON.parse(
     readFileSync(API_DESCRIPTION, "utf8"),
   ) as Description;
@@ -53,4 +55,11 @@ it("asks of a new password what the API asks", () => {
 it("lets an email address be as long as the API does", () => {
   expect(EMAIL_MAX).toBe(field("SignUp", "email").maxLength);
   expect(EMAIL_MAX).toBe(field("LogIn", "email").maxLength);
+});
+
+it("believes no kept choice of a model longer than a question may name", () => {
+  const named = field("TurnRequest", "model").anyOf?.find(
+    (kind) => kind.type === "string",
+  );
+  expect(MODEL_ID_MAX).toBe(named?.maxLength);
 });

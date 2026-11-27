@@ -59,6 +59,24 @@ export function PencilIcon() {
   );
 }
 
+/** A tick: the one chosen. */
+export function CheckIcon() {
+  return (
+    <Icon>
+      <path d="M3.25 8.5l3 3 6.5-7" />
+    </Icon>
+  );
+}
+
+/** A point upwards: what opens above. */
+export function ChevronUpIcon() {
+  return (
+    <Icon>
+      <path d="M4.5 10l3.5-3.5 3.5 3.5" />
+    </Icon>
+  );
+}
+
 /** A bin: delete. */
 export function BinIcon() {
   return (

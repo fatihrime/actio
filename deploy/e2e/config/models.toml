@@ -86,11 +86,14 @@ context_window = 8192
 max_output_tokens = 2048
 thinking = false
 
-# The fake on the hurried provider above. The page has no way to choose it: a test
-# gives its question this model's name on its way out, as for "namer". Priced like
-# "standard" (plans.toml), so that it isn't offered at a limit either.
+# The fake on the hurried provider above. Its test, written before the page could
+# choose a model, gives its question this model's name on its way out, as for "namer"
+# (a test of the picker chooses in the page: apps/web/e2e/picker.spec.ts). Priced like
+# "standard" (plans.toml), so that it isn't offered at a limit either. Its title is as
+# long as the longest of config/examples/free-cloud, 21 characters: the picker's test
+# chooses it in a narrow window, where a title that long gives way, and ends in "…".
 [models.hurried]
-title = "Hurried"
+title = "Hurried, in 3 seconds"
 provider = "fake-hurried"
 model = "fake-chat"
 context_window = 8192
@@ -98,11 +101,11 @@ max_output_tokens = 2048
 thinking = true
 
 # The model on the provider above, whose server isn't there: "standard" stands in for
-# it, and the page says under the answer that it did. The page has no way to choose it:
-# a test gives its question this model's name on its way out, as for "hurried". Priced
-# like "standard" (plans.toml), so that it isn't offered at a limit either. Its window is
-# half of "standard"'s: a page that said the answer's tokens of the asked model's window
-# would say another number than the one the test waits for.
+# it, and the page says under the answer that it did. Its test gives its question this
+# model's name on its way out, as for "hurried", and the picker's test chooses it in
+# the page. Priced like "standard" (plans.toml), so that it isn't offered at a limit
+# either. Its window is half of "standard"'s: a page that said the answer's tokens of
+# the asked model's window would say another number than the one the test waits for.
 [models.away]
 title = "Away"
 provider = "nowhere"
@@ -114,11 +117,11 @@ then = ["standard"]
 
 # The fake on the provider above, with a budget of one request a minute, of which Actio
 # keeps the one: a question asked within a minute of the last one sent to it is refused
-# for now, and the page counts the wait down (apps/web/e2e/no-budget.spec.ts). The page
-# has no way to choose it: a test gives each of its questions this model's name on its
-# way out, as for "away". The count is kept in the stack's Valkey, for a minute, so a
-# test meets it as the last one left it. Priced like "standard" (plans.toml), so that it
-# isn't offered at a limit either.
+# for now, and the page counts the wait down (apps/web/e2e/no-budget.spec.ts). That
+# test gives each of its questions this model's name on its way out, as for "away".
+# The count is kept in the stack's Valkey, for a minute, so a test meets it as the last
+# one left it. Priced like "standard" (plans.toml), so that it isn't offered at a limit
+# either.
 [models.rationed]
 title = "Rationed"
 provider = "fake-rationed"
@@ -129,10 +132,9 @@ thinking = false
 requests_a_minute = 1
 
 # The fake on the provider above, behind its gate of one: a second answer asked while one
-# is written waits its turn, and the page says behind how many other answers. The page
-# has no way to choose it: a test gives each of its questions this model's name on its
-# way out, as for "rationed". Priced like "standard" (plans.toml), so that it isn't
-# offered at a limit either.
+# is written waits its turn, and the page says behind how many other answers. Its test
+# gives each of its questions this model's name on its way out, as for "rationed".
+# Priced like "standard" (plans.toml), so that it isn't offered at a limit either.
 [models.queued]
 title = "Queued"
 provider = "fake-queued"

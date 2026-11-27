@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { ReactElement } from "react";
 import useSWR from "swr";
 
 import { SessionPlace } from "@/components/account/session-place";
@@ -18,6 +19,7 @@ import { Sidebar } from "@/components/sidebar/sidebar";
 import { afterPaint } from "@/lib/after-paint";
 import { ApiProblem, getConversation, listModels } from "@/lib/api/client";
 import type { Conversation, Me, Model, ModelList } from "@/lib/api/client";
+import { answering, useChosen } from "@/lib/chat/chosen";
 import { useConversations } from "@/lib/chat/list";
 import { explain } from "@/lib/chat/outcomes";
 import { holdPlacesFor } from "@/lib/chat/places";
@@ -43,6 +45,7 @@ import type { UsageLimits } from "@/lib/usage";
 
 import { Chat } from "./chat";
 import { fetchRenderer, useWaitsForRenderer } from "./message";
+import { ModelPicker } from "./model-picker";
 
 // How long a conversation that has been read waits for the code that shows its answers
 // as markdown, at the most: the page's one wait for that code, which its answers share
@@ -284,6 +287,8 @@ export function ChatApp() {
           <>
             {listShown && !wide && (
               // Over a narrow window's chat, the rest of the screen closes the list.
+              // It lies over all of the chat: the menu of models (z-10) included,
+              // which may be open while the keyboard is in it.
               <button
                 type="button"
                 aria-label="Close the conversations"
@@ -291,7 +296,7 @@ export function ChatApp() {
                 onClick={() => {
                   setOver(false);
                 }}
-                className="absolute inset-0 z-10 cursor-default bg-black/40"
+                className="absolute inset-0 z-20 cursor-default bg-black/40"
               />
             )}
             {listShown && (
@@ -299,7 +304,7 @@ export function ChatApp() {
                 className={`flex flex-col ${LIST_PLACE} ${
                   wide
                     ? ""
-                    : "absolute inset-y-0 left-0 z-20 max-w-[85%] shadow-xl"
+                    : "absolute inset-y-0 left-0 z-30 max-w-[85%] shadow-xl"
                 }`}
               >
                 <Sidebar
@@ -432,18 +437,43 @@ function Current({
   onStartNew: () => void;
   onStartOver: () => void;
 }) {
-  const models = useModels(holder, usage.standIn);
-  const answers = models === null ? null : answering(models, usage.standIn);
+  // The reader's choice of the model that answers: this browser's, one for every
+  // conversation, and so held here, above each (ADR 0032).
+  const [chosen, choose] = useChosen();
+  const { list: models, readAgain } = useModels(holder, usage.standIn, chosen);
+  const { model: answers, named } = answering(models, usage.standIn, chosen);
   // The model that answers is loaded at its server ahead of the first question, once
   // the page knows it and it is ready: also when it becomes ready, and when another
   // model answers. Nothing on the page waits for it, or says so (ADR 0026).
   useEffect(() => {
     warmUp(holder, answers);
   }, [holder, answers]);
+  // Made here, whole, and placed by the conversation: what the picker does on its own
+  // never draws the conversation again, and the conversation's renders, one for each
+  // piece of an answer, leave the picker alone (`ModelPicker`). With one model on offer
+  // there is nothing to choose, and no picker.
+  const picker =
+    models !== null && models.models.length > 1 && answers !== null ? (
+      <ModelPicker
+        models={models.models}
+        answering={answers}
+        onChoose={(model) => {
+          choose(model);
+          // The reader's newest decision counts: a model that stood in at a usage
+          // limit answers no longer, and the limit stays.
+          if (usage.standIn !== null) {
+            usage.endStandIn();
+          }
+        }}
+        onOpen={readAgain}
+      />
+    ) : null;
   const chat = {
     id,
     holder,
     model: answers,
+    named,
+    picker,
     models: models?.models ?? null,
     // The models that cost nothing, as far as this installation still offers them.
     offers: (usage.reached?.free ?? []).flatMap(
@@ -468,6 +498,8 @@ function StoredChat({
   id,
   holder,
   model,
+  named,
+  picker,
   models,
   offers,
   usage,
@@ -479,6 +511,8 @@ function StoredChat({
   id: string;
   holder: string | null;
   model: Model | null;
+  named: string | null;
+  picker: ReactElement | null;
   models: readonly Model[] | null;
   offers: Model[];
   usage: UsageLimits;
@@ -531,6 +565,8 @@ function StoredChat({
       stored={loaded.conversation}
       holder={holder}
       model={model}
+      named={named}
+      picker={picker}
       models={models}
       offers={offers}
       usage={usage}
@@ -591,32 +627,31 @@ function useStored(id: string): Stored {
   };
 }
 
-/** The models on offer, with whether each can answer right now. Nothing until the API
- * has said. Asked again and again while the one that answers can't.
+/** The models on offer, with whether each can answer right now (`list`), nothing until
+ * the API has said, and a way to read them again, which nothing waits for. Asked again
+ * and again while the one that answers can't, whichever answers: the one that stands
+ * in at a usage limit (`standIn`), the reader's choice (`chosen`), or the default.
  *
  * Held under the session it was read in, like everything read from the API: a new
  * session reads it anew, instead of looking where the last one's answer was. */
 function useModels(
   holder: string | null,
   standIn: string | null,
-): ModelList | null {
-  const { data } = useSWR(
+  chosen: string | null,
+): { list: ModelList | null; readAgain: () => void } {
+  const { data, mutate } = useSWR(
     holder === null ? null : (["models", holder] as const),
     listModels,
     {
       refreshInterval: (latest: ModelList | undefined) =>
-        latest !== undefined && answering(latest, standIn)?.status !== "ready"
+        latest !== undefined &&
+        answering(latest, standIn, chosen).model?.status !== "ready"
           ? UNREADY_POLL_MS
           : 0,
     },
   );
-  return data ?? null;
-}
-
-/** The model that answers: the one a request gets that names none, unless another was
- * chosen to stand in for it and is still on offer. */
-function answering(list: ModelList, standIn: string | null): Model | null {
-  const named = (id: string | null) =>
-    list.models.find((model) => model.id === id);
-  return named(standIn) ?? named(list.default) ?? null;
+  const readAgain = useCallback(() => {
+    void mutate();
+  }, [mutate]);
+  return { list: data ?? null, readAgain };
 }

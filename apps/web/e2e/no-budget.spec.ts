@@ -38,9 +38,9 @@ test("a question no model has budget left for is refused for now, and the page c
   chat,
   page,
 }) => {
-  // The page has no way to choose a model: every request for a turn it makes is given
-  // the name of the one with a budget on its way out. Nothing else of a request is
-  // changed.
+  // This test was written before the page could choose a model (e2e/picker.spec.ts):
+  // every request for a turn it makes is given the name of the one with a budget on
+  // its way out. Nothing else of a request is changed.
   await page.route("**/api/conversations/*/turns", async (route) => {
     const request = route.request();
     if (request.method() !== "POST") {

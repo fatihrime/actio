@@ -50,8 +50,9 @@ test("an answer still being written when its server's time is over stops there, 
   page,
 }) => {
   // The stack's hurried model is the fake behind a server given 3 seconds for an
-  // answer. The page has no way to choose it, so the first request for an answer is
-  // given it on its way out. The requests after that go as the page made them.
+  // answer. This test was written before the page could choose a model
+  // (e2e/picker.spec.ts), so the first request for an answer is given it on its way
+  // out. The requests after that go as the page made them.
   let toTheHurriedModel = true;
   await page.route("**/api/conversations/*/turns", async (route) => {
     const request = route.request();

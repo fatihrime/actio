@@ -127,10 +127,13 @@ export interface UsageLimits {
    * which is then held as `reached`. */
   refused: (error: unknown) => boolean;
   /** The model that costs nothing and answers while the limit is reached, by id, once
-   * the person has chosen one. */
+   * the person has chosen one there, and until they choose a model in the picker. */
   standIn: string | null;
   /** Carry on with a model that costs nothing, until the limit starts over. */
   carryOnWith: (model: string) => void;
+  /** The person chose a model in the picker: the one that stood in no longer answers,
+   * and the limit stays reached (ADR 0032). */
+  endStandIn: () => void;
   /** The shares of windows the API said were passed, and nobody has dismissed: for
    * each window the one it said last. */
   passed: Passed[];
@@ -198,6 +201,10 @@ export function useUsage(holder: string | null): UsageLimits {
     },
     [tell],
   );
+
+  const endStandIn = useCallback(() => {
+    tell((before) => ({ ...before, standIn: null }));
+  }, [tell]);
 
   const pass = useCallback(
     (data: unknown) => {
@@ -269,6 +276,7 @@ export function useUsage(holder: string | null): UsageLimits {
     refused,
     standIn: told.standIn,
     carryOnWith,
+    endStandIn,
     passed: told.passed,
     pass,
     dismiss,

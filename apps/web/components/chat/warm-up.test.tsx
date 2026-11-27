@@ -6,6 +6,7 @@
 // last asked for as long as it is open. So each test loads the app's modules anew, as
 // a page that has just been opened does.
 import { screen, waitFor } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { clockAt, MINUTE, SECOND } from "@/tests/clock";
@@ -18,12 +19,14 @@ import {
   models,
   problem,
   refused,
+  secondModel,
   streamed,
 } from "@/tests/fake-api";
 import type { Call } from "@/tests/fake-api";
 
 const WARM_UP = "POST /api/models/*/warm-up";
 const STANDARD = "/api/models/standard/warm-up";
+const LOCAL = "POST /api/models/local/warm-up";
 const MODELS = "GET /api/models";
 const TURNS = "POST /api/conversations/*/turns";
 const CONVERSATION = "GET /api/conversations/*";
@@ -64,6 +67,17 @@ function loaded(calls: Call[]): string[] {
   return calls.map((call) => `${call.method} ${call.path}`);
 }
 
+/** Choose `name` in the picker of the model that answers, with the mouse. */
+async function choose(user: UserEvent, name: string): Promise<void> {
+  await user.click(await screen.findByRole("button", { name: /^Model: / }));
+  await user.click(screen.getByRole("menuitemradio", { name }));
+  await waitFor(() => {
+    expect(
+      screen.getByRole("button", { name: `Model: ${name}` }),
+    ).toBeInTheDocument();
+  });
+}
+
 describe.each([
   { how: "", strict: false },
   // React runs each effect, undoes it and runs it again when the page appears.
@@ -84,6 +98,25 @@ describe.each([
     expect(await screen.findByLabelText("Message")).toBeEnabled();
     expect(loaded(api.to(WARM_UP))).toEqual([`POST ${STANDARD}`]);
     expect(api.to(WARM_UP)[0]?.body).toBeUndefined();
+  });
+
+  it("is the one chosen in an earlier visit, read and asked to be loaded once, and no other", async () => {
+    window.localStorage.setItem("actio.model", "local");
+    const api = fakeApi().on(MODELS, () =>
+      json(200, { default: "standard", models: [model(), freeModel()] }),
+    );
+    const { open } = await newPage();
+
+    open("/", { strict });
+
+    expect(
+      await screen.findByRole("button", { name: "Model: Local" }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(api.to(WARM_UP)).toHaveLength(1);
+    });
+    await screen.findByRole("region", { name: "Usage" });
+    expect(loaded(api.to(WARM_UP))).toEqual([LOCAL]);
   });
 });
 
@@ -163,6 +196,42 @@ describe("a model that is asked to be loaded", () => {
         "POST /api/models/local/warm-up",
       ]);
     });
+  });
+
+  it("is the one chosen in the picker, when it comes to answer and is ready, and once within the minute", async () => {
+    clockAt();
+    const api = fakeApi().on(MODELS, () =>
+      json(200, {
+        default: "standard",
+        models: [
+          model(),
+          freeModel(),
+          secondModel({ status: "missing", thinking: false }),
+        ],
+      }),
+    );
+    const { open } = await newPage();
+    const user = open();
+    await waitFor(() => {
+      expect(loaded(api.to(WARM_UP))).toEqual([`POST ${STANDARD}`]);
+    });
+
+    await choose(user, "Local");
+    await waitFor(() => {
+      expect(loaded(api.to(WARM_UP))).toEqual([`POST ${STANDARD}`, LOCAL]);
+    });
+    // One that can't answer isn't asked; nor, within the minute, one that was, when it
+    // comes to answer again or when something is written.
+    await choose(user, "Second model");
+    await screen.findByText("Second model isn't downloaded yet.");
+    await choose(user, "Local");
+    await user.type(screen.getByLabelText("Message"), "Hello");
+    await choose(user, "Qwen 3.5 4B");
+
+    expect(
+      await screen.findByLabelText("Think before answering"),
+    ).toBeVisible();
+    expect(loaded(api.to(WARM_UP))).toEqual([`POST ${STANDARD}`, LOCAL]);
   });
 
   it("is asked for anew in a new session, also within the minute", async () => {

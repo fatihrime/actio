@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { ReactElement } from "react";
 import { flushSync } from "react-dom";
 
 import { Notice, NoticeButton } from "@/components/notice";
@@ -164,9 +165,10 @@ async function readConversation(id: string): Promise<Conversation | null> {
  *
  * What answers cost is the server's to count too. A question refused at a usage limit
  * is handed to `usage`, which holds the limit until it starts over: nothing is sent
- * meanwhile, unless a model that costs nothing was chosen to carry on with. And so is
- * how much of the model's window the conversation takes, which the line under the box
- * says of the model that answers, or of one that stands in for it (`ContextMeter`).
+ * meanwhile, unless the model that answers is one of those the refusal named that cost
+ * nothing, chosen to carry on with there or in the picker. And so is how much of the
+ * model's window the conversation takes, which the line under the box says of the
+ * model that answers, or of one that stands in for it (`ContextMeter`).
  *
  * A question refused for now, when no model that could answer it has budget left for
  * it, is that question's own problem: the page counts its wait down above the box
@@ -178,6 +180,8 @@ export function Chat({
   stored,
   holder,
   model,
+  named,
+  picker,
   models,
   offers,
   usage,
@@ -192,9 +196,16 @@ export function Chat({
   stored: Conversation | null;
   /** What the session's data is held under (`Session.holder`). */
   holder: string | null;
-  /** The model that answers, once known: the installation's default one, or the one
-   * that was chosen to carry on with at a usage limit. */
+  /** The model that answers, once known: the one chosen to carry on with at a usage
+   * limit, the reader's choice, or the installation's default one (`answering` in
+   * `lib/chat/chosen.ts`). */
   model: Model | null;
+  /** The model a question names, by its id, or nothing: then the default answers. */
+  named: string | null;
+  /** The picker of the model that answers, when there is a choice, made whole by
+   * whoever holds the choice: this places it in the box's row, and its own state never
+   * draws this conversation again (`ModelPicker`). */
+  picker: ReactElement | null;
   /** The models on offer, once read: which say the title of a model that answered in
    * another's place, and the window of one that stands in for `model`. */
   models: readonly Model[] | null;
@@ -629,16 +640,19 @@ export function Chat({
     void regenerate({ body: options() });
   }
 
-  // The model that costs nothing and answers while a usage limit is reached, once the
-  // person chose it and the API still offers it.
-  const standIn =
-    usage.standIn !== null && model?.id === usage.standIn ? model : null;
+  // The model that answers when it costs nothing, and so answers while a usage limit
+  // is reached: one the refusal named, chosen to carry on with there or in the picker.
+  const free =
+    model !== null && usage.reached?.free.includes(model.id) === true
+      ? model
+      : null;
 
+  // What a question names now: "Try again" asks as a new question would.
   function options(): TurnOptions {
     const reasoning = thinking && model?.thinking === true;
-    return standIn === null
+    return named === null
       ? { thinking: reasoning }
-      : { thinking: reasoning, model: standIn.id };
+      : { thinking: reasoning, model: named };
   }
 
   // Once the server has the conversation, it gets its address.
@@ -738,7 +752,7 @@ export function Chat({
     ? "Your session has ended."
     : elsewhere || joining
       ? "An answer is being written."
-      : usage.reached !== null && standIn === null
+      : usage.reached !== null && free === null
         ? "You’ve reached your usage limit."
         : unready !== null
           ? "The model can't answer right now."
@@ -923,7 +937,7 @@ export function Chat({
         {usage.reached !== null && (
           <LimitReached
             reached={usage.reached}
-            standIn={standIn}
+            standIn={free}
             offers={offers}
             onCarryOn={(free) => {
               usage.carryOnWith(free.id);
@@ -1001,6 +1015,7 @@ export function Chat({
                 ? { on: thinking, set: setThinking }
                 : null
             }
+            picker={picker}
           />
           {/* Under the box, and not in its row, which a narrow window leaves no room
             in. Its place is there from the first render, with a figure or without. */}
