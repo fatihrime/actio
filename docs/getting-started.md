@@ -168,6 +168,8 @@ An account can make API keys, for a program that works as that account. A key sa
 - **A key is shown once,** when it is made: keep it as you keep a password. Actio keeps only its hash, and lists a key by its first twelve characters, its prefix: `act_` and eight more.
 - **A key works until it is revoked,** and only while its account is on a plan that allows keys: taken off `dev`, the account has its keys refused until it is put back. A change of password and logging out everywhere leave the keys as they are.
 
+In the page, logged in to the account: open the account's place, by its address at the top right, and find **API keys**, last, which says how many keys the plan allows. Give a key a name, and press **Make a key**. The key is shown once, whole, with all of it selected: press **Copy**, or copy it with your keyboard, and then **Done**. Where the browser gives the page no clipboard, as at a plain http address other than `localhost`, **Copy** says so, and leaves the key selected for your keyboard. The list under it names each key by its name and its prefix, `act_…`, and says when it was made and when it was last used; **Revoke** asks first, and revokes it.
+
 From a shell, with the stack running: sign up, put the account on `dev`, and make a key. For an account that is there already, log in instead, with the same body sent to `POST /api/session`.
 
 ```sh

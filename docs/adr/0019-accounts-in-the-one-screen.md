@@ -122,3 +122,10 @@ The decision says that "everything read from the API is held under the session i
 - **Why it surfaced only now.** A person takes longer than two seconds to fill in a form, and no test looked at anything of the models after a change of session. The offer of a model that costs nothing does depend on them ([ADR 0021](0021-usage-limits-in-the-page.md)), and its test in a real browser signs up at once.
 - **The fix.** The models are held under the session, and read anew for each. A component test signs up at once and looks for the switch; it failed before.
 - **What it costs:** one more request at each change of session.
+
+### 2026-11-28: the account's place holds its API keys
+
+The account's place, `/account`, also holds the account's API keys, last, after "Log out": what its plan allows, the form that makes one, a key just made, shown whole once, and the list, where each is revoked after asking ([ADR 0033](0033-api-keys-kept-as-their-hashes.md), revision "an account's keys in its place on the page").
+
+- **The keys are held under the session they were read in,** as everything the page reads is, and read by an account's place alone: a guest asks nothing of them.
+- **The section is drawn anew for each session,** and a key just made is held in its state alone: nothing of it outlives the session it was made in.
