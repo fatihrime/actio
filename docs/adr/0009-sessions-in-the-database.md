@@ -82,3 +82,11 @@ Email and password arrived with [ADR 0010](0010-accounts-with-a-password.md). Fo
 ### 2026-11-18: a scheduled sweep
 
 The worker process arrived ([ADR 0024](0024-background-jobs-in-a-queue-in-postgres.md)), and with it the scheduled sweep: every ten minutes it deletes a batch of expired guests and sessions, and a worker that starts sweeps at once, unless another has since the last ten-minute mark. The API still sweeps after each new guest.
+
+### 2026-11-28: an API key is a second way to say who is asking
+
+An account can now make API keys, and a request that carries one is recognized as that account ([ADR 0033](0033-api-keys-kept-as-their-hashes.md)):
+
+- **A key is kept as its SHA-256, and found by it,** as a session's token is, and for the same reason: it is random, and leaves nothing to guess faster. Its "last used" time is written at most once a minute, as a session's "last seen".
+- **A route takes one or the other, never both:** `GET /api/key` takes a key, in `Authorization: Bearer` or `x-api-key`, and doesn't look at the cookie; a route that takes a session doesn't look at a key. The routes that make, list and revoke keys take a session.
+- **Nothing above changed.** A browser never sends a key by itself, as it sends a cookie, so the check against requests from other sites has nothing to add for one.

@@ -96,3 +96,10 @@ Until now accounts could only be used through the API. The web app's forms for s
 ### 2026-11-28: an account's row names its own plan
 
 An account's row can now name a plan of the plans file that the account is on of its own, which `actio plan` sets ([ADR 0020](0020-usage-limits-on-turns.md), revision "an account has a plan of its own"). Beside the constraint above, which keeps each row wholly a guest or wholly an account, a second one keeps the plan empty for a guest. A guest who signs up becomes an account with no plan of its own.
+
+### 2026-11-28: an API key outlives a change of password
+
+An account can now make API keys ([ADR 0033](0033-api-keys-kept-as-their-hashes.md)). "Whoever used it is out", above, is about browsers: changing the password ends every other session, and leaves the account's keys as they are, and so does logging out everywhere. Each key is revoked by itself, with `DELETE /api/keys/{key_id}`.
+
+- **After a change made for a password that leaked,** whoever had it could have made a key meanwhile: `GET /api/keys` lists the account's keys, each with when it was made and when it was last used, to revoke those that aren't its owner's.
+- **Making a key asks for no password:** whoever holds a session of the account can make one.

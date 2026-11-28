@@ -528,3 +528,12 @@ Chosen: the column, and the command.
 - **no query was added to a request.** That is read in the code, not timed: the plan comes with the row that the session's one statement takes already.
 
 **Tested:** the cases of `Plans.plan_for` and its warning; through the API, an account at its session's limit that is admitted once it is on a larger plan, with what it had used, and one put back on a smaller plan that is refused until the window it has open starts over; `answers_at_once` by the account's own plan; a row that names a plan the file doesn't have; a guest's row with a plan, refused by the migrated database; and the command, by its status and its whole line in each case, once as a process of its own with Python told to say what it left open. 37 mistakes were planted in a scratch copy of the tree, one at a time, and each failed a test; two of them were planted a second time, because their first form broke something other than what it was about.
+
+### 2026-11-28: a plan says how many API keys its accounts may have
+
+A plan of the file gains `api_keys`: how many API keys an account on it may have at once, a whole number from 0 to 100 ([ADR 0033](0033-api-keys-kept-as-their-hashes.md)).
+
+- **Left out, or 0, it gives none.** That is the other way round from the plan's three limits, which leave nothing limited when left out, and the file's comment says so.
+- **The shipped file and the example's give `dev` 10,** and `guest` and `free` none. The end-to-end stack's file says nothing of keys.
+- **A guest never has a key, whatever its plan says:** the routes hold that, and not the file's checks, so a file with one plan for guests and accounts is still right.
+- **Which plan decides is `Plans.plan_for`,** as for the rest: asked when a key is made, when the keys are listed, and at every use of a key. An account taken off a plan that allows keys has its keys refused from its next request, and still listed, to be revoked; put back, they work again. An account on a plan the file doesn't have is held to the accounts' plan for its keys too.

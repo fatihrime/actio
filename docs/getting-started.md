@@ -160,6 +160,47 @@ Each says in one line which plan the account is on now, and after a change which
 
 What was used is kept in the database, in a ledger that only ever grows. See [ADR 0020](adr/0020-usage-limits-on-turns.md).
 
+## API keys
+
+An account can make API keys, for a program that works as that account. A key says which account it is, and on which plan: `GET /api/key` is the one route that takes a key, and a route that needs a session takes no key in its place ([ADR 0033](adr/0033-api-keys-kept-as-their-hashes.md)).
+
+- **The account's plan has to allow them.** The shipped plans file lets an account on `dev` have 10 keys at once, and guests and the other accounts none: put the account on `dev` first, with `make plan` (above). `api_keys` in `config/plans.toml` says how many keys each plan allows.
+- **A key is shown once,** when it is made: keep it as you keep a password. Actio keeps only its hash, and lists a key by its first twelve characters, its prefix: `act_` and eight more.
+- **A key works until it is revoked,** and only while its account is on a plan that allows keys: taken off `dev`, the account has its keys refused until it is put back. A change of password and logging out everywhere leave the keys as they are.
+
+From a shell, with the stack running: sign up, put the account on `dev`, and make a key. For an account that is there already, log in instead, with the same body sent to `POST /api/session`.
+
+```sh
+jar=$(mktemp)
+curl --silent --cookie-jar "$jar" --header 'Content-Type: application/json' \
+  --data '{"email": "ada@example.com", "password": "a long password"}' \
+  http://localhost:8080/api/account
+make plan email=ada@example.com plan=dev
+made=$(curl --silent --cookie "$jar" --header 'Content-Type: application/json' \
+  --data '{"name": "My script"}' http://localhost:8080/api/keys)
+echo "$made"
+key=$(echo "$made" | sed -E 's/.*"key":"([^"]+)".*/\1/')
+id=$(echo "$made" | sed -E 's/.*"id":"([^"]+)".*/\1/')
+```
+
+The answer holds the whole key, `key`, beside its `id`, `name` and `prefix`, and no other answer ever will. A program sends it in either of two headers:
+
+```sh
+curl --silent --header "Authorization: Bearer $key" http://localhost:8080/api/key
+curl --silent --header "x-api-key: $key" http://localhost:8080/api/key
+```
+
+Each says which key it is, whose, and on which plan. Without a key, with one that is mistyped or revoked, or with two different ones, the answer is 401; when the account's plan allows no keys, 403. The account's keys, with how many its plan allows, and revoking one:
+
+```sh
+curl --silent --cookie "$jar" http://localhost:8080/api/keys
+curl --silent --cookie "$jar" --request DELETE "http://localhost:8080/api/keys/$id"
+```
+
+From then on the key is answered 401, as a key that never was.
+
+In a browser that is logged in to Actio, <http://localhost:8080/api/docs> does the same. **POST /api/keys**, under *keys*, then *Try it out* and *Execute*, makes a key with the browser's session, and shows it this once. **Authorize**, at the top of the page, takes the key in either of its two boxes, and **GET /api/key** then sends it.
+
 ## Develop it
 
 ```sh
