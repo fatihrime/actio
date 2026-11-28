@@ -90,3 +90,7 @@ An account can now make API keys, and a request that carries one is recognized a
 - **A key is kept as its SHA-256, and found by it,** as a session's token is, and for the same reason: it is random, and leaves nothing to guess faster. Its "last used" time is written at most once a minute, as a session's "last seen".
 - **A route takes one or the other, never both:** `GET /api/key` takes a key, in `Authorization: Bearer` or `x-api-key`, and doesn't look at the cookie; a route that takes a session doesn't look at a key. The routes that make, list and revoke keys take a session.
 - **Nothing above changed.** A browser never sends a key by itself, as it sends a cookie, so the check against requests from other sites has nothing to add for one.
+
+### 2026-11-28: under `/v1/`, an error is OpenAI's
+
+"Errors use one format, RFC 9457 problem details, whichever part of the application raises them" holds beside the developer gateway alone. Under `/v1/` the same error, raised as ever, leaves in the form OpenAI's API answers one, which its SDKs read: `{"error": {"message", "type", "param", "code"}}`, with the same status and headers. The form is chosen where the response is made, from the request's path ([ADR 0034](0034-the-gateway-answers-in-openais-form.md)).

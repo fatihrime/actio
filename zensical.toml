@@ -57,6 +57,7 @@ nav = [
     { "0031. A model that keeps failing is asked last" = "adr/0031-a-model-that-keeps-failing-is-asked-last.md" },
     { "0032. The reader chooses the model that answers" = "adr/0032-the-reader-chooses-the-model-that-answers.md" },
     { "0033. API keys kept as their hashes" = "adr/0033-api-keys-kept-as-their-hashes.md" },
+    { "0034. The gateway answers in OpenAI's form" = "adr/0034-the-gateway-answers-in-openais-form.md" },
     { "Template" = "adr/0000-template.md" },
   ] },
 ]

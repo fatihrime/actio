@@ -24,7 +24,7 @@ The first run builds the images, which takes a few minutes; later runs take seco
 - <http://localhost:8080/api/healthz>: the API's health check;
 - <http://localhost:8080/api/readyz>: whether the API can do its work. It says `ready` when the database is reachable and migrated and Valkey answers, and otherwise names what is missing. Under `make dev`, where the worker runs inside the API's process, it also says whether that worker works.
 
-`make smoke` checks them from the command line, and that a guest can start a session and is told the models and its usage limits. `make down` stops everything.
+`make smoke` checks them from the command line, that a guest can start a session and is told the models and its usage limits, and that the developer gateway, under `/v1`, refuses a request without an API key. `make down` stops everything.
 
 ## Models
 
@@ -162,7 +162,7 @@ What was used is kept in the database, in a ledger that only ever grows. See [AD
 
 ## API keys
 
-An account can make API keys, for a program that works as that account. A key says which account it is, and on which plan: `GET /api/key` is the one route that takes a key, and a route that needs a session takes no key in its place ([ADR 0033](adr/0033-api-keys-kept-as-their-hashes.md)).
+An account can make API keys, for a program that works as that account. A key says which account it is, and on which plan, at `GET /api/key`, and lists the models on offer at the developer gateway, under `/v1`, in the form OpenAI's API has. Those are the routes that take a key, and a route that needs a session takes no key in its place ([ADR 0033](adr/0033-api-keys-kept-as-their-hashes.md), [ADR 0034](adr/0034-the-gateway-answers-in-openais-form.md)).
 
 - **The account's plan has to allow them.** The shipped plans file lets an account on `dev` have 10 keys at once, and guests and the other accounts none: put the account on `dev` first, with `make plan` (above). `api_keys` in `config/plans.toml` says how many keys each plan allows.
 - **A key is shown once,** when it is made: keep it as you keep a password. Actio keeps only its hash, and lists a key by its first twelve characters, its prefix: `act_` and eight more.
@@ -203,6 +203,27 @@ From then on the key is answered 401, as a key that never was.
 
 In a browser that is logged in to Actio, <http://localhost:8080/api/docs> does the same. **POST /api/keys**, under *keys*, then *Try it out* and *Execute*, makes a key with the browser's session, and shows it this once. **Authorize**, at the top of the page, takes the key in either of its two boxes, and **GET /api/key** then sends it.
 
+### The models, as OpenAI's API lists them
+
+With a key that works, made again if you revoked the one above, the developer gateway lists the models on offer, by the names a request asks for them by, in the models file's order, as OpenAI's API lists its own; and one of them by its name:
+
+```sh
+curl --silent --header "Authorization: Bearer $key" http://localhost:8080/v1/models
+curl --silent --header "Authorization: Bearer $key" http://localhost:8080/v1/models/standard
+```
+
+Each model is `{"id": "standard", "object": "model", "created": 0, "owned_by": "actio"}`: `created` is always 0, since nothing keeps when a model was made. The list doesn't say whether a model can answer right now, and asks no model's server: `GET /api/models` says that. Every error under `/v1/` is OpenAI's, `{"error": {"message": …, "type": …, "param": …, "code": …}}`: a key that is missing or isn't known is 401 with `"code": "invalid_api_key"`, a plan that allows no keys 403, and a model nobody offers 404 with `"code": "model_not_found"`. So OpenAI's own SDKs read it, here the Python one, the `openai` package, with your key where `act_…` stands:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="act_…", base_url="http://localhost:8080/v1")
+print([model.id for model in client.models.list()])
+print(client.models.retrieve("standard"))
+```
+
+A refusal is the SDK's own exception for its status, `AuthenticationError`, `PermissionDeniedError` or `NotFoundError`, with the words and the `code` above. Nothing under `/v1` answers a question.
+
 ## Develop it
 
 ```sh
@@ -231,7 +252,7 @@ The answer streams to your terminal, followed by its token counts and speed. `uv
 |---|---|
 | `make up` | Build and run the whole stack in containers |
 | `make dev` | Run the stack with the API and the web app native |
-| `make smoke` | Check a running stack: the web page, the API's health and its docs, a guest session, the models and the usage limits |
+| `make smoke` | Check a running stack: the web page, the API's health and its docs, a guest session, the models and the usage limits, and that the gateway refuses a request without an API key |
 | `make down` | Stop all containers; their data is kept |
 | `make plan` | Say which plan an account is on, or put it on another: see [Usage limits](#usage-limits) |
 | `make check` | Run what CI's main job runs: static checks, tests and builds |
