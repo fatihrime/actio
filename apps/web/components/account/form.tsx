@@ -147,3 +147,7 @@ export function focusOn(form: HTMLFormElement, name: string): void {
 }
 
 export const TEXT_LINK = "font-medium underline underline-offset-2";
+
+/** A button of the account's place that isn't a form's own, such as "Log out". */
+export const PLAIN_BUTTON =
+  "rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-60";

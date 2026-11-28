@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { atTime, timeLeft, timeLeftRoughly, timeTaken } from "./time";
+import { atTime, onDay, timeLeft, timeLeftRoughly, timeTaken } from "./time";
 
 // The tests' time zone is UTC (vitest.config.mts). Between a time and its "AM" or
 // "PM" the browser puts a space that doesn't break, which `\s` matches.
@@ -31,6 +31,32 @@ describe("atTime", () => {
 
     // A Turkish reader's day isn't "Per" here: the page around it is in English.
     expect(atTime(later, NOON, "tr-TR")).toBe("on Thu, Nov 12, 09:05");
+  });
+});
+
+describe("onDay", () => {
+  it("says a moment of today by its time, in the reader's hours", () => {
+    const earlier = new Date("2026-11-10T09:05:00Z");
+
+    expect(onDay(earlier, NOON, "en-US")).toMatch(/^today at 9:05\sAM$/);
+    expect(onDay(earlier, NOON, "tr-TR")).toBe("today at 09:05");
+    expect(onDay(new Date("2026-11-10T14:30:00Z"), NOON, "de-DE")).toBe(
+      "today at 14:30",
+    );
+  });
+
+  it("says a moment of another day by its day and year, without its time", () => {
+    // After midnight is another day, however soon it is.
+    expect(onDay(new Date("2026-11-11T00:30:00Z"), NOON, "en-US")).toBe(
+      "on Nov 11, 2026",
+    );
+    expect(onDay(new Date("2026-11-09T23:59:00Z"), NOON, "de-DE")).toBe(
+      "on Nov 9, 2026",
+    );
+    // A day of another year says which.
+    expect(onDay(new Date("2025-03-02T08:00:00Z"), NOON, "tr-TR")).toBe(
+      "on Mar 2, 2025",
+    );
   });
 });
 

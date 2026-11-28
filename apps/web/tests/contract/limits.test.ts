@@ -6,7 +6,13 @@ import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 
 import { TITLE_MAX } from "@/components/sidebar/row";
-import { EMAIL_MAX, PASSWORD_MAX, PASSWORD_MIN } from "@/lib/account";
+import {
+  EMAIL_MAX,
+  KEY_NAME_MAX,
+  KEY_NAME_MIN,
+  PASSWORD_MAX,
+  PASSWORD_MIN,
+} from "@/lib/account";
 import { MODEL_ID_MAX } from "@/lib/chat/chosen";
 
 import { API_DESCRIPTION } from "../recorded";
@@ -49,6 +55,13 @@ it("asks of a new password what the API asks", () => {
   expect(field("PasswordChange", "new_password")).toMatchObject({
     minLength: PASSWORD_MIN,
     maxLength: PASSWORD_MAX,
+  });
+});
+
+it("asks of an API key's name what the API asks", () => {
+  expect(field("MakeKey", "name")).toMatchObject({
+    minLength: KEY_NAME_MIN,
+    maxLength: KEY_NAME_MAX,
   });
 });
 

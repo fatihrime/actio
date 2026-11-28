@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { emailProblem, newPasswordProblem } from "./account";
+import { emailProblem, keyNameProblem, newPasswordProblem } from "./account";
 
 describe("emailProblem", () => {
   it("finds nothing wrong with what has the form of an address", () => {
@@ -50,5 +50,24 @@ describe("newPasswordProblem", () => {
     expect(newPasswordProblem("🚲🚲🚲🚲🚲")).toBe(
       "Use at least 10 characters.",
     );
+  });
+});
+
+describe("keyNameProblem", () => {
+  it("asks for a name of 1 to 64 characters, and nothing else", () => {
+    expect(keyNameProblem("")).toBe("Give the key a name.");
+    expect(keyNameProblem("a")).toBeNull();
+    expect(keyNameProblem("a".repeat(64))).toBeNull();
+    expect(keyNameProblem("a".repeat(65))).toBe("Use 1 to 64 characters.");
+    // Any characters at all: two keys may even have the same name.
+    expect(keyNameProblem("Deploy script #2 (old)")).toBeNull();
+  });
+
+  it("counts characters as the API does, not as JavaScript stores them", () => {
+    // 64 emoji are 64 characters to the API, and 128 to `length`.
+    const bicycles = "🚲".repeat(64);
+    expect(bicycles).toHaveLength(128);
+    expect(keyNameProblem(bicycles)).toBeNull();
+    expect(keyNameProblem(`${bicycles}🚲`)).toBe("Use 1 to 64 characters.");
   });
 });

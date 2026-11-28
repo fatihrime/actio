@@ -67,7 +67,7 @@ export function SessionPlace({
         </p>
       </Panel>
     ) : (
-      <Account me={me} onLoggedOut={onLoggedOut} />
+      <Account me={me} holder={session.holder} onLoggedOut={onLoggedOut} />
     );
   }
 

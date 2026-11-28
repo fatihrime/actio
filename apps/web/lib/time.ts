@@ -23,6 +23,26 @@ export function atTime(
   return today ? `at ${said}` : `on ${said}`;
 }
 
+/** Which day a moment was, as its reader's clock shows it: "today at 2:30 PM" or "today
+ * at 14:30" when it is today, as `atTime` says it, and otherwise the day with its year
+ * and without a time, "on Nov 16, 2026". For what happened long ago as much as an hour
+ * ago, such as when an API key was last used. */
+export function onDay(
+  moment: Date,
+  now: Date,
+  language: string = navigator.language,
+): string {
+  if (moment.toDateString() === now.toDateString()) {
+    return `today ${atTime(moment, now, language)}`;
+  }
+  const day = new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(moment);
+  return `on ${day}`;
+}
+
 /** The time by this browser's clock, read again every `everyMs` milliseconds: for
  * what is shown as it stands to now, such as the time left until something. */
 export function useNow(everyMs: number): number {

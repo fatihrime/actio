@@ -29,6 +29,11 @@ export type Turn = Schemas["TurnOut"];
 export type TurnRequest = Schemas["TurnRequest"];
 export type Usage = Schemas["UsageOut"];
 export type UsageWindow = Schemas["WindowOut"];
+/** An API key as its account's list has it: by its prefix, never whole. */
+export type ApiKey = Schemas["KeyOut"];
+/** An API key that was just made, with the whole key, which no other answer holds. */
+export type NewKey = Schemas["NewKey"];
+export type KeyList = Schemas["KeyList"];
 export type Problem = Schemas["Problem"];
 
 /** The API refused a request. Carries the problem document it answered with. */
@@ -195,6 +200,27 @@ export async function warmUpModel(modelId: string): Promise<void> {
 /** The caller's plan, and how much of each of its usage limits is used. */
 export async function getUsage(): Promise<Usage> {
   return answered(await api().GET("/api/usage"));
+}
+
+/** The account's API keys, oldest first, and how many its plan lets it have at once. */
+export async function listKeys(): Promise<KeyList> {
+  return answered(await api().GET("/api/keys"));
+}
+
+/** Make an API key called `name`. The answer holds the whole key, and is the only one
+ * that ever will: the API keeps only what recognizes it. */
+export async function makeKey(name: string): Promise<NewKey> {
+  return answered(await api().POST("/api/keys", { body: { name } }));
+}
+
+/** Revoke an API key: from then on it is refused, as a key that never was. There is no
+ * way back. */
+export async function revokeKey(id: string): Promise<void> {
+  done(
+    await api().DELETE("/api/keys/{key_id}", {
+      params: { path: { key_id: id } },
+    }),
+  );
 }
 
 /** A conversation, with the messages of the branch that is shown. */

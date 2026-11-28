@@ -14,18 +14,27 @@ import {
 import type { Me } from "@/lib/api/client";
 import { explain, isSessionEnd } from "@/lib/chat/outcomes";
 
-import { Field, focusOn, Panel, SubmitButton, typed } from "./form";
+import { ApiKeys } from "./api-keys";
+import {
+  Field,
+  focusOn,
+  Panel,
+  PLAIN_BUTTON,
+  SubmitButton,
+  typed,
+} from "./form";
 
-const PLAIN_BUTTON =
-  "rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-60";
-
-/** An account, seen by its owner: whose it is, a new password for it, and the ways
- * out of it. */
+/** An account, seen by its owner: whose it is, a new password for it, the ways out of
+ * it, and last its API keys. Last, because what they show changes height as the keys
+ * are read, made and revoked: nothing below them moves under the reader. */
 export function Account({
   me,
+  holder,
   onLoggedOut,
 }: {
   me: Me;
+  /** What the session's data is held under (`Session.holder`). */
+  holder: string | null;
   /** Called when this browser's session has ended. */
   onLoggedOut: () => void;
 }) {
@@ -36,6 +45,9 @@ export function Account({
       </p>
       <ChangePassword email={me.email ?? ""} onSessionEnded={onLoggedOut} />
       <LogOut onLoggedOut={onLoggedOut} />
+      {/* One session's: nothing of it, a key shown once least of all, outlives the
+          session it was made in. */}
+      <ApiKeys key={holder} holder={holder} onSessionEnded={onLoggedOut} />
     </Panel>
   );
 }

@@ -6,13 +6,16 @@
 import { expect, onTestFinished, vi } from "vitest";
 
 import type {
+  ApiKey,
   Conversation,
   ConversationList,
   ConversationSummary,
+  KeyList,
   Me,
   Model,
   ModelList,
   ModelTitle,
+  NewKey,
   Problem,
   StoredMessage,
   Turn,
@@ -117,15 +120,17 @@ function matches(route: string, call: Call): boolean {
 /** Replace `fetch` with a fake API for the running test. It starts with a guest
  * session, one model that is ready and can reason, no conversations, and nothing used
  * of the usage limits: what a working installation answers a first visit. A model the
- * page asks to have loaded ahead has nothing to load. A request the test didn't set up
- * fails the test. */
+ * page asks to have loaded ahead has nothing to load. An account has no API keys, and
+ * its plan allows none, as the shipped plans give accounts. A request the test didn't
+ * set up fails the test. */
 export function fakeApi(): FakeApi {
   const api = new FakeApi()
     .on("POST /api/session/guest", () => json(201, GUEST))
     .on("GET /api/models", () => json(200, models()))
     .on("GET /api/conversations", () => json(200, listed([])))
     .on("GET /api/usage", () => json(200, usage()))
-    .on("POST /api/models/*/warm-up", () => nothing());
+    .on("POST /api/models/*/warm-up", () => nothing())
+    .on("GET /api/keys", () => json(200, keyList()));
   vi.stubGlobal("fetch", api.fetch);
   onTestFinished(() => {
     expect(api.unexpected, "requests the test set up no answer for").toEqual(
@@ -546,5 +551,61 @@ export function conversation(
     messages,
     unanswered,
     models: onOffer,
+  };
+}
+
+/** What an API key is made of: digits and ASCII letters (ADR 0033). */
+const KEY_CHARACTERS =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/** `count` characters of a key, drawn as the test runs. No whole key is written in any
+ * file of the repository, made up or real: a document writes `act_…`. */
+function drawn(count: number): string {
+  const picks = crypto.getRandomValues(new Uint8Array(count));
+  return Array.from(
+    picks,
+    (pick) => KEY_CHARACTERS[pick % KEY_CHARACTERS.length] ?? "0",
+  ).join("");
+}
+
+/** An API key as the account's list has it, made at the fake API's moment and never
+ * used. `changes` says how it differs: its id, its name, when it was last used. */
+export function listedKey(changes: Partial<ApiKey> = {}): ApiKey {
+  return {
+    id: "01900000-0000-7000-8000-0000000000a1",
+    name: "Deploy script",
+    prefix: `act_${drawn(8)}`,
+    created_at: MOMENT,
+    last_used_at: null,
+    ...changes,
+  };
+}
+
+/** What `GET /api/keys` answers: these keys, in this order, and how many the plan
+ * allows at once. An account with none, on a plan that allows none, without either. */
+export function keyList(keys: ApiKey[] = [], atMost = 0): KeyList {
+  return { keys, at_most: atMost };
+}
+
+/** What `POST /api/keys` answers: a key just made, with the whole of it, of a key's
+ * form (`act_`, 8, `_`, 43) and drawn as the test runs, its prefix its first twelve
+ * characters. `changes` says how it differs, as its id and name. */
+export function madeKey(changes: Partial<ApiKey> = {}): NewKey {
+  const key = `act_${drawn(8)}_${drawn(43)}`;
+  return {
+    ...listedKey(changes),
+    ...("prefix" in changes ? {} : { prefix: key.slice(0, 12) }),
+    key,
+  };
+}
+
+/** A key that was just made, as the list has it afterwards: without the key itself. */
+export function asListed(made: NewKey): ApiKey {
+  return {
+    id: made.id,
+    name: made.name,
+    prefix: made.prefix,
+    created_at: made.created_at,
+    last_used_at: made.last_used_at,
   };
 }
