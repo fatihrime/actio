@@ -69,9 +69,12 @@ week_credits = 400_000
 answers_at_once = 2
 
 # Enough for the few short questions of the tests that sign up for other reasons, and
-# gone after two or three long ones.
+# gone after two or three long ones. Two API keys, where the shipped file gives
+# accounts none: apps/web/e2e/keys.spec.ts makes them in the account's place, and
+# reaches the plan's number with the second.
 [plans.free]
 title = "Free"
 session_credits = 500
 week_credits = 5_000
 answers_at_once = 3
+api_keys = 2

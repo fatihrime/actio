@@ -99,6 +99,18 @@ def test_the_end_to_end_stack_has_a_limit_within_reach_and_a_model_that_costs_no
     assert loaded.plan_for(is_guest=True, own_plan=None).answers_at_once == 2
 
 
+def test_the_end_to_end_stack_lets_an_account_have_two_api_keys_and_a_guest_none() -> None:
+    """What its test of the account's keys counts on (apps/web/e2e/keys.spec.ts): an
+    account makes a key, and reaches its plan's number with the second."""
+    folder = ROOT / "deploy/e2e/config"
+    offered = catalog.read_file(folder / "models.toml").models
+
+    loaded = plans.load(folder / "plans.toml", models=offered)
+
+    assert loaded.plan_for(is_guest=False, own_plan=None).api_keys == 2
+    assert loaded.plan_for(is_guest=True, own_plan=None).api_keys == 0
+
+
 def test_the_end_to_end_stack_names_conversations_with_a_model_that_isnt_free() -> None:
     """Its tests see a title arrive (apps/web/e2e/sidebar.spec.ts), from the fake's model
     that says only what a question tells it to (test_catalog.py). A model that cost
