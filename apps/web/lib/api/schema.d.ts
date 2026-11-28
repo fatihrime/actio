@@ -190,6 +190,78 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Keys
+         * @description Your API keys, oldest first, each by its prefix and never whole, and how many
+         *     your plan lets you have.
+         */
+        get: operations["list_keys"];
+        put?: never;
+        /**
+         * Make Key
+         * @description Make an API key. The answer holds the whole key, `key`, and no other answer ever
+         *     will: keep it.
+         *
+         *     403 for a guest, and for an account whose plan allows no keys; 409 when the account
+         *     has as many keys as its plan allows, or more. Nothing is made then.
+         */
+        post: operations["make_key"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/keys/{key_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke Key
+         * @description Revoke an API key: from the next request it is answered as one that never was.
+         *     There is no way back.
+         */
+        delete: operations["revoke_key"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Key
+         * @description What the API key this request carries is, whose it is, and the plan that lets it
+         *     be used. It takes a key, in `Authorization: Bearer …` or in `x-api-key`, and no
+         *     session: a session's cookie is not looked at.
+         */
+        get: operations["get_key"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/conversations": {
         parameters: {
             query?: never;
@@ -521,12 +593,126 @@ export interface components {
             /** Version */
             version: string;
         };
+        /**
+         * KeyAccount
+         * @description The account a key belongs to.
+         */
+        KeyAccount: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Email
+             * @description Its email address.
+             */
+            email: string;
+        };
+        /**
+         * KeyInUse
+         * @description The key a request carries: what it is, whose it is, and the plan that lets it be
+         *     used.
+         */
+        KeyInUse: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The id to revoke it by: `DELETE /api/keys/{key_id}`.
+             */
+            id: string;
+            /**
+             * Name
+             * @description What its account called it when it was made.
+             */
+            name: string;
+            /**
+             * Prefix
+             * @description The key's first twelve characters, such as `act_7Qm2xZp9`: enough for whoever
+             *     holds the key to tell which one it is, and not enough to use it.
+             */
+            prefix: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Last Used At
+             * @description When a request last carried the key, written at most once a minute: used again
+             *     within the minute, it keeps the time of the use before. Empty until a request
+             *     has carried it.
+             */
+            last_used_at: string | null;
+            account: components["schemas"]["KeyAccount"];
+            /** @description The plan of the key's account, as `GET /api/usage` names it. */
+            plan: components["schemas"]["PlanOut"];
+        };
+        /** KeyList */
+        KeyList: {
+            /**
+             * Keys
+             * @description Your keys, oldest first.
+             */
+            keys: components["schemas"]["KeyOut"][];
+            /**
+             * At Most
+             * @description How many keys your plan lets you have at once: 0 for a guest, and for a plan that
+             *     allows none. A key of an account whose plan allows none stops working, and is
+             *     still listed, to be revoked.
+             */
+            at_most: number;
+        };
+        /**
+         * KeyOut
+         * @description An API key, as its account sees it in a list: never the key itself.
+         */
+        KeyOut: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The id to revoke it by: `DELETE /api/keys/{key_id}`.
+             */
+            id: string;
+            /**
+             * Name
+             * @description What its account called it when it was made.
+             */
+            name: string;
+            /**
+             * Prefix
+             * @description The key's first twelve characters, such as `act_7Qm2xZp9`: enough for whoever
+             *     holds the key to tell which one it is, and not enough to use it.
+             */
+            prefix: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Last Used At
+             * @description When a request last carried the key, written at most once a minute: used again
+             *     within the minute, it keeps the time of the use before. Empty until a request
+             *     has carried it.
+             */
+            last_used_at: string | null;
+        };
         /** LogIn */
         LogIn: {
             /** Email */
             email: string;
             /** Password */
             password: string;
+        };
+        /** MakeKey */
+        MakeKey: {
+            /**
+             * Name
+             * @description What to call the key, so that you can tell it from your others: 1 to 64
+             *     characters, without the spaces around them. Two keys may have the same name.
+             */
+            name: string;
         };
         /**
          * Me
@@ -702,6 +888,48 @@ export interface components {
              * @description Its name for people, as `GET /api/models` gives it.
              */
             title: string;
+        };
+        /**
+         * NewKey
+         * @description A key that was just made, with the key itself.
+         */
+        NewKey: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The id to revoke it by: `DELETE /api/keys/{key_id}`.
+             */
+            id: string;
+            /**
+             * Name
+             * @description What its account called it when it was made.
+             */
+            name: string;
+            /**
+             * Prefix
+             * @description The key's first twelve characters, such as `act_7Qm2xZp9`: enough for whoever
+             *     holds the key to tell which one it is, and not enough to use it.
+             */
+            prefix: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Last Used At
+             * @description When a request last carried the key, written at most once a minute: used again
+             *     within the minute, it keeps the time of the use before. Empty until a request
+             *     has carried it.
+             */
+            last_used_at: string | null;
+            /**
+             * Key
+             * @description The whole key, to send as `Authorization: Bearer …` or in `x-api-key`. This
+             *     answer is the only one that ever holds it: Actio keeps only what recognizes it, and
+             *     can't show it again. Keep it as a password is kept.
+             */
+            key: string;
         };
         /**
          * NewMessage
@@ -1419,6 +1647,180 @@ export interface operations {
             };
             /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_keys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyList"];
+                };
+            };
+            /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    make_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MakeKey"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NewKey"];
+                };
+            };
+            /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A guest can't make API keys, nor an account whose plan allows none. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description You have as many API keys as your plan allows, or more. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request doesn't have the expected form. `errors` lists what is wrong, and where. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    revoke_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No session, or it has ended. Start one with `POST /api/session/guest`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description You have no API key with this id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request doesn't have the expected form. `errors` lists what is wrong, and where. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyInUse"];
+                };
+            };
+            /** @description No API key, one that isn't known, mistyped or revoked, or two different keys in `Authorization` and `x-api-key`. `WWW-Authenticate` says `Bearer`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The plan of the key's account allows no API keys. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

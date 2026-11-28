@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Actio",
-    "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** Everything but the health checks needs a session, a guest's included.\n  It lives in a cookie: start one with `POST /api/session/guest`. Without one the\n  answer is 401.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. A request that changes something, sent by a page on another\n  site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`. An\n  answer is written whether or not anyone reads along. It can be joined again, and\n  stopped, by the turn's id.\n- **Usage is limited** per session and per week. `GET /api/usage` says how much is\n  left, and a question that no longer fits is answered 429, with when it will. A plan\n  may also limit how many answers are written for one account at once, and an account\n  reads along with only so many at once: past either, the answer is 429 too.\n",
+    "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** A route needs a session, a guest's included: all but the health checks,\n  the routes that start a session, `DELETE /api/session`, and `GET /api/key`, which\n  takes an API key. A session lives in a cookie: start one with\n  `POST /api/session/guest`. Without one the answer is 401.\n- **API keys.** An account makes them in its session, with `POST /api/keys`, as many as\n  its plan allows, and that answer is the only one that holds a key whole. A request\n  sends a key as `Authorization: Bearer act_…` or in `x-api-key`. One route takes a\n  key, `GET /api/key`, which says what the key is, and takes no session: without a key\n  that is known the answer is 401, and 403 when the plan of the key's account allows\n  none.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. A request that changes something, sent by a page on another\n  site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`. An\n  answer is written whether or not anyone reads along. It can be joined again, and\n  stopped, by the turn's id.\n- **Usage is limited** per session and per week. `GET /api/usage` says how much is\n  left, and a question that no longer fits is answered 429, with when it will. A plan\n  may also limit how many answers are written for one account at once, and an account\n  reads along with only so many at once: past either, the answer is 429 too.\n",
     "version": "0.2.0"
   },
   "paths": {
@@ -409,6 +409,215 @@
             }
           }
         }
+      }
+    },
+    "/api/keys": {
+      "get": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "List Keys",
+        "description": "Your API keys, oldest first, each by its prefix and never whole, and how many\nyour plan lets you have.",
+        "operationId": "list_keys",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session, or it has ended. Start one with `POST /api/session/guest`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Make Key",
+        "description": "Make an API key. The answer holds the whole key, `key`, and no other answer ever\nwill: keep it.\n\n403 for a guest, and for an account whose plan allows no keys; 409 when the account\nhas as many keys as its plan allows, or more. Nothing is made then.",
+        "operationId": "make_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakeKey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NewKey"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session, or it has ended. Start one with `POST /api/session/guest`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A guest can't make API keys, nor an account whose plan allows none.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "You have as many API keys as your plan allows, or more.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request doesn't have the expected form. `errors` lists what is wrong, and where.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/keys/{key_id}": {
+      "delete": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Revoke Key",
+        "description": "Revoke an API key: from the next request it is answered as one that never was.\nThere is no way back.",
+        "operationId": "revoke_key",
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Key Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No session, or it has ended. Start one with `POST /api/session/guest`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "You have no API key with this id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request doesn't have the expected form. `errors` lists what is wrong, and where.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/key": {
+      "get": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Get Key",
+        "description": "What the API key this request carries is, whose it is, and the plan that lets it\nbe used. It takes a key, in `Authorization: Bearer …` or in `x-api-key`, and no\nsession: a session's cookie is not looked at.",
+        "operationId": "get_key",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyInUse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No API key, one that isn't known, mistyped or revoked, or two different keys in `Authorization` and `x-api-key`. `WWW-Authenticate` says `Bearer`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The plan of the key's account allows no API keys.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "x-api-key": []
+          }
+        ]
       }
     },
     "/api/conversations": {
@@ -1346,6 +1555,155 @@
         ],
         "title": "Health"
       },
+      "KeyAccount": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email",
+            "description": "Its email address."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email"
+        ],
+        "title": "KeyAccount",
+        "description": "The account a key belongs to."
+      },
+      "KeyInUse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id",
+            "description": "The id to revoke it by: `DELETE /api/keys/{key_id}`."
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "What its account called it when it was made."
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix",
+            "description": "The key's first twelve characters, such as `act_7Qm2xZp9`: enough for whoever\nholds the key to tell which one it is, and not enough to use it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At",
+            "description": "When a request last carried the key, written at most once a minute: used again\nwithin the minute, it keeps the time of the use before. Empty until a request\nhas carried it."
+          },
+          "account": {
+            "$ref": "#/components/schemas/KeyAccount"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/PlanOut",
+            "description": "The plan of the key's account, as `GET /api/usage` names it."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "created_at",
+          "last_used_at",
+          "account",
+          "plan"
+        ],
+        "title": "KeyInUse",
+        "description": "The key a request carries: what it is, whose it is, and the plan that lets it be\nused."
+      },
+      "KeyList": {
+        "properties": {
+          "keys": {
+            "items": {
+              "$ref": "#/components/schemas/KeyOut"
+            },
+            "type": "array",
+            "title": "Keys",
+            "description": "Your keys, oldest first."
+          },
+          "at_most": {
+            "type": "integer",
+            "title": "At Most",
+            "description": "How many keys your plan lets you have at once: 0 for a guest, and for a plan that\nallows none. A key of an account whose plan allows none stops working, and is\nstill listed, to be revoked."
+          }
+        },
+        "type": "object",
+        "required": [
+          "keys",
+          "at_most"
+        ],
+        "title": "KeyList"
+      },
+      "KeyOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id",
+            "description": "The id to revoke it by: `DELETE /api/keys/{key_id}`."
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "What its account called it when it was made."
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix",
+            "description": "The key's first twelve characters, such as `act_7Qm2xZp9`: enough for whoever\nholds the key to tell which one it is, and not enough to use it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At",
+            "description": "When a request last carried the key, written at most once a minute: used again\nwithin the minute, it keeps the time of the use before. Empty until a request\nhas carried it."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "created_at",
+          "last_used_at"
+        ],
+        "title": "KeyOut",
+        "description": "An API key, as its account sees it in a list: never the key itself."
+      },
       "LogIn": {
         "properties": {
           "email": {
@@ -1365,6 +1723,22 @@
           "password"
         ],
         "title": "LogIn"
+      },
+      "MakeKey": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "description": "What to call the key, so that you can tell it from your others: 1 to 64\ncharacters, without the spaces around them. Two keys may have the same name."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "MakeKey"
       },
       "Me": {
         "properties": {
@@ -1640,6 +2014,60 @@
         ],
         "title": "ModelTitle",
         "description": "A model on offer, by its name and its title."
+      },
+      "NewKey": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id",
+            "description": "The id to revoke it by: `DELETE /api/keys/{key_id}`."
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "What its account called it when it was made."
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix",
+            "description": "The key's first twelve characters, such as `act_7Qm2xZp9`: enough for whoever\nholds the key to tell which one it is, and not enough to use it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At",
+            "description": "When a request last carried the key, written at most once a minute: used again\nwithin the minute, it keeps the time of the use before. Empty until a request\nhas carried it."
+          },
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "description": "The whole key, to send as `Authorization: Bearer …` or in `x-api-key`. This\nanswer is the only one that ever holds it: Actio keeps only what recognizes it, and\ncan't show it again. Keep it as a password is kept."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "created_at",
+          "last_used_at",
+          "key"
+        ],
+        "title": "NewKey",
+        "description": "A key that was just made, with the key itself."
       },
       "NewMessage": {
         "properties": {
@@ -2273,6 +2701,19 @@
         ],
         "title": "Problem",
         "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "description": "An API key, sent as `Authorization: Bearer act_…`.",
+        "scheme": "bearer"
+      },
+      "x-api-key": {
+        "type": "apiKey",
+        "description": "An API key, sent in the `x-api-key` header.",
+        "in": "header",
+        "name": "x-api-key"
       }
     }
   }

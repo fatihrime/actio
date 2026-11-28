@@ -1,4 +1,4 @@
-"""The tables behind accounts and sessions."""
+"""The tables behind accounts, sessions and API keys."""
 
 import uuid
 from datetime import datetime
@@ -61,3 +61,27 @@ class BrowserSession(Base):
     created_at: Mapped[datetime]
     last_seen_at: Mapped[datetime]
     expires_at: Mapped[datetime] = mapped_column(index=True)
+
+
+class ApiKey(Base):
+    """A key that an account made, by which a request says it is that account, until
+    the account revokes it: revoking deletes the row."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str]
+    """What its account calls it. Two keys may have the same name."""
+    prefix: Mapped[str]
+    """The key's first twelve characters, `act_` and eight more: what a list shows, so
+    that whoever holds the key can tell which row it is. No secret, and not unique."""
+    key_hash: Mapped[bytes] = mapped_column(LargeBinary(32), unique=True)
+    """SHA-256 of the whole key. The key itself was shown once, when it was made, so a
+    copy of this table can't be used as anyone."""
+    created_at: Mapped[datetime]
+    last_used_at: Mapped[datetime | None]
+    """When a request last carried it, written at most once a minute, so that using a
+    key isn't a write each time. Empty until a request has."""

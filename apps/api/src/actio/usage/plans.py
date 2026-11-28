@@ -3,9 +3,9 @@
 Both are read from a TOML file, `config/plans.toml`:
 
 - a **price** for each model on offer, in credits per million tokens;
-- **plans:** how many credits a session and a week allow, and how many answers may be
-  written at once. Guests get one plan, and accounts another, unless an account is on
-  one of the others of its own.
+- **plans:** how many credits a session and a week allow, how many answers may be
+  written at once, and how many API keys an account may have. Guests get one plan, and
+  accounts another, unless an account is on one of the others of its own.
 
 `load` reads and checks the file. A mistake raises `PlansError`, which says where the
 file is and what is wrong in it. `Plans` is what the rest of Actio asks: which plan an
@@ -53,6 +53,9 @@ MAX_PRICE = 100_000_000
 """The highest price accepted, in credits per million tokens: a hundred credits a
 token. More than that is a slip of the hand."""
 
+MAX_API_KEYS = 100
+"""The most API keys a plan may let an account have at once."""
+
 _HOUR_MS = 3_600_000
 
 
@@ -85,8 +88,8 @@ class PriceEntry(BaseModel):
 
 
 class PlanEntry(BaseModel):
-    """One `[plans.<name>]` table: how many credits each window allows, and how many
-    answers may be written at once."""
+    """One `[plans.<name>]` table: how many credits each window allows, how many
+    answers may be written at once, and how many API keys an account may have."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -98,6 +101,9 @@ class PlanEntry(BaseModel):
     answers_at_once: int | None = Field(default=None, ge=1)
     """How many answers one account may have being written at the same time, in all its
     conversations. Left out: as many as it asks for."""
+    api_keys: int = Field(default=0, ge=0, le=MAX_API_KEYS)
+    """How many API keys an account on the plan may have at once. Left out, or 0: none.
+    Unlike the limits above, leaving it out gives nothing."""
 
     @model_validator(mode="after")
     def _lets_a_session_reach_its_limit(self) -> Self:
@@ -182,6 +188,8 @@ class Plan:
     week_credits: int | None
     answers_at_once: int | None
     """How many answers an account may have being written at once. `None`: no limit."""
+    api_keys: int
+    """How many API keys an account on it may have at once. 0: none."""
 
 
 class Plans:
@@ -190,7 +198,12 @@ class Plans:
     def __init__(self, file: PlansFile) -> None:
         self._plans = {
             name: Plan(
-                name, entry.title, entry.session_credits, entry.week_credits, entry.answers_at_once
+                name,
+                entry.title,
+                entry.session_credits,
+                entry.week_credits,
+                entry.answers_at_once,
+                entry.api_keys,
             )
             for name, entry in file.plans.items()
         }

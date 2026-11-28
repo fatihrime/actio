@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from actio import __version__, worker
 from actio.api import catalog as catalog_routes
-from actio.api import conversations, health, identity, problems, turns, usage
+from actio.api import conversations, health, identity, keys, problems, turns, usage
 from actio.api.same_origin import SameOriginOnly
 from actio.catalog import Catalog, open_catalog
 from actio.chat.events import TurnEvents
@@ -28,9 +28,16 @@ from actio.usage.plans import load as load_plans
 DESCRIPTION = """\
 Actio's HTTP API, which its web app is built on.
 
-- **Sessions.** Everything but the health checks needs a session, a guest's included.
-  It lives in a cookie: start one with `POST /api/session/guest`. Without one the
-  answer is 401.
+- **Sessions.** A route needs a session, a guest's included: all but the health checks,
+  the routes that start a session, `DELETE /api/session`, and `GET /api/key`, which
+  takes an API key. A session lives in a cookie: start one with
+  `POST /api/session/guest`. Without one the answer is 401.
+- **API keys.** An account makes them in its session, with `POST /api/keys`, as many as
+  its plan allows, and that answer is the only one that holds a key whole. A request
+  sends a key as `Authorization: Bearer act_…` or in `x-api-key`. One route takes a
+  key, `GET /api/key`, which says what the key is, and takes no session: without a key
+  that is known the answer is 401, and 403 when the plan of the key's account allows
+  none.
 - **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):
   see the `Problem` schema. A request that changes something, sent by a page on another
   site, is answered 403.
@@ -150,6 +157,7 @@ def create_app(
     app.add_middleware(SameOriginOnly, origin=settings.public_url)
     app.include_router(health.router)
     app.include_router(identity.router)
+    app.include_router(keys.router)
     app.include_router(conversations.router)
     app.include_router(turns.router)
     app.include_router(catalog_routes.router)

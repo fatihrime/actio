@@ -147,6 +147,12 @@ def test_the_shipped_files_have_a_plan_for_developers_that_no_account_has_by_its
     assert dev is not None
     assert "dev" not in (file.guests, file.accounts)
     assert dev.title == "Developer"
+    # The one plan of the two files whose accounts may make API keys (ADR 0033).
+    assert [(plan.name, plan.api_keys) for plan in map(loaded.named, loaded.names()) if plan] == [
+        ("guest", 0),
+        ("free", 0),
+        ("dev", 10),
+    ]
     limits = [
         (dev.session_credits, accounts.session_credits),
         (dev.week_credits, accounts.week_credits),
@@ -169,6 +175,21 @@ def test_a_file_says_what_models_cost_and_what_each_plan_allows(tmp_path: Path) 
     assert file.plans["staff"].session_credits is None
     assert file.plans["guest"].answers_at_once == 2
     assert file.plans["free"].answers_at_once is None  # as many as it asks for
+    # Unlike the limits, a plan that says nothing of API keys gives none.
+    assert [entry.api_keys for entry in file.plans.values()] == [0, 0, 0]
+    assert [plan.api_keys for plan in map(Plans(file).named, file.plans) if plan] == [0, 0, 0]
+
+
+@pytest.mark.parametrize("keys", [0, 1, 100])
+def test_a_plan_says_how_many_api_keys_an_account_may_have(tmp_path: Path, keys: int) -> None:
+    file = read_file(
+        written(tmp_path, GOOD.replace('title = "Staff"', f'title = "Staff"\napi_keys = {keys}'))
+    )
+
+    staff = Plans(file).named("staff")
+
+    assert staff is not None
+    assert staff.api_keys == keys
 
 
 def test_a_missing_file_says_where_it_looked_and_how_to_point_elsewhere(tmp_path: Path) -> None:
@@ -253,6 +274,21 @@ MISTAKES = {
         'answers_at_once = "two"',
         "plans.guest.answers_at_once",
     ),
+    "fewer API keys than none": (
+        'title = "Staff"',
+        'title = "Staff"\napi_keys = -1',
+        "plans.staff.api_keys",
+    ),
+    "more API keys than a plan may give": (
+        'title = "Staff"',
+        'title = "Staff"\napi_keys = 101',
+        "plans.staff.api_keys",
+    ),
+    "API keys written as a word": (
+        'title = "Staff"',
+        'title = "Staff"\napi_keys = "ten"',
+        "plans.staff.api_keys",
+    ),
     "the same plan twice": ("[plans.staff]", "[plans.free]", "valid TOML"),
     "a line that stops half-way": ("session_hours = 5", "session_hours = ", "valid TOML"),
 }
@@ -269,6 +305,7 @@ def test_a_mistake_in_the_file_is_named(tmp_path: Path, mistake: str) -> None:
 
     assert str(path) in str(failure.value)
     assert fault in str(failure.value)
+    assert "\n" not in str(failure.value)  # one line
 
 
 @pytest.mark.parametrize("missing", ["[prices.standard]", "[plans.guest]"])
