@@ -4,40 +4,10 @@
 // there is refused. The stack's plan for accounts allows two keys
 // (deploy/e2e/config/plans.toml). What the section says in each of its states is the
 // component tests' (components/account/api-keys.test.tsx).
-import { randomUUID } from "node:crypto";
+import type { APIRequestContext } from "@playwright/test";
 
-import type { APIRequestContext, Locator, Page } from "@playwright/test";
-
-import { Chat, expect, test } from "./chat";
-
-const PASSWORD = "correct horse battery";
-
-/** A key's form (ADR 0033): `act_`, 8 digits and ASCII letters, `_`, and 43 more. */
-const A_KEY = /^act_[0-9A-Za-z]{8}_[0-9A-Za-z]{43}$/;
-
-/** An account of its own, signed up before any question is asked, in its place: its
- * address, and the section of its keys. */
-async function anAccountsKeys(
-  chat: Chat,
-  page: Page,
-): Promise<{ email: string; keys: Locator }> {
-  const email = `${randomUUID()}@example.com`;
-  await chat.open();
-  await expect(chat.box).toBeVisible();
-  await chat.signUp(email, PASSWORD);
-  await chat.accountLink(email).click();
-  await expect(page).toHaveTitle("Your account · Actio");
-  return { email, keys: page.getByRole("region", { name: "API keys" }) };
-}
-
-/** Make a key in the section, and hand back the whole of it, as the page shows it. */
-async function make(keys: Locator, name: string): Promise<string> {
-  await keys.getByLabel("Name", { exact: true }).fill(name);
-  await keys.getByRole("button", { name: "Make a key" }).click();
-  const box = keys.getByRole("textbox", { name: `Your new key, “${name}”` });
-  await expect(box).toHaveValue(A_KEY);
-  return box.inputValue();
-}
+import { anAccountsKeys, make } from "./api-keys";
+import { expect, test } from "./chat";
 
 /** What the API answers a request of the test's own, which carries `key` and no
  * cookie: nothing of the page's session. */
