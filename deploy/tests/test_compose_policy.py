@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from actio.api import problems, ui_stream
+from actio.api import openai_format, problems, ui_stream
 from actio.api.turns import MAX_QUESTION_CHARS
 from actio.chat.running import GRACE, LAST_WORDS
 from actio.cli import WAITS_FOR_REQUESTS_S
@@ -404,8 +404,12 @@ def test_the_proxy_takes_every_request_the_api_would_and_refuses_much_larger_one
     `\\u` escapes, as a client that escapes everything outside ASCII writes it (Python's
     `json.dumps` does). The API counts it as one character.
 
-    And the refusal is a problem document, as every error of the API is, so that the
-    page has words to show. See ADR 0023."""
+    And the refusal is in the API's own form: a problem document, as every error of the
+    API is, so that the page has words to show; and on the developer gateway, `/v1/…`,
+    OpenAI's error, as every error there is, so that an SDK reads it, with the same
+    sentence but for the chat's advice. The gateway's matcher is written from the API's
+    own rule for its paths: Caddy's also takes other letters' case and a doubled slash,
+    which no SDK sends. See ADR 0023 and ADR 0034."""
     room_for_the_rest = 64 * 1024  # ids, a model's name, a flag, 16 parts' keys: far less
     longest_character = len(json.dumps("\U0001f6b2")) - 2  # a bicycle: two escapes
     caddyfile = (ROOT / "deploy/caddy/Caddyfile").read_text()
@@ -413,9 +417,14 @@ def test_the_proxy_takes_every_request_the_api_would_and_refuses_much_larger_one
     [(number, unit)] = re.findall(
         r"request_body\s*\{\s*max_size\s+(\d+)([KM]?i?B)\s*\}", api_routes
     )
-    refusal = caddy_block(caddyfile, "handle_errors 413 {")
-    [body] = re.findall(r"respond `(.+)` 413", refusal)
+    refusal = without_comments(caddy_block(caddyfile, "handle_errors 413 {"))
+    [gateway] = re.findall(r"@gateway\s+path\s+(\S+)", refusal)
+    on_the_gateway = caddy_block(refusal, "handle @gateway {")
+    elsewhere = caddy_block(refusal, "handle {")
+    [body] = re.findall(r"respond `(.+)` 413", elsewhere)
     problem = json.loads(body)
+    [body_on_the_gateway] = re.findall(r"respond `(.+)` 413", on_the_gateway)
+    error = json.loads(body_on_the_gateway)
 
     assert longest_character == 12
     assert (
@@ -423,9 +432,23 @@ def test_the_proxy_takes_every_request_the_api_would_and_refuses_much_larger_one
         >= longest_character * MAX_QUESTION_CHARS + room_for_the_rest
     )
     assert caddyfile.count("request_body") == 1  # the web app's own routes are its own
-    assert "header Content-Type application/problem+json" in refusal
+    assert len(re.findall(r"respond `", refusal)) == 2
+    assert "header Content-Type application/problem+json" in elsewhere
     assert set(problem) == {"type", "title", "status", "detail"}
     assert (problem["type"], problem["status"]) == ("about:blank", 413)
+    assert gateway == f"{problems.GATEWAY}*"  # Caddy's `*` at a path's end: anything
+    assert "header Content-Type application/json" in on_the_gateway
+    assert error == {
+        "error": {
+            "message": error["error"]["message"],
+            "type": openai_format.error_type(413),
+            "param": None,
+            "code": None,
+        }
+    }
+    assert (
+        problem["detail"] == f"{error['error']['message']} Shorten the message, and send it again."
+    )
 
 
 def test_the_proxy_compresses_the_apis_json_and_never_an_answers_stream() -> None:

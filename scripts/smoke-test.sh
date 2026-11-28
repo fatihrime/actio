@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks a running stack (`make dev` or `make up`) through Caddy: the web page, the API's
-# health and readiness, the API docs, a guest session, the models and the usage limits.
+# health and readiness, the API docs, a guest session, the models and the usage limits,
+# and that the developer gateway refuses a request without an API key.
 # Retries for up to a minute while the stack starts.
 # Usage: scripts/smoke-test.sh [base URL]    (default: http://localhost:8080)
 set -uo pipefail
@@ -76,6 +77,17 @@ if [[ $usage == *'"plan":{"id":"'*'"windows":['* ]]; then
   printf '  ✓ %s\n' "usage limits"
 else
   printf '  ✗ %s: GET /api/usage did not answer with a plan and its limits\n' "usage limits"
+  failures=$((failures + 1))
+fi
+
+# The developer gateway, through the proxy, which sends /v1/* to the API: it takes an API
+# key, and without one it answers 401 in OpenAI's form. Written apart from `check`, which
+# fails at any status that isn't a success.
+gateway="$(curl --silent --max-time 5 --write-out '%{http_code}' "$base/v1/models")"
+if [[ ${gateway: -3} == 401 && $gateway == *'"code":"invalid_api_key"'* ]]; then
+  printf '  ✓ %s\n' "gateway refuses a request without a key"
+else
+  printf '  ✗ %s: GET /v1/models without a key did not answer 401 with "code":"invalid_api_key"\n' "gateway refuses a request without a key"
   failures=$((failures + 1))
 fi
 

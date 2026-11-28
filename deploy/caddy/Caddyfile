@@ -41,10 +41,23 @@
 		}
 	}
 
-	# Refused for its size: in the API's own error format, so that the page can say why.
+	# Refused for its size: in the API's own error format, so that the page can say why,
+	# and on the developer gateway, /v1/*, in OpenAI's, as every error there is, so that
+	# the SDKs read it. Told apart by the matcher that sends /v1/* to the API, written
+	# from the API's own rule for the gateway's paths (actio.api.problems): Caddy's also
+	# takes other letters' case and a doubled slash, which no SDK sends.
+	# deploy/tests/test_compose_policy.py holds the two forms.
+	# See docs/adr/0034-the-gateway-answers-in-openais-form.md.
 	handle_errors 413 {
-		header Content-Type application/problem+json
-		respond `{"type":"about:blank","title":"Content Too Large","status":413,"detail":"This is too much to send at once: Actio takes at most 2 MB in one request. Shorten the message, and send it again."}` 413
+		@gateway path /v1/*
+		handle @gateway {
+			header Content-Type application/json
+			respond `{"error":{"message":"This is too much to send at once: Actio takes at most 2 MB in one request.","type":"invalid_request_error","param":null,"code":null}}` 413
+		}
+		handle {
+			header Content-Type application/problem+json
+			respond `{"type":"about:blank","title":"Content Too Large","status":413,"detail":"This is too much to send at once: Actio takes at most 2 MB in one request. Shorten the message, and send it again."}` 413
+		}
 	}
 }
 
