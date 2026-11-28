@@ -37,6 +37,7 @@ RECORDED = Path(__file__).parents[1] / "openapi.json"
 RECORD = os.environ.get("ACTIO_RECORD_OPENAPI") == "1"
 
 PROBLEM = {"$ref": "#/components/schemas/Problem"}
+OPENAIS = {"$ref": "#/components/schemas/OpenAIErrorResponse"}
 METHODS = {"get", "put", "post", "delete", "patch"}
 
 
@@ -115,9 +116,10 @@ def test_every_model_of_the_api_is_a_described_one() -> None:
     assert {name for name, made in models.items() if not issubclass(made, Described)} == set()
 
 
-async def test_every_error_is_described_as_a_problem_document(
+async def test_every_error_is_described_as_a_problem_document_or_on_the_gateway_as_openais(
     description: dict[str, Any],
 ) -> None:
+    """Under `/v1/` every error is OpenAI's, as the gateway answers it (ADR 0034)."""
     # /api/readyz answers 503 with its own report of what is missing.
     own_body = {("GET /api/readyz", "503")}
     errors = {
@@ -126,11 +128,38 @@ async def test_every_error_is_described_as_a_problem_document(
         for status, response in operation["responses"].items()
         if status[0] in "45" and (name, status) not in own_body
     }
+    on_the_gateway = {where for where in errors if where[0].split(" ")[1].startswith("/v1/")}
 
     assert len(errors) > 10
+    assert on_the_gateway == {
+        ("GET /v1/models", "401"),
+        ("GET /v1/models", "403"),
+        ("GET /v1/models/{model}", "401"),
+        ("GET /v1/models/{model}", "403"),
+        ("GET /v1/models/{model}", "404"),
+    }
     for where, response in errors.items():
-        assert response["content"] == {"application/problem+json": {"schema": PROBLEM}}, where
+        if where in on_the_gateway:
+            assert response["content"] == {"application/json": {"schema": OPENAIS}}, where
+        else:
+            assert response["content"] == {"application/problem+json": {"schema": PROBLEM}}, where
         assert response["description"], where
+
+
+async def test_no_operation_of_the_gateway_claims_a_422(description: dict[str, Any]) -> None:
+    """The framework describes one for a route with a path parameter. No route under
+    `/v1/` answers one: none takes a body or a query, and a path's text is never
+    refused."""
+    on_the_gateway = {
+        name: operation
+        for name, operation in operations(description).items()
+        if name.split(" ")[1].startswith("/v1/")
+    }
+
+    assert set(on_the_gateway) == {"GET /v1/models", "GET /v1/models/{model}"}
+    assert on_the_gateway["GET /v1/models/{model}"]["parameters"][0]["in"] == "path"
+    for name, operation in on_the_gateway.items():
+        assert "422" not in operation["responses"], name
 
 
 async def test_an_invalid_request_is_described_as_the_problem_it_gets(

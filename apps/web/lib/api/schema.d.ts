@@ -484,6 +484,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Gateway Models
+         * @description Every model on offer, in the form OpenAI's API lists its own, by the names to ask
+         *     for them by, in the order `GET /api/models` lists them in. Whether each can answer
+         *     right now isn't said here: `GET /api/models` says it.
+         */
+        get: operations["list_gateway_models"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/models/{model}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Gateway Model
+         * @description One model on offer, by the name to ask for it by, in the form OpenAI's API gives
+         *     one. 404 for a model nobody offers.
+         */
+        get: operations["get_gateway_model"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -945,6 +988,53 @@ export interface components {
             /** Parts */
             parts: components["schemas"]["TextPart"][];
         };
+        /**
+         * OpenAIModel
+         * @description A model on offer, in the form OpenAI's API lists one.
+         */
+        OpenAIModel: {
+            /**
+             * Id
+             * @description The name to ask for it by, such as `standard`: its name here, which stays the same
+             *     when what runs behind it changes. Never its name on the server that runs it.
+             */
+            id: string;
+            /**
+             * Object
+             * @description Always `model`.
+             * @constant
+             */
+            object: "model";
+            /**
+             * Created
+             * @description Always 0: no moment is kept at which a model was made. Where OpenAI's API says
+             *     one, it is a Unix time, in seconds.
+             */
+            created: number;
+            /**
+             * Owned By
+             * @description Always `actio`.
+             */
+            owned_by: string;
+        };
+        /**
+         * OpenAIModelList
+         * @description Every model on offer, in the form OpenAI's API lists its own.
+         */
+        OpenAIModelList: {
+            /**
+             * Object
+             * @description Always `list`.
+             * @constant
+             */
+            object: "list";
+            /**
+             * Data
+             * @description Every model on offer, in the order `GET /api/models` lists them in, whichever plan
+             *     the key's account is on.
+             */
+            data: components["schemas"]["OpenAIModel"][];
+        };
         Part: components["schemas"]["TextPart"] | components["schemas"]["ReasoningPart"];
         /** PasswordChange */
         PasswordChange: {
@@ -1252,9 +1342,10 @@ export interface components {
         /**
          * Problem
          * @description An error, as RFC 9457 problem details. Every error this API answers looks like
-         *     this. Some carry more members: `errors` (422: what is wrong with the request, and
-         *     where), `retry_after` (429: seconds to wait), `window`, `resets_at` and
-         *     `alternatives` (429: the usage limit that is reached, when it starts over, and the
+         *     this, but under `/v1/`, where it is OpenAI's (`OpenAIErrorResponse`). Some carry
+         *     more members: `errors` (422: what is wrong with the request, and where),
+         *     `retry_after` (429: seconds to wait), `window`, `resets_at` and `alternatives`
+         *     (429: the usage limit that is reached, when it starts over, and the
          *     models that cost nothing), `at_once` (429: how many answers the plan allows to be
          *     written at once), `model` and `model_status` (503: the model that can't answer),
          *     `model` alone (429: the model asked, when no model that could answer can take the
@@ -1280,6 +1371,46 @@ export interface components {
             detail: string;
         } & {
             [key: string]: unknown;
+        };
+        /**
+         * OpenAIError
+         * @description What went wrong, as OpenAI's API says it.
+         */
+        OpenAIError: {
+            /**
+             * Message
+             * @description What happened, in words a person can act on.
+             */
+            message: string;
+            /**
+             * Type
+             * @description What kind of error it is, by its status alone: `rate_limit_error` for a 429,
+             *     `service_unavailable_error` for a 503, `server_error` for any other status from 500
+             *     up, and `invalid_request_error` for every other status.
+             */
+            type: string;
+            /**
+             * Param
+             * @description The member of the request that is wrong: always `null`, since no route here takes
+             *     a body.
+             */
+            param: string | null;
+            /**
+             * Code
+             * @description A word a program can tell the error by, where there is one: `invalid_api_key` for
+             *     any 401, a key missing, not known, or one of two different keys, and
+             *     `model_not_found` for a model nobody offers. Otherwise `null`.
+             */
+            code: string | null;
+        };
+        /**
+         * OpenAIErrorResponse
+         * @description An error under `/v1`, in the form OpenAI's API answers one, which its SDKs read.
+         *     It carries the status and the headers of the error, such as `WWW-Authenticate` on
+         *     a 401 and `Allow` on a 405.
+         */
+        OpenAIErrorResponse: {
+            error: components["schemas"]["OpenAIError"];
         };
     };
     responses: never;
@@ -2404,6 +2535,93 @@ export interface operations {
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_gateway_models: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenAIModelList"];
+                };
+            };
+            /** @description No API key, one that isn't known, mistyped or revoked, or two different keys in `Authorization` and `x-api-key`. `WWW-Authenticate` says `Bearer`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenAIErrorResponse"];
+                };
+            };
+            /** @description The plan of the key's account allows no API keys. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenAIErrorResponse"];
+                };
+            };
+        };
+    };
+    get_gateway_model: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenAIModel"];
+                };
+            };
+            /** @description No API key, one that isn't known, mistyped or revoked, or two different keys in `Authorization` and `x-api-key`. `WWW-Authenticate` says `Bearer`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenAIErrorResponse"];
+                };
+            };
+            /** @description The plan of the key's account allows no API keys. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenAIErrorResponse"];
+                };
+            };
+            /** @description No model is called that. `code` says `model_not_found`. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenAIErrorResponse"];
                 };
             };
         };

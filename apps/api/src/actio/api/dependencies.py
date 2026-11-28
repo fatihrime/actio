@@ -287,8 +287,8 @@ def no_keys_on(plan: Plan) -> str:
 
 
 CurrentKey = Annotated[KeyUse, Depends(get_key_use)]
-"""For a route that takes an API key instead of a session: `GET /api/key` is its one
-user."""
+"""For a route that takes an API key instead of a session: `GET /api/key`, and the
+gateway's routes under `/v1` (`actio.api.gateway`), whose errors are OpenAI's."""
 
 NO_KEY: dict[int | str, dict[str, Any]] = {
     401: {

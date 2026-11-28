@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Actio",
-    "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** A route needs a session, a guest's included: all but the health checks,\n  the routes that start a session, `DELETE /api/session`, and `GET /api/key`, which\n  takes an API key. A session lives in a cookie: start one with\n  `POST /api/session/guest`. Without one the answer is 401.\n- **API keys.** An account makes them in its session, with `POST /api/keys`, as many as\n  its plan allows, and that answer is the only one that holds a key whole. A request\n  sends a key as `Authorization: Bearer act_…` or in `x-api-key`. One route takes a\n  key, `GET /api/key`, which says what the key is, and takes no session: without a key\n  that is known the answer is 401, and 403 when the plan of the key's account allows\n  none.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. A request that changes something, sent by a page on another\n  site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`. An\n  answer is written whether or not anyone reads along. It can be joined again, and\n  stopped, by the turn's id.\n- **Usage is limited** per session and per week. `GET /api/usage` says how much is\n  left, and a question that no longer fits is answered 429, with when it will. A plan\n  may also limit how many answers are written for one account at once, and an account\n  reads along with only so many at once: past either, the answer is 429 too.\n",
+    "description": "Actio's HTTP API, which its web app is built on.\n\n- **Sessions.** A route needs a session, a guest's included: all but the health checks,\n  the routes that start a session, `DELETE /api/session`, and those that take an API\n  key. A session lives in a cookie: start one with `POST /api/session/guest`. Without\n  one the answer is 401.\n- **API keys.** An account makes them in its session, with `POST /api/keys`, as many as\n  its plan allows, and that answer is the only one that holds a key whole. A request\n  sends a key as `Authorization: Bearer act_…` or in `x-api-key`. `GET /api/key`, which\n  says what the key is, and the routes under `/v1`, which list the models on offer in\n  the form OpenAI's API has, take a key and no session: without a key that is known\n  the answer is 401, and 403 when the plan of the key's account allows none.\n- **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):\n  see the `Problem` schema. Under `/v1/` it is OpenAI's error instead, which OpenAI's\n  SDKs read: see `OpenAIErrorResponse`. A request that changes something, sent by a\n  page on another site, is answered 403.\n- **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`. An\n  answer is written whether or not anyone reads along. It can be joined again, and\n  stopped, by the turn's id.\n- **Usage is limited** per session and per week. `GET /api/usage` says how much is\n  left, and a question that no longer fits is answered 429, with when it will. A plan\n  may also limit how many answers are written for one account at once, and an account\n  reads along with only so many at once: past either, the answer is 429 too.\n",
     "version": "0.2.0"
   },
   "paths": {
@@ -1367,6 +1367,127 @@
           }
         }
       }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "List Gateway Models",
+        "description": "Every model on offer, in the form OpenAI's API lists its own, by the names to ask\nfor them by, in the order `GET /api/models` lists them in. Whether each can answer\nright now isn't said here: `GET /api/models` says it.",
+        "operationId": "list_gateway_models",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIModelList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No API key, one that isn't known, mistyped or revoked, or two different keys in `Authorization` and `x-api-key`. `WWW-Authenticate` says `Bearer`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The plan of the key's account allows no API keys.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "x-api-key": []
+          }
+        ]
+      }
+    },
+    "/v1/models/{model}": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Get Gateway Model",
+        "description": "One model on offer, by the name to ask for it by, in the form OpenAI's API gives\none. 404 for a model nobody offers.",
+        "operationId": "get_gateway_model",
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "x-api-key": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIModel"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No API key, one that isn't known, mistyped or revoked, or two different keys in `Authorization` and `x-api-key`. `WWW-Authenticate` says `Bearer`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The plan of the key's account allows no API keys.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No model is called that. `code` says `model_not_found`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2096,6 +2217,65 @@
         "title": "NewMessage",
         "description": "A question, as its sender made it."
       },
+      "OpenAIModel": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "The name to ask for it by, such as `standard`: its name here, which stays the same\nwhen what runs behind it changes. Never its name on the server that runs it."
+          },
+          "object": {
+            "type": "string",
+            "const": "model",
+            "title": "Object",
+            "description": "Always `model`."
+          },
+          "created": {
+            "type": "integer",
+            "title": "Created",
+            "description": "Always 0: no moment is kept at which a model was made. Where OpenAI's API says\none, it is a Unix time, in seconds."
+          },
+          "owned_by": {
+            "type": "string",
+            "title": "Owned By",
+            "description": "Always `actio`."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "object",
+          "created",
+          "owned_by"
+        ],
+        "title": "OpenAIModel",
+        "description": "A model on offer, in the form OpenAI's API lists one."
+      },
+      "OpenAIModelList": {
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "list",
+            "title": "Object",
+            "description": "Always `list`."
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/OpenAIModel"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "Every model on offer, in the order `GET /api/models` lists them in, whichever plan\nthe key's account is on."
+          }
+        },
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "title": "OpenAIModelList",
+        "description": "Every model on offer, in the form OpenAI's API lists its own."
+      },
       "Part": {
         "oneOf": [
           {
@@ -2671,7 +2851,7 @@
       },
       "Problem": {
         "additionalProperties": true,
-        "description": "An error, as RFC 9457 problem details. Every error this API answers looks like\nthis. Some carry more members: `errors` (422: what is wrong with the request, and\nwhere), `retry_after` (429: seconds to wait), `window`, `resets_at` and\n`alternatives` (429: the usage limit that is reached, when it starts over, and the\nmodels that cost nothing), `at_once` (429: how many answers the plan allows to be\nwritten at once), `model` and `model_status` (503: the model that can't answer),\n`model` alone (429: the model asked, when no model that could answer can take the\nmessage right now), `turn_id` and `turn_status` (409: the turn in the way).",
+        "description": "An error, as RFC 9457 problem details. Every error this API answers looks like\nthis, but under `/v1/`, where it is OpenAI's (`OpenAIErrorResponse`). Some carry\nmore members: `errors` (422: what is wrong with the request, and where),\n`retry_after` (429: seconds to wait), `window`, `resets_at` and `alternatives`\n(429: the usage limit that is reached, when it starts over, and the\nmodels that cost nothing), `at_once` (429: how many answers the plan allows to be\nwritten at once), `model` and `model_status` (503: the model that can't answer),\n`model` alone (429: the model asked, when no model that could answer can take the\nmessage right now), `turn_id` and `turn_status` (409: the turn in the way).",
         "properties": {
           "type": {
             "description": "Always `about:blank`: the status says what kind of problem it is.",
@@ -2700,6 +2880,66 @@
           "detail"
         ],
         "title": "Problem",
+        "type": "object"
+      },
+      "OpenAIError": {
+        "description": "What went wrong, as OpenAI's API says it.",
+        "properties": {
+          "message": {
+            "description": "What happened, in words a person can act on.",
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "description": "What kind of error it is, by its status alone: `rate_limit_error` for a 429,\n`service_unavailable_error` for a 503, `server_error` for any other status from 500\nup, and `invalid_request_error` for every other status.",
+            "title": "Type",
+            "type": "string"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The member of the request that is wrong: always `null`, since no route here takes\na body.",
+            "title": "Param"
+          },
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A word a program can tell the error by, where there is one: `invalid_api_key` for\nany 401, a key missing, not known, or one of two different keys, and\n`model_not_found` for a model nobody offers. Otherwise `null`.",
+            "title": "Code"
+          }
+        },
+        "required": [
+          "message",
+          "type",
+          "param",
+          "code"
+        ],
+        "title": "OpenAIError",
+        "type": "object"
+      },
+      "OpenAIErrorResponse": {
+        "description": "An error under `/v1`, in the form OpenAI's API answers one, which its SDKs read.\nIt carries the status and the headers of the error, such as `WWW-Authenticate` on\na 401 and `Allow` on a 405.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/OpenAIError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "OpenAIErrorResponse",
         "type": "object"
       }
     },

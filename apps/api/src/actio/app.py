@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from actio import __version__, worker
 from actio.api import catalog as catalog_routes
-from actio.api import conversations, health, identity, keys, problems, turns, usage
+from actio.api import conversations, gateway, health, identity, keys, problems, turns, usage
 from actio.api.same_origin import SameOriginOnly
 from actio.catalog import Catalog, open_catalog
 from actio.chat.events import TurnEvents
@@ -29,18 +29,19 @@ DESCRIPTION = """\
 Actio's HTTP API, which its web app is built on.
 
 - **Sessions.** A route needs a session, a guest's included: all but the health checks,
-  the routes that start a session, `DELETE /api/session`, and `GET /api/key`, which
-  takes an API key. A session lives in a cookie: start one with
-  `POST /api/session/guest`. Without one the answer is 401.
+  the routes that start a session, `DELETE /api/session`, and those that take an API
+  key. A session lives in a cookie: start one with `POST /api/session/guest`. Without
+  one the answer is 401.
 - **API keys.** An account makes them in its session, with `POST /api/keys`, as many as
   its plan allows, and that answer is the only one that holds a key whole. A request
-  sends a key as `Authorization: Bearer act_…` or in `x-api-key`. One route takes a
-  key, `GET /api/key`, which says what the key is, and takes no session: without a key
-  that is known the answer is 401, and 403 when the plan of the key's account allows
-  none.
+  sends a key as `Authorization: Bearer act_…` or in `x-api-key`. `GET /api/key`, which
+  says what the key is, and the routes under `/v1`, which list the models on offer in
+  the form OpenAI's API has, take a key and no session: without a key that is known
+  the answer is 401, and 403 when the plan of the key's account allows none.
 - **Errors.** Every error is an RFC 9457 problem document (`application/problem+json`):
-  see the `Problem` schema. A request that changes something, sent by a page on another
-  site, is answered 403.
+  see the `Problem` schema. Under `/v1/` it is OpenAI's error instead, which OpenAI's
+  SDKs read: see `OpenAIErrorResponse`. A request that changes something, sent by a
+  page on another site, is answered 403.
 - **Answers from a model** are streamed: see `POST /api/conversations/{id}/turns`. An
   answer is written whether or not anyone reads along. It can be joined again, and
   stopped, by the turn's id.
@@ -162,6 +163,7 @@ def create_app(
     app.include_router(turns.router)
     app.include_router(catalog_routes.router)
     app.include_router(usage.router)
+    app.include_router(gateway.router)
     return app
 
 
